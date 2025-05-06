@@ -42,7 +42,7 @@ if (!fs.existsSync(tempDir)) {
 connectDB();
 
 app.use(cors({
-  origin: 'https://airuter-frontend-rz1g.vercel.app',
+  origin: 'https://www.airuter.com',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
