@@ -20,7 +20,7 @@ exports.scheduleInterview = async (req, res) => {
     }
 
     const roomId = uuidv4();
-    const interviewLink = `https://auriter-frontend.vercel.app/interview/${roomId}`;
+    const interviewLink = `https://www.airuter.com/interview/${roomId}`;
 
     let interviewQuestions = questions;
     if (!interviewQuestions) {

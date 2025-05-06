@@ -13,7 +13,7 @@ const { protect } = require('../middleware/auth');
 passport.use(new GoogleStrategy({
   clientID: GOOGLE_CLIENT_ID,
   clientSecret: GOOGLE_CLIENT_SECRET,
-  callbackURL: "https://auriter-backen.onrender.com/api/auth/google/callback"
+  callbackURL: "https://airuter-backend.onrender.com/api/auth/google/callback"
 },
 async (accessToken, refreshToken, profile, done) => {
   try {
@@ -88,10 +88,10 @@ router.get('/google/callback',
       // If the user role is pending selection or doesn't have a proper role yet
       if (user.role === 'pendingSelection' || !['jobSeeker', 'recruiter'].includes(user.role)) {
         // Redirect to role selection page with token
-        return res.redirect(`https://auriter-frontend.vercel.app/auth/callback?token=${token}&requiresRole=true`);
+        return res.redirect(`https://www.airuter.com/auth/callback?token=${token}&requiresRole=true`);
       } else {
         // User already has a valid role, complete auth flow
-        return res.redirect(`https://auriter-frontend.vercel.app/auth/callback?token=${token}&role=${user.role}`);
+        return res.redirect(`https://www.airuter.com/auth/callback?token=${token}&role=${user.role}`);
       }
     })(req, res, next);
   }
