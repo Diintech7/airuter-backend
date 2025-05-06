@@ -8,8 +8,7 @@ const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, JWT_SECRET } = require('../auth/
 
 const AdminProfile = require('../models/AdminProfile');
 const { protect } = require('../middleware/auth');
-// Passport Google Strategy
-// In auth.js, modify the Google Strategy
+// Update the Google Strategy in your auth.js file
 passport.use(new GoogleStrategy({
   clientID: GOOGLE_CLIENT_ID,
   clientSecret: GOOGLE_CLIENT_SECRET,
@@ -24,20 +23,33 @@ async (accessToken, refreshToken, profile, done) => {
       return done(new Error('No email found in Google profile'), null);
     }
     
+    const email = profile.emails[0].value;
+    
+    // First try to find the user by Google ID
     let user = await User.findOne({ googleId: profile.id });
     
     if (!user) {
-      // Create user without role - we'll require role selection after auth
-      user = new User({
-        googleId: profile.id,
-        name: profile.displayName || 'Google User',
-        email: profile.emails[0].value,
-        password: 'googleAuth', // You might want to handle this differently
-        role: 'pendingSelection' // Add a temporary role to pass validation
-      });
+      // If not found by Google ID, try to find by email
+      user = await User.findOne({ email: email });
       
-      // Save the user
-      await user.save();
+      if (user) {
+        // User exists with this email but doesn't have Google ID yet
+        // Update the user with Google ID
+        user.googleId = profile.id;
+        await user.save();
+      } else {
+        // Create a new user if not found by email either
+        user = new User({
+          googleId: profile.id,
+          name: profile.displayName || 'Google User',
+          email: email,
+          password: 'googleAuth', // You might want to handle this differently
+          role: 'pendingSelection' // Add a temporary role to pass validation
+        });
+        
+        // Save the user
+        await user.save();
+      }
     }
     
     return done(null, user);
@@ -45,8 +57,7 @@ async (accessToken, refreshToken, profile, done) => {
     console.error("Google auth error:", error);
     return done(error, null);
   }
-}
-));
+}));
 
 // Helper function to generate JWT
 const generateToken = (id) => {
