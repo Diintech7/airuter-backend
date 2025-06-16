@@ -50,7 +50,7 @@ if (!fs.existsSync(tempDir)) {
 connectDB();
 
 app.use(cors({
-  origin: 'www.airuter.com',
+  origin: 'https://airuter-backend.onrender.com',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true

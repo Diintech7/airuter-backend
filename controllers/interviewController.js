@@ -20,7 +20,7 @@ exports.scheduleInterview = async (req, res) => {
     }
 
     const roomId = uuidv4();
-    const interviewLink = `www.airuter.com/interview/${roomId}`;
+    const interviewLink = `https://airuter-backend.onrender.com/interview/${roomId}`;
 
     let interviewQuestions = questions;
     if (!interviewQuestions) {
