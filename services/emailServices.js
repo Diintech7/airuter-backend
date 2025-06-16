@@ -58,7 +58,7 @@ const getCandidateCredentialsTemplate = (candidateName, email, password, partner
                 </ul>
                 
                 <div style="text-align: center;">
-                    <a href="${process.env.FRONTEND_URL || 'https://airuter-backend.onrender.com'}/candidate/login" class="button">
+                    <a href="${process.env.FRONTEND_URL || 'https://www.airuter.com'}/candidate/login" class="button">
                         Login to Your Account
                     </a>
                 </div>
@@ -113,7 +113,7 @@ const sendCandidateCredentials = async (candidateData, password, partnerName) =>
 const sendPasswordResetEmail = async (candidateEmail, candidateName, resetToken) => {
   try {
     const transporter = createTransporter();
-    const resetUrl = `${process.env.FRONTEND_URL || 'https://airuter-backend.onrender.com'}/candidate/reset-password/${resetToken}`;
+    const resetUrl = `${process.env.FRONTEND_URL || 'https://www.airuter.com'}/candidate/reset-password/${resetToken}`;
     
     const mailOptions = {
       from: {
