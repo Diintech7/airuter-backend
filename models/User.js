@@ -1,4 +1,4 @@
-// models/User.js (snippet showing how to add isActive field)
+// models/User.js 
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
@@ -18,7 +18,7 @@ const userSchema = new mongoose.Schema({
   },
   role: {
     type: String,
-    enum: ['user', 'recruiter', 'admin', 'jobSeeker', 'pendingSelection'],
+    enum: ['user', 'recruiter', 'admin', 'jobSeeker', 'pendingSelection', 'partner', 'candidate'],
     default: 'user'
   },
   company: {
@@ -60,7 +60,6 @@ userSchema.pre('save', async function(next) {
 userSchema.methods.comparePassword = async function(candidatePassword) {
   return await bcrypt.compare(candidatePassword, this.password);
 };
-
 
 // Method to compare passwords
 userSchema.methods.matchPassword = async function(enteredPassword) {

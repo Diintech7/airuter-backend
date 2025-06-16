@@ -1,4 +1,3 @@
-// controllers/jobApplicationController.js
 const JobApplication = require('../models/JobApplication');
 const Job = require('../models/Job');
 const path = require('path');
@@ -12,19 +11,9 @@ const Interview = require('../models/Interview');
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
-
 exports.generateApplicationText = async (req, res) => {
-  console.log('------- Generate Application Text -------');
-  console.log('Full Request Object:', {
-    body: req.body,
-    query: req.query,
-    params: req.params,
-    headers: req.headers
-  });
-
   try {
     const { jobTitle, company, skills = [], requirements = [], type } = req.body;
-
     if (!jobTitle || !company || !type) {
       console.error('Validation Failed', { 
         jobTitle: !!jobTitle, 
@@ -40,7 +29,6 @@ exports.generateApplicationText = async (req, res) => {
         }
       });
     }
-
     const promptTemplates = {
       coverLetter: `Generate a professional cover letter for a job application. 
 
@@ -72,7 +60,6 @@ Please write additional notes that:
 - Demonstrate alignment with the company's values or mission
 - Are professional, honest, and no more than 150-200 words`
     };
-
     const response = await openai.chat.completions.create({
       model: "gpt-3.5-turbo",
       messages: [
@@ -88,7 +75,6 @@ Please write additional notes that:
       max_tokens: type === 'coverLetter' ? 350 : 250,
       temperature: 0.7
     });
-
     const generatedText = response.choices[0].message.content.trim();
 
     res.json({ 
@@ -101,7 +87,6 @@ Please write additional notes that:
       message: error.message,
       stack: error.stack
     });
-
     res.status(500).json({ 
       message: 'Failed to generate text',
       error: error.message,
@@ -120,13 +105,6 @@ exports.getAllCompanyApplications = async (req, res) => {
     .populate('job', 'title company type')
     .select('applicant job status createdAt interviewRoomId')
     .sort({ createdAt: -1 });
-    applications.forEach(app => {
-      console.log('Backend - Application:', {
-        id: app._id,
-        interviewRoomId: app.interviewRoomId || 'No room assigned'
-      });
-    });
-
     const applicationStats = {
       total: applications.length,
       pending: applications.filter(app => app.status === 'pending').length,
@@ -134,7 +112,6 @@ exports.getAllCompanyApplications = async (req, res) => {
       shortlisted: applications.filter(app => app.status === 'shortlisted').length,
       rejected: applications.filter(app => app.status === 'rejected').length
     };
-
     res.json({
       applications,
       stats: applicationStats
@@ -144,7 +121,6 @@ exports.getAllCompanyApplications = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 exports.searchApplications = async (req, res) => {
   try {
     const { searchTerm, status, jobType, jobId } = req.query;
@@ -178,7 +154,6 @@ exports.searchApplications = async (req, res) => {
         app.job.company.toLowerCase().includes(searchTerm.toLowerCase())
       );
     }
-
     const stats = {
       total: applications.length,
       pending: applications.filter(app => app.status === 'pending').length,
@@ -196,10 +171,8 @@ exports.searchApplications = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 exports.getUserApplications = async (req, res) => {
   try {
-    console.log('Getting user applications');
     const applications = await JobApplication.find({ applicant: req.user.id })
       .populate('job', 'title company status location type')
       .populate({
@@ -208,7 +181,6 @@ exports.getUserApplications = async (req, res) => {
         model: 'Interview'
       })
       .lean();
-
     const transformedApplications = await Promise.all(
       applications.map(async (app) => {
         if (app.interview) return app;
@@ -221,9 +193,7 @@ exports.getUserApplications = async (req, res) => {
         return app;
       })
     );
-
     const validApplications = transformedApplications.filter(app => app.job);
-
     const stats = {
       total: validApplications.length,
       pending: validApplications.filter(app => app.status === 'pending').length,
@@ -232,8 +202,6 @@ exports.getUserApplications = async (req, res) => {
       accepted: validApplications.filter(app => app.status === 'accepted').length,
       rejected: validApplications.filter(app => app.status === 'rejected').length
     };
-    console.log('Valid applications:', validApplications);
-
     res.json({ 
       applications: validApplications, 
       stats,
@@ -241,58 +209,58 @@ exports.getUserApplications = async (req, res) => {
         'Some applications had missing job references' : undefined
     });
   } catch (error) {
-    console.error('Error in getUserApplications:', error);
     res.status(500).json({ 
       message: 'Failed to fetch applications',
       error: error.message 
     });
   }
 };
-
 exports.updateApplicationStatus = async (req, res) => {
   try {
     const application = await JobApplication.findById(req.params.applicationId);
-    
     if (!application) {
       return res.status(404).json({ message: 'Application not found' });
     }
-
     const job = await Job.findOne({
       _id: application.job,
       recruiter: req.user.id
     });
-
     if (!job) {
       return res.status(403).json({ message: 'Not authorized to update this application' });
     }
-
     application.status = req.body.status;
     await application.save();
-
     res.json(application);
   } catch (error) {
     res.status(400).json({ message: error.message });
   }
 };
-
 exports.submitApplication = async (req, res) => {
   let uploadedFileName;
-  
   try {
     const job = await Job.findById(req.params.jobId);
     if (!job) {
       return res.status(404).json({ message: 'Job not found' });
     }
-
     if (job.status !== 'active') {
       return res.status(400).json({ message: 'This job is no longer accepting applications' });
     }
 
+    // Check if user is candidate or regular user
+    let applicantId;
+    if (req.candidate) {
+      applicantId = req.candidate._id;
+    } else if (req.user) {
+      applicantId = req.user._id;
+    } else {
+      return res.status(401).json({ message: 'Not authorized' });
+    }
+
     const existingApplication = await JobApplication.findOne({
       job: req.params.jobId,
-      applicant: req.user.id
+      applicant: applicantId
     });
-
+    
     if (existingApplication) {
       return res.status(400).json({ message: 'You have already applied for this job' });
     }
@@ -303,12 +271,13 @@ exports.submitApplication = async (req, res) => {
 
     const resumeFile = req.files.resume;
     const fileExt = path.extname(resumeFile.name);
-    uploadedFileName = `${req.user.id}-${Date.now()}${fileExt}`;
+    uploadedFileName = `${applicantId}-${Date.now()}${fileExt}`;
     const uploadPath = path.join(__dirname, '../uploads/resumes', uploadedFileName);
     await resumeFile.mv(uploadPath);
+
     const application = new JobApplication({
       job: req.params.jobId,
-      applicant: req.user.id,
+      applicant: applicantId,
       resume: uploadedFileName,
       coverLetter: req.body.coverLetter,
       additionalNotes: req.body.additionalNotes
@@ -323,7 +292,6 @@ exports.submitApplication = async (req, res) => {
       const mockRes = {
         json: (data) => data
       };
-
       const analysisResponse = await analyzeApplicationResume({
         body: {
           resumeUrl: uploadedFileName,
@@ -337,16 +305,13 @@ exports.submitApplication = async (req, res) => {
           keyFindings: analysisResponse.data.keyFindings,
           suggestions: analysisResponse.data.suggestions
         });
-
         response.analysis = analysisResponse.data;
       }
     } catch (analysisError) {
       console.error('Resume analysis error:', analysisError);
       response.warning = 'Resume analysis service temporarily unavailable';
     }
-
     return res.status(201).json(response);
-
   } catch (error) {
     if (uploadedFileName) {
       const uploadPath = path.join(__dirname, '../uploads/resumes', uploadedFileName);
@@ -362,7 +327,6 @@ exports.getApplicationAnalysis = async (req, res) => {
     const analysis = await ResumeAnalysis.findOne({
       application: req.params.applicationId
     });
-
     if (!analysis) {
       return res.status(404).json({ message: 'Analysis not found' });
     }
@@ -384,7 +348,6 @@ exports.getApplicationAnalysis = async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 };
-
 exports.getApplicationsByJob = async (req, res) => {
   try {
     const { jobId } = req.params;
@@ -396,30 +359,23 @@ exports.getApplicationsByJob = async (req, res) => {
     if (!job) {
       return res.status(403).json({ message: 'Not authorized to view these applications' });
     }
-
     const applications = await JobApplication.find({ job: jobId })
       .populate('applicant', 'name email')
       .populate('job', 'title company type')
       .sort({ createdAt: -1 });
-
-    console.log('Found applications:', applications);
-
     res.json({
       applications,
       job
     });
   } catch (error) {
-    console.error('Error in getApplicationsByJob:', error);
     res.status(500).json({ message: error.message });
   }
 };
-
 exports.getApplicationById = async (req, res) => {
   try {
     const application = await JobApplication.findById(req.params.applicationId)
       .populate('applicant', 'name email')
       .populate('job', 'title company type');
-
     if (!application) {
       return res.status(404).json({ message: 'Application not found' });
     }
@@ -427,21 +383,17 @@ exports.getApplicationById = async (req, res) => {
       _id: application.job._id,
       recruiter: req.user.id
     });
-
     if (!job) {
       return res.status(403).json({ message: 'Not authorized to view this application' });
     }
-
     res.json(application);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
 };
-
 exports.getApplicationResume = async (req, res) => {
   try {
     const application = await JobApplication.findById(req.params.applicationId);
-    
     if (!application) {
       return res.status(404).json({ message: 'Application not found' });
     }
@@ -449,17 +401,13 @@ exports.getApplicationResume = async (req, res) => {
       _id: application.job,
       recruiter: req.user.id
     });
-
     if (!job) {
       return res.status(403).json({ message: 'Not authorized to view this resume' });
     }
-
     const resumePath = path.join(__dirname, '../uploads/resumes', application.resume);
-    
     if (!fs.existsSync(resumePath)) {
       return res.status(404).json({ message: 'Resume file not found' });
     }
-
     res.sendFile(resumePath);
   } catch (error) {
     res.status(500).json({ message: error.message });

@@ -14,7 +14,7 @@ const {
   getJobApplicants,
   bulkUpdateJobs
 } = require('../controllers/jobController');
-const { protect } = require('../middleware/auth');
+const { protect, optionalAuth } = require('../middleware/auth');
 
 // Create a new job
 router.post('/', protect, createJob);
@@ -22,8 +22,8 @@ router.post('/', protect, createJob);
 // Generate job details with OpenAI
 router.post('/generate-details', protect, generateJobDetails);
 
-// Get all jobs (with filters)
-router.get('/', getJobs);
+// Get all jobs (with optional authentication for candidate/partner access)
+router.get('/', optionalAuth, getJobs);
 
 // Get recruiter's jobs with stats
 router.get('/my-jobs', protect, getRecruiterJobs);
@@ -43,8 +43,8 @@ router.post('/bulk-update', protect, bulkUpdateJobs);
 // Toggle job status (active/hidden/closed/draft)
 router.patch('/:id/status', protect, toggleJobStatus);
 
-// Get job by ID
-router.get('/:id', getJobById);
+// Get job by ID (with optional auth for candidate/partner access)
+router.get('/:id', optionalAuth, getJobById);
 
 // Update job
 router.patch('/:id', protect, updateJob);

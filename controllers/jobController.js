@@ -140,7 +140,7 @@ exports.createJob = async (req, res) => {
   }
 };
 
-// Get all jobs with filters
+// Get all jobs with filters - Enhanced to handle candidate access
 exports.getJobs = async (req, res) => {
   try {
     const {
@@ -150,17 +150,40 @@ exports.getJobs = async (req, res) => {
       skills, status, page = 1, limit = 10, sort = 'createdAt', order = 'desc'
     } = req.query;
 
+    // Base query - start with active jobs
     let query = { status: status || 'active' };
 
-    if (search) {
+    // Handle visibility based on user type
+    if (req.isCandidate && req.candidate && req.candidate.partner) {
+      // For candidates, show public jobs + private jobs their partner has access to
       query.$or = [
-        { title: { $regex: search, $options: 'i' } },
-        { company: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
+        { visibility: 'public' },
+        {
+          visibility: 'private',
+          'partnerAccess.partnerId': req.candidate.partner._id,
+          'partnerAccess.access': 'granted'
+        }
       ];
+    } else {
+      // For non-candidates (regular users, admins) or unauthenticated users, only show public jobs
+      query.visibility = 'public';
     }
 
-    if (location) query.location = { $regex: location, $options: 'i' };
+    // Apply other filters
+    if (search) {
+      query.$and = query.$and || [];
+      query.$and.push({
+        $or: [
+          { title: { $regex: search, $options: 'i' } },
+          { company: { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+
+    if (location) {
+      query.location = { $regex: location, $options: 'i' };
+    }
     if (type) query.type = type;
     if (experienceMin) query['experience.min'] = { $gte: parseInt(experienceMin) };
     if (experienceMax) query['experience.max'] = { $lte: parseInt(experienceMax) };
@@ -195,7 +218,15 @@ exports.getJobs = async (req, res) => {
         page: parseInt(page),
         limit: parseInt(limit),
         pages: Math.ceil(total / parseInt(limit))
-      }
+      },
+      // Include debug info for development
+      ...(process.env.NODE_ENV === 'development' && {
+        debug: {
+          userType: req.isCandidate ? 'candidate' : req.isAdmin ? 'admin' : req.isRegularUser ? 'user' : 'unauthenticated',
+          partnerId: req.isCandidate && req.candidate ? req.candidate.partner._id : null,
+          queryUsed: query
+        }
+      })
     });
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -349,7 +380,7 @@ exports.deleteJob = async (req, res) => {
   }
 };
 
-// Get job by ID
+// Get job by ID - Enhanced to check access for private jobs
 exports.getJobById = async (req, res) => {
   try {
     const job = await Job.findById(req.params.id)
@@ -357,6 +388,25 @@ exports.getJobById = async (req, res) => {
     
     if (!job) {
       return res.status(404).json({ message: 'Job not found' });
+    }
+
+    // Check if user has access to this job
+    let hasAccess = false;
+
+    if (job.visibility === 'public') {
+      hasAccess = true;
+    } else if (job.visibility === 'private') {
+      if (req.isCandidate && req.candidate && req.candidate.partner) {
+        // Check if candidate's partner has access
+        hasAccess = job.hasPartnerAccess(req.candidate.partner._id);
+      } else if (req.isAdmin || (req.user && req.user.id === job.recruiter._id.toString())) {
+        // Admins and job owners can always access
+        hasAccess = true;
+      }
+    }
+
+    if (!hasAccess) {
+      return res.status(403).json({ message: 'You do not have access to view this job' });
     }
 
     res.json(job);

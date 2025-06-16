@@ -17,45 +17,54 @@ const {
   getRecruiterApplications
 } = require('../controllers/recruiterController');
 
-// Get all recruiters - admin only
+// Get all recruiters and partners - admin only
 router.get('/recruiters', protect, isAdmin, getAllRecruiters);
 
-// Get specific recruiter with details - admin only
+// Get specific recruiter/partner with details - admin only
 router.get('/recruiters/:recruiterId', protect, isAdmin, getRecruiterDetails);
 
-// Get detailed recruiter company information - admin only
+// Get detailed recruiter/partner company information - admin only
 router.get('/recruiters/:recruiterId/company', protect, isAdmin, getRecruiterCompanyDetails);
 
-// Get jobs posted by a recruiter - admin only
+// Get jobs posted by a recruiter/partner - admin only
 router.get('/recruiters/:recruiterId/jobs', protect, isAdmin, getRecruiterJobs);
 
-// Get applications for a recruiter's jobs - admin only
+// Get applications for a recruiter's/partner's jobs - admin only
 router.get('/recruiters/:recruiterId/applications', protect, isAdmin, getRecruiterApplications);
 
-// Add a new recruiter - admin only
+// Add a new recruiter/partner - admin only
 router.post('/recruiters', protect, isAdmin, createRecruiter);
 
-// Update recruiter details - admin only
+// Update recruiter/partner details - admin only
 router.put('/recruiters/:recruiterId', protect, isAdmin, updateRecruiter);
 
-// Update recruiter status - admin only
+// Update recruiter/partner status - admin only
 router.put('/recruiters/:recruiterId/status', protect, isAdmin, updateRecruiterStatus);
-// Delete recruiter - admin only
+
+// Delete recruiter/partner - admin only
 router.delete('/recruiters/:recruiterId', protect, isAdmin, deleteRecruiter);
 
+// Get recruiter and partner statistics
 router.get('/recruiter-stats', protect, isAdmin, async (req, res) => {
   try {
+    // Count total recruiters and partners
+    const totalRecruiters = await User.countDocuments({ 
+      role: { $in: ['recruiter', 'partner'] }
+    });
     
-
-    const totalRecruiters = await User.countDocuments({ role: 'recruiter' });
+    // Count by role
+    const recruiterCount = await User.countDocuments({ role: 'recruiter' });
+    const partnerCount = await User.countDocuments({ role: 'partner' });
     
-    // Get recent recruiters with their admin profiles
-    const recentRecruitersUsers = await User.find({ role: 'recruiter' })
+    // Get recent recruiters and partners with their admin profiles
+    const recentRecruitersUsers = await User.find({ 
+      role: { $in: ['recruiter', 'partner'] }
+    })
       .sort({ createdAt: -1 })
       .limit(5)
-      .select('name email createdAt');
+      .select('name email role createdAt');
     
-    // Get company info from AdminProfile for each recruiter
+    // Get company info from AdminProfile for each user
     const recentRecruiters = await Promise.all(
       recentRecruitersUsers.map(async (user) => {
         const adminProfile = await AdminProfile.findOne({ user: user._id });
@@ -73,6 +82,8 @@ router.get('/recruiter-stats', protect, isAdmin, async (req, res) => {
       success: true,
       stats: {
         totalRecruiters,
+        recruiterCount,
+        partnerCount,
         recentRecruiters
       }
     });
@@ -85,26 +96,30 @@ router.get('/recruiter-stats', protect, isAdmin, async (req, res) => {
   }
 });
 
+// Login as recruiter/partner functionality
 router.post('/recruiters/login-as-recruiter', protect, isAdmin, async (req, res) => {
   try {
     const { recruiterId } = req.body;
-    console.log(recruiterId)
+    console.log('Login as user ID:', recruiterId);
     
-    // Find the recruiter
+    // Find the recruiter or partner
     const recruiter = await User.findOne({
       _id: recruiterId,
-      role: 'recruiter'
+      role: { $in: ['recruiter', 'partner'] }
     }).select('-password');
-    console.log(recruiter)
+    
+    console.log('Found user:', recruiter);
+    
     if (!recruiter) {
       return res.status(404).json({
         success: false,
-        message: 'Recruiter not found'
+        message: 'Recruiter/Partner not found'
       });
     }
-    console.log("hii")
     
-    // Generate a token for the recruiter
+    console.log('Generating token for user');
+    
+    // Generate a token for the recruiter/partner
     const token = jwt.sign(
       { id: recruiter._id, role: recruiter.role },
       process.env.JWT_SECRET,
@@ -122,10 +137,10 @@ router.post('/recruiters/login-as-recruiter', protect, isAdmin, async (req, res)
       }
     });
   } catch (error) {
-    console.error('Error logging in as recruiter:', error);
+    console.error('Error logging in as recruiter/partner:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error while logging in as recruiter'
+      message: 'Server error while logging in as user'
     });
   }
 });

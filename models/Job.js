@@ -1,4 +1,4 @@
-// models/Job.js
+// models/Job.js (Updated)
 const mongoose = require('mongoose');
 
 const jobSchema = new mongoose.Schema({
@@ -59,7 +59,7 @@ const jobSchema = new mongoose.Schema({
     },
     currency: {
       type: String,
-      default: 'USD'
+      default: 'INR'
     }
   },
   skills: {
@@ -80,6 +80,36 @@ const jobSchema = new mongoose.Schema({
     enum: ['active', 'closed', 'draft', 'hidden'],
     default: 'active'
   },
+  visibility: {
+    type: String,
+    enum: ['public', 'private'],
+    default: 'public'
+  },
+  // Partner access control for private jobs
+  partnerAccess: [{
+    partnerId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Partner',
+      required: true
+    },
+    access: {
+      type: String,
+      enum: ['granted', 'revoked'],
+      default: 'granted'
+    },
+    grantedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Admin',
+      required: true
+    },
+    grantedAt: {
+      type: Date,
+      default: Date.now
+    },
+    revokedAt: {
+      type: Date
+    }
+  }],
   applicationDeadline: {
     type: Date,
     required: true
@@ -93,6 +123,41 @@ const jobSchema = new mongoose.Schema({
     default: Date.now
   }
 });
+
+// Index for better performance on partner access queries
+jobSchema.index({ 'partnerAccess.partnerId': 1, 'partnerAccess.access': 1 });
+jobSchema.index({ visibility: 1, status: 1 });
+
+// Method to check if partner has access to this job
+jobSchema.methods.hasPartnerAccess = function(partnerId) {
+  if (this.visibility === 'public') {
+    return true;
+  }
+  
+  if (this.visibility === 'private') {
+    const partnerAccess = this.partnerAccess.find(
+      pa => pa.partnerId.toString() === partnerId.toString() && pa.access === 'granted'
+    );
+    return !!partnerAccess;
+  }
+  
+  return false;
+};
+
+// Static method to find jobs accessible by partner
+jobSchema.statics.findAccessibleByPartner = function(partnerId) {
+  return this.find({
+    $or: [
+      { visibility: 'public' },
+      {
+        visibility: 'private',
+        'partnerAccess.partnerId': partnerId,
+        'partnerAccess.access': 'granted'
+      }
+    ],
+    status: 'active'
+  });
+};
 
 jobSchema.pre('save', function(next) {
   this.updatedAt = Date.now();

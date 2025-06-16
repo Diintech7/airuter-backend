@@ -4,15 +4,17 @@ const Job = require('../models/Job');
 const JobApplication = require('../models/JobApplication');
 const AdminProfile = require('../models/AdminProfile');
 
-// Get all recruiters with company details from AdminProfile
+// Get all recruiters and partners with company details from AdminProfile
 exports.getAllRecruiters = async (req, res) => {
   try {
-    // Find all recruiters
-    const recruiters = await User.find({ role: 'recruiter' })
+    // Find all recruiters and partners
+    const recruiters = await User.find({ 
+      role: { $in: ['recruiter', 'partner'] }
+    })
       .select('-password')
       .sort({ createdAt: -1 });
     
-    // Get admin profile data for each recruiter
+    // Get admin profile data for each recruiter/partner
     const recruitersWithProfiles = await Promise.all(
       recruiters.map(async (recruiter) => {
         const adminProfile = await AdminProfile.findOne({ user: recruiter._id });
@@ -46,21 +48,21 @@ exports.getAllRecruiters = async (req, res) => {
   }
 };
 
-// Get recruiter with job statistics and hiring data
+// Get recruiter/partner with job statistics and hiring data
 exports.getRecruiterDetails = async (req, res) => {
   try {
     const { recruiterId } = req.params;
     
-    // Find recruiter
+    // Find recruiter or partner
     const recruiter = await User.findOne({
       _id: recruiterId,
-      role: 'recruiter'
+      role: { $in: ['recruiter', 'partner'] }
     }).select('-password');
     
     if (!recruiter) {
       return res.status(404).json({
         success: false,
-        message: 'Recruiter not found'
+        message: 'Recruiter/Partner not found'
       });
     }
     
@@ -87,7 +89,7 @@ exports.getRecruiterDetails = async (req, res) => {
       } : recruiter.company
     };
     
-    // Get jobs from this recruiter
+    // Get jobs from this recruiter/partner
     const recruiterJobs = await Job.find({ recruiter: recruiterId });
     const jobIds = recruiterJobs.map(job => job._id);
     
@@ -126,16 +128,24 @@ exports.getRecruiterDetails = async (req, res) => {
   }
 };
 
-// Create new recruiter with admin profile
+// Create new recruiter/partner with admin profile
 exports.createRecruiter = async (req, res) => {
   try {
-    const { name, email, password, company } = req.body;
+    const { name, email, password, company, role = 'recruiter' } = req.body;
 
     // Validate required fields
     if (!name || !email || !password || !company) {
       return res.status(400).json({
         success: false,
         message: 'Please provide name, email, password and company details'
+      });
+    }
+
+    // Validate role
+    if (!['recruiter', 'partner'].includes(role)) {
+      return res.status(400).json({
+        success: false,
+        message: 'Role must be either recruiter or partner'
       });
     }
 
@@ -148,12 +158,12 @@ exports.createRecruiter = async (req, res) => {
       });
     }
 
-    // Create new recruiter
+    // Create new recruiter/partner
     const newRecruiter = new User({
       name,
       email,
       password, // Password will be hashed via pre-save hook
-      role: 'recruiter',
+      role,
       company: {
         name: company.name,
         position: company.position,
@@ -165,7 +175,7 @@ exports.createRecruiter = async (req, res) => {
 
     await newRecruiter.save();
 
-    // Create admin profile for the recruiter
+    // Create admin profile for the recruiter/partner
     const newAdminProfile = new AdminProfile({
       user: newRecruiter._id,
       companyName: company.name,
@@ -186,11 +196,12 @@ exports.createRecruiter = async (req, res) => {
 
     res.status(201).json({
       success: true,
-      message: 'Recruiter added successfully',
+      message: `${role.charAt(0).toUpperCase() + role.slice(1)} added successfully`,
       recruiter: {
         id: newRecruiter._id,
         name: newRecruiter.name,
         email: newRecruiter.email,
+        role: newRecruiter.role,
         company: {
           name: newAdminProfile.companyName,
           position: newAdminProfile.position,
@@ -199,36 +210,39 @@ exports.createRecruiter = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error creating recruiter:', error);
+    console.error('Error creating recruiter/partner:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error while creating recruiter'
+      message: 'Server error while creating recruiter/partner'
     });
   }
 };
 
-// Update recruiter with admin profile
+// Update recruiter/partner with admin profile
 exports.updateRecruiter = async (req, res) => {
   try {
     const { recruiterId } = req.params;
-    const { name, email, company, status } = req.body;
+    const { name, email, company, status, role } = req.body;
     
-    // Find recruiter
+    // Find recruiter or partner
     const recruiter = await User.findOne({
       _id: recruiterId,
-      role: 'recruiter'
+      role: { $in: ['recruiter', 'partner'] }
     });
     
     if (!recruiter) {
       return res.status(404).json({
         success: false,
-        message: 'Recruiter not found'
+        message: 'Recruiter/Partner not found'
       });
     }
 
     // Update user fields if provided
     if (name) recruiter.name = name;
     if (email) recruiter.email = email;
+    if (role && ['recruiter', 'partner'].includes(role)) {
+      recruiter.role = role;
+    }
     if (company) {
       recruiter.company = {
         name: company.name || recruiter.company?.name,
@@ -278,11 +292,12 @@ exports.updateRecruiter = async (req, res) => {
 
     res.json({
       success: true,
-      message: 'Recruiter updated successfully',
+      message: 'User updated successfully',
       recruiter: {
         id: recruiter._id,
         name: recruiter.name,
         email: recruiter.email,
+        role: recruiter.role,
         company: adminProfile ? {
           name: adminProfile.companyName,
           position: adminProfile.position,
@@ -294,51 +309,51 @@ exports.updateRecruiter = async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('Error updating recruiter:', error);
+    console.error('Error updating recruiter/partner:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error while updating recruiter'
+      message: 'Server error while updating user'
     });
   }
 };
 
-// Delete recruiter and associated admin profile
+// Delete recruiter/partner and associated admin profile
 exports.deleteRecruiter = async (req, res) => {
   try {
     const { recruiterId } = req.params;
     
     const recruiter = await User.findOne({
       _id: recruiterId,
-      role: 'recruiter'
+      role: { $in: ['recruiter', 'partner'] }
     });
     
     if (!recruiter) {
       return res.status(404).json({
         success: false,
-        message: 'Recruiter not found'
+        message: 'Recruiter/Partner not found'
       });
     }
 
     // Delete associated admin profile
     await AdminProfile.deleteOne({ user: recruiterId });
 
-    // Delete the recruiter
+    // Delete the recruiter/partner
     await recruiter.deleteOne();
 
     res.json({
       success: true,
-      message: 'Recruiter deleted successfully'
+      message: 'User deleted successfully'
     });
   } catch (error) {
-    console.error('Error deleting recruiter:', error);
+    console.error('Error deleting recruiter/partner:', error);
     res.status(500).json({
       success: false,
-      message: 'Server error while deleting recruiter'
+      message: 'Server error while deleting user'
     });
   }
 };
 
-// Get recruiter's company details from admin profile
+// Get recruiter's/partner's company details from admin profile
 exports.getRecruiterCompanyDetails = async (req, res) => {
   try {
     const { recruiterId } = req.params;
@@ -377,12 +392,12 @@ exports.getRecruiterCompanyDetails = async (req, res) => {
   }
 };
 
-// Get recruiter jobs with additional data
+// Get recruiter/partner jobs with additional data
 exports.getRecruiterJobs = async (req, res) => {
   try {
     const { recruiterId } = req.params;
     
-    // Find all jobs by this recruiter
+    // Find all jobs by this recruiter/partner
     const jobs = await Job.find({ recruiter: recruiterId })
       .sort({ createdAt: -1 });
     
@@ -402,7 +417,7 @@ exports.getRecruiterJobs = async (req, res) => {
       jobs: jobsWithCounts
     });
   } catch (error) {
-    console.error('Error fetching recruiter jobs:', error);
+    console.error('Error fetching jobs:', error);
     res.status(500).json({
       success: false,
       message: 'Server error while fetching jobs'
@@ -410,12 +425,12 @@ exports.getRecruiterJobs = async (req, res) => {
   }
 };
 
-// Get applications for all jobs by this recruiter
+// Get applications for all jobs by this recruiter/partner
 exports.getRecruiterApplications = async (req, res) => {
   try {
     const { recruiterId } = req.params;
     
-    // Find all jobs by this recruiter
+    // Find all jobs by this recruiter/partner
     const jobs = await Job.find({ recruiter: recruiterId });
     const jobIds = jobs.map(job => job._id);
     
@@ -430,7 +445,7 @@ exports.getRecruiterApplications = async (req, res) => {
       applications
     });
   } catch (error) {
-    console.error('Error fetching recruiter applications:', error);
+    console.error('Error fetching applications:', error);
     res.status(500).json({
       success: false,
       message: 'Server error while fetching applications'
@@ -438,46 +453,44 @@ exports.getRecruiterApplications = async (req, res) => {
   }
 };
 
-// Add this function to your recruiterController.js file
-
-// Update recruiter status (active/inactive)
+// Update recruiter/partner status (active/inactive)
 exports.updateRecruiterStatus = async (req, res) => {
-    try {
-      const { recruiterId } = req.params;
-      const { status } = req.body;
-      
-      if (status === undefined) {
-        return res.status(400).json({
-          success: false,
-          message: 'Status is required'
-        });
-      }
-      
-      const recruiter = await User.findOne({
-        _id: recruiterId,
-        role: 'recruiter'
-      });
-      
-      if (!recruiter) {
-        return res.status(404).json({
-          success: false,
-          message: 'Recruiter not found'
-        });
-      }
-      
-      recruiter.isActive = status;
-      await recruiter.save();
-      
-      res.json({
-        success: true,
-        message: `Recruiter ${status ? 'activated' : 'deactivated'} successfully`,
-        status: recruiter.isActive
-      });
-    } catch (error) {
-      console.error('Error updating recruiter status:', error);
-      res.status(500).json({
+  try {
+    const { recruiterId } = req.params;
+    const { status } = req.body;
+    
+    if (status === undefined) {
+      return res.status(400).json({
         success: false,
-        message: 'Server error while updating recruiter status'
+        message: 'Status is required'
       });
     }
-  };
+    
+    const recruiter = await User.findOne({
+      _id: recruiterId,
+      role: { $in: ['recruiter', 'partner'] }
+    });
+    
+    if (!recruiter) {
+      return res.status(404).json({
+        success: false,
+        message: 'Recruiter/Partner not found'
+      });
+    }
+    
+    recruiter.isActive = status;
+    await recruiter.save();
+    
+    res.json({
+      success: true,
+      message: `User ${status ? 'activated' : 'deactivated'} successfully`,
+      status: recruiter.isActive
+    });
+  } catch (error) {
+    console.error('Error updating status:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Server error while updating status'
+    });
+  }
+};

@@ -21,7 +21,15 @@ const adminAuthRoutes = require('./routes/adminAuth');
 const userManagementRoutes = require('./routes/userManagement');
 const recuriterManagemnet = require('./routes/recruiterManagement');
 const adminRoutes = require('./routes/adminRoutes');
-const shortRoutes = require('./routes/shortRoutes'); // Added shortRoutes
+const shortRoutes = require('./routes/shortRoutes'); 
+const patners = require('./routes/partnerManagement');
+const candidateRoutes = require('./routes/candidateRoutes');
+const partnerJobAccessRoutes = require('./routes/partnerJobAccess'); 
+const candidateAuth = require('./routes/candidateRoute');
+const cookieParser = require('cookie-parser');
+const profileRoutess = require('./routes/profileRoutes');
+const { validateToken, checkAuth } = require('./middleware/candidateAuth');
+
 const app = express();
 const server = http.createServer(app);
 const fs = require('fs');
@@ -42,11 +50,14 @@ if (!fs.existsSync(tempDir)) {
 connectDB();
 
 app.use(cors({
-  origin: 'https://www.airuter.com',
+  origin: 'www.airuter.com',
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
 }));
+
+// Add cookie parser middleware
+app.use(cookieParser());
 app.use(passport.initialize());
 
 app.use(express.urlencoded({ extended: true }));
@@ -96,11 +107,87 @@ app.use((error, req, res, next) => {
   });
 });
 
+// Authentication validation endpoints
+app.get('/api/auth/validate', validateToken);
+app.get('/api/candidate/validate', validateToken);
+app.get('/api/admin/validate', validateToken);
+
+// Universal authentication check endpoint
+app.get('/api/auth/check', async (req, res) => {
+  try {
+    let token;
+    let tokenType = 'none';
+    
+    // Check for different token types
+    if (req.cookies.usertoken) {
+      token = req.cookies.usertoken;
+      tokenType = 'user';
+    } else if (req.cookies.admintoken) {
+      token = req.cookies.admintoken;
+      tokenType = 'admin';
+    } else if (req.cookies.candidatetoken) {
+      token = req.cookies.candidatetoken;
+      tokenType = 'candidate';
+    } else if (req.headers.authorization?.startsWith('Bearer')) {
+      token = req.headers.authorization.split(' ')[1];
+      tokenType = 'bearer';
+    }
+
+    if (!token) {
+      return res.json({
+        success: false,
+        authenticated: false,
+        message: 'No authentication token found',
+        redirect: '/auth'
+      });
+    }
+
+    // Use checkAuth middleware to validate token
+    await checkAuth(req, res, () => {
+      res.json({
+        success: true,
+        authenticated: true,
+        tokenType: tokenType,
+        user: {
+          id: req.user._id,
+          email: req.user.email,
+          role: req.userRole,
+          permissions: req.userPermissions,
+          name: req.user.name || req.user.firstName,
+          ...(req.isCandidate && { 
+            partner: req.user.partner,
+            partnerName: req.user.partner?.partnerName 
+          }),
+          ...(req.isRecruiter && { company: req.user.company }),
+          ...(req.isAdmin && { status: req.user.status })
+        },
+        dashboardRoute: req.dashboardRoute,
+        flags: {
+          isAdmin: req.isAdmin,
+          isCandidate: req.isCandidate,
+          isRecruiter: req.isRecruiter,
+          isPartner: req.isPartner
+        }
+      });
+    });
+  } catch (error) {
+    console.error('Auth check error:', error);
+    res.status(401).json({
+      success: false,
+      authenticated: false,
+      message: 'Authentication check failed',
+      redirect: '/auth'
+    });
+  }
+});
+
+// Route configurations
 app.use('/api/chat', chatRoutes);
 app.use('/api/resume', resumeRoutes);
 app.use('/api/auth', authRoutes);
 app.use('/api/profile', profileRoutes);
 app.use('/api/jobs', jobRoutes);
+app.use('/api/jobss', partnerJobAccessRoutes); 
 app.use('/api/applications', jobApplicationRoutes);
 app.use('/api/jobs-applied', jobsAppliedRoutes);
 app.use('/api/interview', interviewRoutes);
@@ -110,8 +197,50 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/admin', adminAuthRoutes); 
 app.use('/api/admin', userManagementRoutes);
 app.use('/api/admin', recuriterManagemnet);
-app.use('/api/shorts', shortRoutes); // Added shorts routes
+app.use('/api/shorts', shortRoutes); 
+app.use('/api/partner', patners);
+app.use('/api/candidates', candidateRoutes);
+app.use('/api/profile', profileRoutess);
 
+// Candidate authentication routes
+app.use('/api/candidate', candidateAuth);
+
+// Partner job access routes
+app.use('/api/partner/job-access', partnerJobAccessRoutes);
+app.use('/api/partners', partnerJobAccessRoutes);
+
+// Legacy candidate authentication check endpoint (keep for backwards compatibility)
+app.get('/api/candidate/check-auth', async (req, res) => {
+  try {
+    await checkAuth(req, res, () => {
+      if (req.isCandidate) {
+        res.json({
+          success: true,
+          authenticated: true,
+          role: 'candidate',
+          candidate: req.user,
+          dashboardRoute: '/candidate/dashboard'
+        });
+      } else {
+        res.json({
+          success: false,
+          authenticated: false,
+          message: 'Not a candidate account',
+          redirect: req.dashboardRoute || '/auth'
+        });
+      }
+    });
+  } catch (error) {
+    res.json({
+      success: false,
+      authenticated: false,
+      message: 'Candidate authentication failed',
+      redirect: '/candidate/login'
+    });
+  }
+});
+
+// Global error handler
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({
@@ -121,6 +250,7 @@ app.use((err, req, res, next) => {
   });
 });
 
+// WebSocket servers
 const wss = new WebSocket.Server({ noServer: true });
 const deepgramWss = new WebSocket.Server({ noServer: true });
 const interviewWss = new WebSocket.Server({ noServer: true });
@@ -155,4 +285,9 @@ process.on('unhandledRejection', (err) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log('Authentication endpoints available:');
+  console.log('  - GET /api/auth/check (Universal auth check)');
+  console.log('  - GET /api/auth/validate (User validation)');
+  console.log('  - GET /api/candidate/validate (Candidate validation)');
+  console.log('  - GET /api/admin/validate (Admin validation)');
 });
