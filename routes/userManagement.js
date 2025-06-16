@@ -1,14 +1,14 @@
 // routes/userManagement.js
 const express = require('express');
 const router = express.Router();
-const { protect, isAdmin } = require('../middleware/auth');
+const { optionalAuth, isAdmin } = require('../middleware/auth');
 const User = require('../models/User');
 const Profile = require('../models/Profile');
 const JobApplication = require('../models/JobApplication');
 const bcrypt = require('bcryptjs');
 const { JWT_SECRET } = require('../auth/config');
 const jwt = require('jsonwebtoken');
-router.get('/users', protect, isAdmin, async (req, res) => {
+router.get('/users', optionalAuth, isAdmin, async (req, res) => {
     try {
       const { role } = req.query;
       let filter = {};
@@ -29,7 +29,7 @@ router.get('/users', protect, isAdmin, async (req, res) => {
       });
     }
   });
-router.get('/users/:userId/applications', protect, isAdmin, async (req, res) => {
+router.get('/users/:userId/applications', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const user = await User.findById(userId);
@@ -79,7 +79,7 @@ router.get('/users/:userId/applications', protect, isAdmin, async (req, res) => 
     });
   }
 });
-router.get('/users/:userId/applications/list', protect, isAdmin, async (req, res) => {
+router.get('/users/:userId/applications/list', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const { status, sort = 'newest', page = 1, limit = 10 } = req.query;
@@ -115,7 +115,7 @@ router.get('/users/:userId/applications/list', protect, isAdmin, async (req, res
     });
   }
 });
-router.get('/users/:userId/profile', protect, isAdmin, async (req, res) => {
+router.get('/users/:userId/profile', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { userId } = req.params;
     const user = await User.findById(userId).select('-password');
@@ -138,7 +138,7 @@ router.get('/users/:userId/profile', protect, isAdmin, async (req, res) => {
     });
   }
 });
-router.post('/users', protect, isAdmin, async (req, res) => {
+router.post('/users', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
     if (!name || !email || !password) {
@@ -180,7 +180,7 @@ router.post('/users', protect, isAdmin, async (req, res) => {
     });
   }
 });
-router.patch('/users/:userId/status', protect, isAdmin, async (req, res) => {
+router.patch('/users/:userId/status', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { isActive } = req.body;
     if (typeof isActive !== 'boolean') {
@@ -222,7 +222,7 @@ router.patch('/users/:userId/status', protect, isAdmin, async (req, res) => {
     });
   }
 });
-router.put('/users/:userId', protect, isAdmin, async (req, res) => {
+router.put('/users/:userId', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { name, email, role } = req.body;
     const user = await User.findById(req.params.userId);
@@ -255,7 +255,7 @@ router.put('/users/:userId', protect, isAdmin, async (req, res) => {
     });
   }
 });
-router.delete('/users/:userId', protect, isAdmin, async (req, res) => {
+router.delete('/users/:userId', optionalAuth, isAdmin, async (req, res) => {
   try {
     const user = await User.findById(req.params.userId);
     
@@ -283,7 +283,7 @@ router.delete('/users/:userId', protect, isAdmin, async (req, res) => {
     });
   }
 });
-router.get('/users/:userId/resume', protect, isAdmin, async (req, res) => {
+router.get('/users/:userId/resume', optionalAuth, isAdmin, async (req, res) => {
     try {
       const { userId } = req.params;
       const profile = await Profile.findOne({ user: userId });
@@ -306,7 +306,7 @@ router.get('/users/:userId/resume', protect, isAdmin, async (req, res) => {
       });
     }
   });
-  router.post('/users/:userId/impersonate', protect, isAdmin, async (req, res) => {
+  router.post('/users/:userId/impersonate', optionalAuth, isAdmin, async (req, res) => {
     try {
       const { userId } = req.params;
       

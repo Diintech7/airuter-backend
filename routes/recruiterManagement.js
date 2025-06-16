@@ -1,7 +1,7 @@
 // routes/recruiterManagement.js
 const express = require('express');
 const router = express.Router();
-const { protect, isAdmin } = require('../middleware/auth');
+const { optionalAuth, isAdmin } = require('../middleware/auth');
 const AdminProfile = require('../models/AdminProfile');
 const User = require('../models/User'); 
 const jwt = require('jsonwebtoken');
@@ -18,34 +18,34 @@ const {
 } = require('../controllers/recruiterController');
 
 // Get all recruiters and partners - admin only
-router.get('/recruiters', protect, isAdmin, getAllRecruiters);
+router.get('/recruiters', optionalAuth, isAdmin, getAllRecruiters);
 
 // Get specific recruiter/partner with details - admin only
-router.get('/recruiters/:recruiterId', protect, isAdmin, getRecruiterDetails);
+router.get('/recruiters/:recruiterId', optionalAuth, isAdmin, getRecruiterDetails);
 
 // Get detailed recruiter/partner company information - admin only
-router.get('/recruiters/:recruiterId/company', protect, isAdmin, getRecruiterCompanyDetails);
+router.get('/recruiters/:recruiterId/company', optionalAuth, isAdmin, getRecruiterCompanyDetails);
 
 // Get jobs posted by a recruiter/partner - admin only
-router.get('/recruiters/:recruiterId/jobs', protect, isAdmin, getRecruiterJobs);
+router.get('/recruiters/:recruiterId/jobs', optionalAuth, isAdmin, getRecruiterJobs);
 
 // Get applications for a recruiter's/partner's jobs - admin only
-router.get('/recruiters/:recruiterId/applications', protect, isAdmin, getRecruiterApplications);
+router.get('/recruiters/:recruiterId/applications', optionalAuth, isAdmin, getRecruiterApplications);
 
 // Add a new recruiter/partner - admin only
-router.post('/recruiters', protect, isAdmin, createRecruiter);
+router.post('/recruiters', optionalAuth, isAdmin, createRecruiter);
 
 // Update recruiter/partner details - admin only
-router.put('/recruiters/:recruiterId', protect, isAdmin, updateRecruiter);
+router.put('/recruiters/:recruiterId', optionalAuth, isAdmin, updateRecruiter);
 
 // Update recruiter/partner status - admin only
-router.put('/recruiters/:recruiterId/status', protect, isAdmin, updateRecruiterStatus);
+router.put('/recruiters/:recruiterId/status', optionalAuth, isAdmin, updateRecruiterStatus);
 
 // Delete recruiter/partner - admin only
-router.delete('/recruiters/:recruiterId', protect, isAdmin, deleteRecruiter);
+router.delete('/recruiters/:recruiterId', optionalAuth, isAdmin, deleteRecruiter);
 
 // Get recruiter and partner statistics
-router.get('/recruiter-stats', protect, isAdmin, async (req, res) => {
+router.get('/recruiter-stats', optionalAuth, isAdmin, async (req, res) => {
   try {
     // Count total recruiters and partners
     const totalRecruiters = await User.countDocuments({ 
@@ -97,7 +97,7 @@ router.get('/recruiter-stats', protect, isAdmin, async (req, res) => {
 });
 
 // Login as recruiter/partner functionality
-router.post('/recruiters/login-as-recruiter', protect, isAdmin, async (req, res) => {
+router.post('/recruiters/login-as-recruiter', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { recruiterId } = req.body;
     console.log('Login as user ID:', recruiterId);

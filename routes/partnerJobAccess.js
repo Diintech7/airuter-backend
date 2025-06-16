@@ -4,10 +4,10 @@ const router = express.Router();
 const Job = require('../models/Job');
 const Partner = require('../models/Partner');
 const Candidate = require('../models/Candidate');
-const { protect, isAdmin } = require('../middleware/auth');
+const { optionalAuth, isAdmin } = require('../middleware/auth');
 
 // Get all private jobs for admin
-router.get('/private', protect, isAdmin, async (req, res) => {
+router.get('/private', optionalAuth, isAdmin, async (req, res) => {
   try {
     const privateJobs = await Job.find({ 
       visibility: 'private',
@@ -30,7 +30,7 @@ router.get('/private', protect, isAdmin, async (req, res) => {
 });
 
 // Get jobs assigned to a specific partner
-router.get('/:partnerId/assigned-jobs', protect, isAdmin, async (req, res) => {
+router.get('/:partnerId/assigned-jobs', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { partnerId } = req.params;
 
@@ -65,7 +65,7 @@ router.get('/:partnerId/assigned-jobs', protect, isAdmin, async (req, res) => {
 });
 
 // Get partner statistics with job access info - THIS WAS MISSING
-router.get('/:partnerId/stats', protect, isAdmin, async (req, res) => {
+router.get('/:partnerId/stats', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { partnerId } = req.params;
 
@@ -117,7 +117,7 @@ router.get('/:partnerId/stats', protect, isAdmin, async (req, res) => {
 });
 
 // Assign job access to partner
-router.post('/assign-to-partner', protect, isAdmin, async (req, res) => {
+router.post('/assign-to-partner', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { jobId, partnerId, access } = req.body;
 
@@ -189,7 +189,7 @@ router.post('/assign-to-partner', protect, isAdmin, async (req, res) => {
 });
 
 // Revoke job access from partner
-router.post('/revoke-partner-access', protect, isAdmin, async (req, res) => {
+router.post('/revoke-partner-access', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { jobId, partnerId } = req.body;
 
@@ -233,7 +233,7 @@ router.post('/revoke-partner-access', protect, isAdmin, async (req, res) => {
 });
 
 // Alternative endpoint for job access stats (keeping the original one for compatibility)
-router.get('/:partnerId/job-access-stats', protect, isAdmin, async (req, res) => {
+router.get('/:partnerId/job-access-stats', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { partnerId } = req.params;
 

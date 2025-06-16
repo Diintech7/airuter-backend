@@ -5,7 +5,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const Admin = require('../models/Admin');
 const User = require('../models/User'); // Add this import
-const { protect, isAdmin } = require('../middleware/auth');
+const { optionalAuth, isAdmin } = require('../middleware/auth');
 
 // Admin Registration
 router.post('/register', async (req, res) => {
@@ -125,7 +125,7 @@ router.post('/login', async (req, res) => {
 });
 
 // Admin logout
-router.post('/logout', protect, (req, res) => {
+router.post('/logout', optionalAuth, (req, res) => {
   res.clearCookie('token');
   res.json({
     success: true,
@@ -134,7 +134,7 @@ router.post('/logout', protect, (req, res) => {
 });
 
 // Get current admin
-router.get('/me', protect, async (req, res) => {
+router.get('/me', optionalAuth, async (req, res) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({
       success: false,
@@ -156,7 +156,7 @@ router.get('/me', protect, async (req, res) => {
 });
 
 // Get pending admin registrations (any approved admin can access)
-router.get('/pending', protect, isAdmin, async (req, res) => {
+router.get('/pending', optionalAuth, isAdmin, async (req, res) => {
   try {
     const pendingAdmins = await Admin.find({ status: 'pending' })
       .select('-password')
@@ -176,7 +176,7 @@ router.get('/pending', protect, isAdmin, async (req, res) => {
 });
 
 // Approve/Reject admin registration (any approved admin can do this)
-router.patch('/approve/:adminId', protect, isAdmin, async (req, res) => {
+router.patch('/approve/:adminId', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { adminId } = req.params;
     const { status, rejectionReason } = req.body;
@@ -219,7 +219,7 @@ router.patch('/approve/:adminId', protect, isAdmin, async (req, res) => {
   }
 });
 
-router.get('/dashboard', protect, isAdmin, async (req, res) => {
+router.get('/dashboard', optionalAuth, isAdmin, async (req, res) => {
   try {
     console.log("hii")
     // Fetch relevant data for admin dashboard

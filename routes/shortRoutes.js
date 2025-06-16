@@ -2,13 +2,13 @@
 const express = require('express');
 const router = express.Router();
 const Short = require('../models/Short');
-const { protect, isAdmin } = require('../middleware/auth');
+const { optionalAuth, isAdmin } = require('../middleware/auth');
 
 
 // @route   POST /api/shorts
 // @desc    Add a new short
 // @access  Admin only
-router.post('/', protect, isAdmin, async (req, res) => {
+router.post('/', optionalAuth, isAdmin, async (req, res) => {
   console.log("get");
   try {
     const { title, description, youtubeLink } = req.body;
@@ -58,7 +58,7 @@ router.post('/', protect, isAdmin, async (req, res) => {
 // @route   GET /api/shorts
 // @desc    Get all shorts
 // @access  Admin only
-router.get('/', protect, isAdmin, async (req, res) => {
+router.get('/', optionalAuth, isAdmin, async (req, res) => {
   try {
     const shorts = await Short.find().sort({ createdAt: -1 });
     
@@ -80,7 +80,7 @@ router.get('/', protect, isAdmin, async (req, res) => {
 // @route   GET /api/shorts/:id
 // @desc    Get short by ID
 // @access  Admin only
-router.get('/:id', protect, isAdmin, async (req, res) => {
+router.get('/:id', optionalAuth, isAdmin, async (req, res) => {
   try {
     const short = await Short.findById(req.params.id);
     
@@ -108,7 +108,7 @@ router.get('/:id', protect, isAdmin, async (req, res) => {
 // @route   PUT /api/shorts/:id
 // @desc    Update short
 // @access  Admin only
-router.put('/:id', protect, isAdmin, async (req, res) => {
+router.put('/:id', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { title, description, youtubeLink, metrics } = req.body;
     
@@ -168,7 +168,7 @@ router.put('/:id', protect, isAdmin, async (req, res) => {
 // @route   DELETE /api/shorts/:id
 // @desc    Delete short
 // @access  Admin only
-router.delete('/:id', protect, isAdmin, async (req, res) => {
+router.delete('/:id', optionalAuth, isAdmin, async (req, res) => {
   try {
     const short = await Short.findById(req.params.id);
     
@@ -198,7 +198,7 @@ router.delete('/:id', protect, isAdmin, async (req, res) => {
 // @route   PATCH /api/shorts/:id/metrics
 // @desc    Update short metrics
 // @access  Admin only
-router.patch('/:id/metrics', protect, isAdmin, async (req, res) => {
+router.patch('/:id/metrics', optionalAuth, isAdmin, async (req, res) => {
   try {
     const { views, likes, comments, shares } = req.body;
     

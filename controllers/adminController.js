@@ -12,6 +12,7 @@ const AdminProfile = require('../models/AdminProfile');
  */
 exports.getDashboardStats = async (req, res) => {
   try {
+    console.log("hii")
     // User statistics
     const totalUsers = await User.countDocuments({ role: 'user' });
     const totalRecruiters = await User.countDocuments({ role: 'recruiter' });
