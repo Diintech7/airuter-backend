@@ -51,7 +51,12 @@ if (!fs.existsSync(tempDir)) {
 
 connectDB();
 
-app.use(cors());
+app.use(cors({
+  origin: 'https://www.airuter.com',
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true
+}));
 
 // Add cookie parser middleware
 app.use(cookieParser());
