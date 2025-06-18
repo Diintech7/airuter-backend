@@ -252,43 +252,36 @@ app.use((err, req, res, next) => {
 });
 
 // WebSocket servers
-const wss = new WebSocket.Server({ noServer: true }); // Keep for legacy speech endpoint
-const deepgramWss = new WebSocket.Server({ noServer: true }); // Keep for legacy transcribe endpoint
-const unifiedVoiceWss = new WebSocket.Server({ noServer: true }); // New unified endpoint
+const wss = new WebSocket.Server({ noServer: true });
+const deepgramWss = new WebSocket.Server({ noServer: true });
 const interviewWss = new WebSocket.Server({ noServer: true });
+const unifiedVoiceWss = new WebSocket.Server({ noServer: true }); 
 
 setupWebSocketServer(wss);
 setupDeepgramServer(deepgramWss);
+setupUnifiedVoiceServer(unifiedVoiceWss); 
 
 server.on('upgrade', (request, socket, head) => {
   const pathname = request.url;
 
-  if (pathname.startsWith('/ws/voice')) {
+  if (pathname.startsWith('/ws/unified-voice')) {
     // New unified voice endpoint
-    console.log('Upgrading to unified voice WebSocket');
     unifiedVoiceWss.handleUpgrade(request, socket, head, (ws) => {
       unifiedVoiceWss.emit('connection', ws, request);
     });
   } else if (pathname.startsWith('/ws/transcribe')) {
-    // Legacy transcription endpoint
-    console.log('Upgrading to legacy transcription WebSocket');
     deepgramWss.handleUpgrade(request, socket, head, (ws) => {
       deepgramWss.emit('connection', ws, request);
     });
   } else if (pathname.startsWith('/ws/speech')) {
-    // Legacy speech synthesis endpoint
-    console.log('Upgrading to legacy speech WebSocket');
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
     });
   } else if (pathname.startsWith('/ws/interview')) {
-    // Interview endpoint
-    console.log('Upgrading to interview WebSocket');
     interviewWss.handleUpgrade(request, socket, head, (ws) => {
       interviewWss.emit('connection', ws, request);
     });
   } else {
-    console.log('Unknown WebSocket path:', pathname);
     socket.destroy();
   }
 });
