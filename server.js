@@ -6,8 +6,7 @@ const cors = require('cors');
 const connectDB = require('./config/db');
 const chatRoutes = require('./routes/chat');
 const resumeRoutes = require('./routes/resumeRoutes');
-const { setupWebSocketServer } = require('./websocket/streamingServer');
-const { setupDeepgramServer } = require('./websocket/deepgramServer');
+const { setupUnifiedVoiceServer } = require('./websocket/unifiedVoiceServer'); // New unified server
 const fileUpload = require('express-fileupload');
 const authRoutes = require('./routes/auth');
 const profileRoutes = require('./routes/profile');
@@ -250,30 +249,37 @@ app.use((err, req, res, next) => {
   });
 });
 
-// WebSocket servers
-const wss = new WebSocket.Server({ noServer: true });
-const deepgramWss = new WebSocket.Server({ noServer: true });
+// Create unified WebSocket server for voice services
+const unifiedVoiceWss = new WebSocket.Server({ noServer: true });
 const interviewWss = new WebSocket.Server({ noServer: true });
 
-setupWebSocketServer(wss);
-setupDeepgramServer(deepgramWss);
+// Setup the unified voice server (handles both transcription and speech synthesis)
+setupUnifiedVoiceServer(unifiedVoiceWss);
 
+// Handle WebSocket upgrades
 server.on('upgrade', (request, socket, head) => {
   const pathname = request.url;
+  console.log('WebSocket upgrade request for:', pathname);
 
-  if (pathname.startsWith('/ws/transcribe')) {
-    deepgramWss.handleUpgrade(request, socket, head, (ws) => {
-      deepgramWss.emit('connection', ws, request);
-    });
-  } else if (pathname.startsWith('/ws/speech')) {
-    wss.handleUpgrade(request, socket, head, (ws) => {
-      wss.emit('connection', ws, request);
+  if (pathname.startsWith('/ws/voice')) {
+    // Unified voice endpoint (replaces both /ws/transcribe and /ws/speech)
+    unifiedVoiceWss.handleUpgrade(request, socket, head, (ws) => {
+      unifiedVoiceWss.emit('connection', ws, request);
     });
   } else if (pathname.startsWith('/ws/interview')) {
+    // Keep interview WebSocket separate
     interviewWss.handleUpgrade(request, socket, head, (ws) => {
       interviewWss.emit('connection', ws, request);
     });
+  } 
+  // Legacy support for old endpoints (redirect to unified)
+  else if (pathname.startsWith('/ws/transcribe') || pathname.startsWith('/ws/speech')) {
+    console.log(`Redirecting legacy endpoint ${pathname} to unified voice endpoint`);
+    unifiedVoiceWss.handleUpgrade(request, socket, head, (ws) => {
+      unifiedVoiceWss.emit('connection', ws, request);
+    });
   } else {
+    console.log('Unknown WebSocket path:', pathname);
     socket.destroy();
   }
 });
@@ -285,7 +291,12 @@ process.on('unhandledRejection', (err) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log('Authentication endpoints available:');
+  console.log('WebSocket endpoints available:');
+  console.log('  - /ws/voice (Unified voice services - transcription & synthesis)');
+  console.log('  - /ws/interview (Interview WebSocket)');
+  console.log('  - /ws/transcribe (Legacy - redirects to /ws/voice)');
+  console.log('  - /ws/speech (Legacy - redirects to /ws/voice)');
+  console.log('\nAuthentication endpoints:');
   console.log('  - GET /api/auth/check (Universal auth check)');
   console.log('  - GET /api/auth/validate (User validation)');
   console.log('  - GET /api/candidate/validate (Candidate validation)');
