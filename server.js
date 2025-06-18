@@ -29,7 +29,6 @@ const candidateAuth = require('./routes/candidateRoute');
 const cookieParser = require('cookie-parser');
 const profileRoutess = require('./routes/profileRoutes');
 const { validateToken, checkAuth } = require('./middleware/candidateAuth');
-const { setupUnifiedVoiceServer } = require('./websocket/unifiedVoiceServer');
 
 const app = express();
 const server = http.createServer(app);
@@ -39,8 +38,7 @@ const passport = require('passport');
 
 const uploadDir = path.join(__dirname, 'uploads');
 const tempDir = path.join(__dirname, 'temp');
-const unifiedVoiceWss = new WebSocket.Server({ noServer: true });
-setupUnifiedVoiceServer(unifiedVoiceWss);
+
 if (!fs.existsSync(uploadDir)) {
   fs.mkdirSync(uploadDir, { recursive: true });
 }
@@ -270,11 +268,6 @@ server.on('upgrade', (request, socket, head) => {
   } else if (pathname.startsWith('/ws/speech')) {
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit('connection', ws, request);
-    });
-  } else if (pathname.startsWith('/ws/voice')) {
-    // NEW UNIFIED ENDPOINT
-    unifiedVoiceWss.handleUpgrade(request, socket, head, (ws) => {
-      unifiedVoiceWss.emit('connection', ws, request);
     });
   } else if (pathname.startsWith('/ws/interview')) {
     interviewWss.handleUpgrade(request, socket, head, (ws) => {
