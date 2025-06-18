@@ -6,7 +6,8 @@ const cors = require('cors');
 const connectDB = require('./config/db');
 const chatRoutes = require('./routes/chat');
 const resumeRoutes = require('./routes/resumeRoutes');
-const { setupUnifiedVoiceServer } = require('./websocket/unifiedVoiceServer'); // New unified server
+const { setupWebSocketServer } = require('./websocket/streamingServer');
+const { setupDeepgramServer } = require('./websocket/deepgramServer');
 const fileUpload = require('express-fileupload');
 const authRoutes = require('./routes/auth');
 const profileRoutes = require('./routes/profile');
@@ -28,6 +29,7 @@ const candidateAuth = require('./routes/candidateRoute');
 const cookieParser = require('cookie-parser');
 const profileRoutess = require('./routes/profileRoutes');
 const { validateToken, checkAuth } = require('./middleware/candidateAuth');
+const { setupUnifiedVoiceServer } = require('./websocket/unifiedVoiceServer');
 
 const app = express();
 const server = http.createServer(app);
@@ -249,34 +251,41 @@ app.use((err, req, res, next) => {
   });
 });
 
-// Create unified WebSocket server for voice services
-const unifiedVoiceWss = new WebSocket.Server({ noServer: true });
+// WebSocket servers
+const wss = new WebSocket.Server({ noServer: true }); // Keep for legacy speech endpoint
+const deepgramWss = new WebSocket.Server({ noServer: true }); // Keep for legacy transcribe endpoint
+const unifiedVoiceWss = new WebSocket.Server({ noServer: true }); // New unified endpoint
 const interviewWss = new WebSocket.Server({ noServer: true });
 
-// Setup the unified voice server (handles both transcription and speech synthesis)
-setupUnifiedVoiceServer(unifiedVoiceWss);
+setupWebSocketServer(wss);
+setupDeepgramServer(deepgramWss);
 
-// Handle WebSocket upgrades
 server.on('upgrade', (request, socket, head) => {
   const pathname = request.url;
-  console.log('WebSocket upgrade request for:', pathname);
 
   if (pathname.startsWith('/ws/voice')) {
-    // Unified voice endpoint (replaces both /ws/transcribe and /ws/speech)
+    // New unified voice endpoint
+    console.log('Upgrading to unified voice WebSocket');
     unifiedVoiceWss.handleUpgrade(request, socket, head, (ws) => {
       unifiedVoiceWss.emit('connection', ws, request);
+    });
+  } else if (pathname.startsWith('/ws/transcribe')) {
+    // Legacy transcription endpoint
+    console.log('Upgrading to legacy transcription WebSocket');
+    deepgramWss.handleUpgrade(request, socket, head, (ws) => {
+      deepgramWss.emit('connection', ws, request);
+    });
+  } else if (pathname.startsWith('/ws/speech')) {
+    // Legacy speech synthesis endpoint
+    console.log('Upgrading to legacy speech WebSocket');
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      wss.emit('connection', ws, request);
     });
   } else if (pathname.startsWith('/ws/interview')) {
-    // Keep interview WebSocket separate
+    // Interview endpoint
+    console.log('Upgrading to interview WebSocket');
     interviewWss.handleUpgrade(request, socket, head, (ws) => {
       interviewWss.emit('connection', ws, request);
-    });
-  } 
-  // Legacy support for old endpoints (redirect to unified)
-  else if (pathname.startsWith('/ws/transcribe') || pathname.startsWith('/ws/speech')) {
-    console.log(`Redirecting legacy endpoint ${pathname} to unified voice endpoint`);
-    unifiedVoiceWss.handleUpgrade(request, socket, head, (ws) => {
-      unifiedVoiceWss.emit('connection', ws, request);
     });
   } else {
     console.log('Unknown WebSocket path:', pathname);
@@ -291,12 +300,7 @@ process.on('unhandledRejection', (err) => {
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log('WebSocket endpoints available:');
-  console.log('  - /ws/voice (Unified voice services - transcription & synthesis)');
-  console.log('  - /ws/interview (Interview WebSocket)');
-  console.log('  - /ws/transcribe (Legacy - redirects to /ws/voice)');
-  console.log('  - /ws/speech (Legacy - redirects to /ws/voice)');
-  console.log('\nAuthentication endpoints:');
+  console.log('Authentication endpoints available:');
   console.log('  - GET /api/auth/check (Universal auth check)');
   console.log('  - GET /api/auth/validate (User validation)');
   console.log('  - GET /api/candidate/validate (Candidate validation)');

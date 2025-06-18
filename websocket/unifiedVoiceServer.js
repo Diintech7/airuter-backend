@@ -1,385 +1,311 @@
+// unifiedVoiceServer.js
 const WebSocket = require('ws');
 const { DeepgramClient } = require('./deepgramClient');
 const { LMNTStreamingClient } = require('./lmntStreaming');
 
-class UnifiedVoiceWebSocketServer {
-  constructor() {
-    this.deepgramClients = new Map();
+class UnifiedVoiceSession {
+  constructor(ws, options = {}) {
+    this.ws = ws;
+    this.deepgramClient = null;
     this.lmntClient = null;
-    this.initializeLMNTClient();
+    this.sessionId = Math.random().toString(36).substring(7);
+    this.language = options.language || 'hi';
+    this.voice = options.voice || 'lily';
+    this.isProcessing = false;
+    
+    console.log(`[${this.sessionId}] New voice session created - Language: ${this.language}, Voice: ${this.voice}`);
+    
+    this.initialize();
   }
 
-  initializeLMNTClient() {
-    if (process.env.LMNT_API_KEY) {
-      this.lmntClient = new LMNTStreamingClient(process.env.LMNT_API_KEY);
-      console.log('LMNT client initialized successfully');
-    } else {
-      console.error('LMNT API key not found in environment variables');
-    }
-  }
-
-  setupServer(wss) {
-    console.log('Unified Voice WebSocket server initialized');
-
-    wss.on('connection', (ws, req) => {
-      console.log('New unified voice connection established');
-      
-      // Parse connection parameters
-      const url = new URL(req.url, 'http://localhost');
-      const connectionId = this.generateConnectionId();
-      
-      // Store connection metadata
-      ws.connectionId = connectionId;
-      ws.isTranscriptionActive = false;
-      ws.language = url.searchParams.get('language') || 'hi';
-      ws.voice = url.searchParams.get('voice') || 'lily';
-      ws.model = url.searchParams.get('model') || 'nova-2';
-
-      console.log(`Connection ${connectionId} established with params:`, {
-        language: ws.language,
-        voice: ws.voice,
-        model: ws.model
-      });
-
-      // Send connection confirmation
-      this.sendMessage(ws, {
-        type: 'connection',
-        status: 'connected',
-        connectionId: connectionId,
-        services: ['transcription', 'synthesis'],
-        config: {
-          language: ws.language,
-          voice: ws.voice,
-          model: ws.model
-        }
-      });
-
-      ws.on('message', async (message) => {
-        try {
-          await this.handleMessage(ws, message);
-        } catch (error) {
-          console.error(`Error handling message for connection ${connectionId}:`, error);
-          this.sendError(ws, 'Message processing failed', error.message);
-        }
-      });
-
-      ws.on('close', () => {
-        console.log(`Connection ${connectionId} closed`);
-        this.cleanup(connectionId);
-      });
-
-      ws.on('error', (error) => {
-        console.error(`WebSocket error for connection ${connectionId}:`, error);
-        this.cleanup(connectionId);
-      });
-    });
-  }
-
-  async handleMessage(ws, message) {
+  async initialize() {
     try {
-      // Check if message is JSON (control message) or binary (audio data)
-      if (this.isJsonMessage(message)) {
-        const data = JSON.parse(message.toString());
-        await this.handleControlMessage(ws, data);
-      } else {
-        // Binary audio data for transcription
-        await this.handleAudioData(ws, message);
-      }
-    } catch (error) {
-      console.error('Error in handleMessage:', error);
-      this.sendError(ws, 'Message handling failed', error.message);
-    }
-  }
-
-  isJsonMessage(message) {
-    try {
-      const str = message.toString();
-      JSON.parse(str);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  async handleControlMessage(ws, data) {
-    console.log(`Control message for ${ws.connectionId}:`, data.type);
-
-    switch (data.type) {
-      case 'start_transcription':
-        await this.startTranscription(ws, data);
-        break;
-
-      case 'stop_transcription':
-        await this.stopTranscription(ws);
-        break;
-
-      case 'synthesize_speech':
-        await this.synthesizeSpeech(ws, data);
-        break;
-
-      case 'update_config':
-        await this.updateConfig(ws, data);
-        break;
-
-      case 'ping':
-        this.sendMessage(ws, { type: 'pong', timestamp: Date.now() });
-        break;
-
-      default:
-        console.warn(`Unknown control message type: ${data.type}`);
-        this.sendError(ws, 'Unknown message type', `Type '${data.type}' is not supported`);
-    }
-  }
-
-  async startTranscription(ws, config = {}) {
-    try {
-      if (ws.isTranscriptionActive) {
-        console.log(`Transcription already active for ${ws.connectionId}`);
-        return;
-      }
-
-      console.log(`Starting transcription for ${ws.connectionId}`);
-
-      const deepgramClient = new DeepgramClient(process.env.DEEPGRAM_API_KEY);
+      // Initialize Deepgram client
+      this.deepgramClient = new DeepgramClient(process.env.DEEPGRAM_API_KEY);
       
       // Set up transcript callback
-      deepgramClient.onTranscript = (transcript) => {
-        if (transcript && transcript.trim()) {
-          console.log(`Transcript from ${ws.connectionId}:`, transcript);
-          this.sendMessage(ws, {
-            type: 'transcript',
-            data: transcript,
-            language: ws.language,
-            timestamp: Date.now()
-          });
-        }
+      this.deepgramClient.onTranscript = (transcript) => {
+        this.handleTranscript(transcript);
       };
 
       // Connect to Deepgram
-      await deepgramClient.connect({
-        language: config.language || ws.language,
-        model: config.model || ws.model,
+      await this.deepgramClient.connect({
+        language: this.language,
+        model: 'nova-2',
         punctuate: true,
         diarize: false,
-        tier: 'enhanced'
+        tier: 'enhanced',
+        interim_results: true
       });
 
-      // Store the client
-      this.deepgramClients.set(ws.connectionId, deepgramClient);
-      ws.isTranscriptionActive = true;
+      // Initialize LMNT client
+      this.lmntClient = new LMNTStreamingClient(process.env.LMNT_API_KEY);
 
-      this.sendMessage(ws, {
-        type: 'transcription_started',
-        status: 'active',
-        config: {
-          language: ws.language,
-          model: ws.model
-        }
+      console.log(`[${this.sessionId}] Voice session initialized successfully`);
+      
+      // Send ready signal to client
+      this.sendMessage({
+        type: 'ready',
+        sessionId: this.sessionId,
+        message: 'Voice session ready'
       });
-
-      console.log(`Transcription started successfully for ${ws.connectionId}`);
 
     } catch (error) {
-      console.error(`Failed to start transcription for ${ws.connectionId}:`, error);
-      this.sendError(ws, 'Transcription start failed', error.message);
+      console.error(`[${this.sessionId}] Failed to initialize voice session:`, error);
+      this.sendMessage({
+        type: 'error',
+        error: 'Failed to initialize voice session',
+        details: error.message
+      });
     }
   }
 
-  async stopTranscription(ws) {
-    try {
-      const deepgramClient = this.deepgramClients.get(ws.connectionId);
-      if (deepgramClient) {
-        deepgramClient.close();
-        this.deepgramClients.delete(ws.connectionId);
-        ws.isTranscriptionActive = false;
+  handleTranscript(transcript) {
+    if (!transcript || !transcript.trim()) return;
+    
+    console.log(`[${this.sessionId}] Transcript received: "${transcript}"`);
+    
+    // Send transcript to client
+    this.sendMessage({
+      type: 'transcript',
+      data: transcript,
+      language: this.language,
+      timestamp: new Date().toISOString()
+    });
 
-        this.sendMessage(ws, {
-          type: 'transcription_stopped',
-          status: 'inactive'
-        });
-
-        console.log(`Transcription stopped for ${ws.connectionId}`);
-      }
-    } catch (error) {
-      console.error(`Error stopping transcription for ${ws.connectionId}:`, error);
-      this.sendError(ws, 'Transcription stop failed', error.message);
-    }
+    // Process transcript for response (you can customize this logic)
+    this.processTranscriptForResponse(transcript);
   }
 
-  async handleAudioData(ws, audioData) {
-    if (!ws.isTranscriptionActive) {
-      console.warn(`Received audio data but transcription not active for ${ws.connectionId}`);
+  async processTranscriptForResponse(transcript) {
+    if (this.isProcessing) {
+      console.log(`[${this.sessionId}] Already processing, skipping transcript: "${transcript}"`);
       return;
     }
 
-    const deepgramClient = this.deepgramClients.get(ws.connectionId);
-    if (deepgramClient) {
-      deepgramClient.sendAudio(audioData);
-      console.log(`Audio data sent to Deepgram for ${ws.connectionId}, size: ${audioData.length} bytes`);
-    } else {
-      console.error(`No Deepgram client found for ${ws.connectionId}`);
+    this.isProcessing = true;
+
+    try {
+      // Send processing status
+      this.sendMessage({
+        type: 'processing',
+        message: 'Generating response...'
+      });
+
+      // Generate response text (customize this based on your needs)
+      const responseText = await this.generateResponse(transcript);
+      
+      if (responseText && responseText.trim()) {
+        // Send response text to client
+        this.sendMessage({
+          type: 'response',
+          text: responseText,
+          timestamp: new Date().toISOString()
+        });
+
+        // Generate and stream audio
+        await this.generateAndStreamAudio(responseText);
+      }
+
+    } catch (error) {
+      console.error(`[${this.sessionId}] Error processing transcript:`, error);
+      this.sendMessage({
+        type: 'error',
+        error: 'Failed to process transcript',
+        details: error.message
+      });
+    } finally {
+      this.isProcessing = false;
     }
   }
 
-  async synthesizeSpeech(ws, data) {
+  async generateResponse(transcript) {
+    // Simple echo response for testing - customize this with your AI logic
+    // You can integrate with OpenAI, Claude, or any other AI service here
+    
+    // Example responses based on language
+    if (this.language === 'hi') {
+      return `आपने कहा: "${transcript}"। मैं आपकी मदद कैसे कर सकता हूं?`;
+    } else {
+      return `You said: "${transcript}". How can I help you?`;
+    }
+  }
+
+  async generateAndStreamAudio(text) {
     try {
-      if (!this.lmntClient) {
-        throw new Error('LMNT client not initialized');
-      }
-
-      if (!data.text || !data.text.trim()) {
-        throw new Error('Text is required for speech synthesis');
-      }
-
-      console.log(`Starting speech synthesis for ${ws.connectionId}:`, {
-        text: data.text.substring(0, 100) + (data.text.length > 100 ? '...' : ''),
-        voice: data.voice || ws.voice,
-        language: data.language || ws.language
+      console.log(`[${this.sessionId}] Generating audio for: "${text}"`);
+      
+      // Send audio generation start signal
+      this.sendMessage({
+        type: 'audio_start',
+        message: 'Generating audio...'
       });
 
-      this.sendMessage(ws, {
-        type: 'synthesis_started',
-        status: 'processing'
+      const audioData = await this.lmntClient.synthesize(text, {
+        voice: this.voice,
+        language: this.language,
+        speed: 1.0
       });
-
-      const synthesisOptions = {
-        voice: data.voice || ws.voice,
-        language: data.language || ws.language,
-        speed: data.speed || 1.0
-      };
-
-      console.log(`Synthesis options for ${ws.connectionId}:`, synthesisOptions);
-
-      const audioData = await this.lmntClient.synthesize(data.text, synthesisOptions);
 
       if (!audioData || audioData.length === 0) {
-        throw new Error('Received empty audio data from LMNT');
+        throw new Error('Empty audio data received');
       }
 
-      await this.streamAudioToClient(ws, audioData);
+      // Stream audio in chunks
+      const audioBuffer = Buffer.from(audioData);
+      const chunkSize = 16384; // 16KB chunks
+      const totalChunks = Math.ceil(audioBuffer.length / chunkSize);
 
-      console.log(`Speech synthesis completed for ${ws.connectionId}`);
+      console.log(`[${this.sessionId}] Streaming ${audioBuffer.length} bytes in ${totalChunks} chunks`);
 
-    } catch (error) {
-      console.error(`Speech synthesis failed for ${ws.connectionId}:`, error);
-      this.sendError(ws, 'Speech synthesis failed', error.message);
-    }
-  }
+      for (let i = 0; i < audioBuffer.length; i += chunkSize) {
+        const chunk = audioBuffer.slice(i, i + chunkSize);
+        const chunkNumber = Math.floor(i / chunkSize) + 1;
 
-  async streamAudioToClient(ws, audioData) {
-    const audioBuffer = Buffer.from(audioData);
-    const chunkSize = 16384; // 16KB chunks
-    const totalChunks = Math.ceil(audioBuffer.length / chunkSize);
-
-    console.log(`Streaming audio to ${ws.connectionId}:`, {
-      totalSize: audioBuffer.length,
-      chunkSize: chunkSize,
-      totalChunks: totalChunks
-    });
-
-    this.sendMessage(ws, {
-      type: 'audio_stream_start',
-      totalSize: audioBuffer.length,
-      totalChunks: totalChunks
-    });
-
-    for (let i = 0; i < audioBuffer.length; i += chunkSize) {
-      if (ws.readyState !== WebSocket.OPEN) {
-        console.warn(`Connection ${ws.connectionId} closed during streaming`);
-        break;
-      }
-
-      const chunk = audioBuffer.slice(i, i + chunkSize);
-      const chunkNumber = Math.floor(i / chunkSize) + 1;
-
-      // Send audio chunk as binary data
-      ws.send(chunk);
-
-      console.log(`Sent audio chunk ${chunkNumber}/${totalChunks} to ${ws.connectionId} (${chunk.length} bytes)`);
-
-      // Small delay to prevent overwhelming the client
-      await this.sleep(10);
-    }
-
-    if (ws.readyState === WebSocket.OPEN) {
-      this.sendMessage(ws, {
-        type: 'audio_stream_end',
-        status: 'complete'
-      });
-      console.log(`Audio streaming completed for ${ws.connectionId}`);
-    }
-  }
-
-  async updateConfig(ws, data) {
-    try {
-      if (data.language) ws.language = data.language;
-      if (data.voice) ws.voice = data.voice;
-      if (data.model) ws.model = data.model;
-
-      this.sendMessage(ws, {
-        type: 'config_updated',
-        config: {
-          language: ws.language,
-          voice: ws.voice,
-          model: ws.model
+        if (this.ws.readyState === WebSocket.OPEN) {
+          // Send audio chunk as binary data
+          this.ws.send(chunk);
+          console.log(`[${this.sessionId}] Sent audio chunk ${chunkNumber}/${totalChunks}`);
+        } else {
+          console.warn(`[${this.sessionId}] WebSocket closed while streaming audio`);
+          break;
         }
+      }
+
+      // Send audio end signal
+      this.sendMessage({
+        type: 'audio_end',
+        message: 'Audio streaming complete'
       });
 
-      console.log(`Config updated for ${ws.connectionId}:`, {
-        language: ws.language,
-        voice: ws.voice,
-        model: ws.model
-      });
+      console.log(`[${this.sessionId}] Audio streaming completed`);
+
     } catch (error) {
-      this.sendError(ws, 'Config update failed', error.message);
+      console.error(`[${this.sessionId}] Error generating audio:`, error);
+      this.sendMessage({
+        type: 'error',
+        error: 'Failed to generate audio',
+        details: error.message
+      });
     }
   }
 
-  sendMessage(ws, message) {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(message));
+  handleAudioData(audioData) {
+    if (!this.deepgramClient) {
+      console.error(`[${this.sessionId}] Deepgram client not initialized`);
+      return;
+    }
+
+    try {
+      this.deepgramClient.sendAudio(audioData);
+    } catch (error) {
+      console.error(`[${this.sessionId}] Error sending audio to Deepgram:`, error);
     }
   }
 
-  sendError(ws, title, details) {
-    this.sendMessage(ws, {
-      type: 'error',
-      error: title,
-      details: details,
-      timestamp: Date.now()
+  handleTextMessage(message) {
+    try {
+      const data = JSON.parse(message);
+      
+      switch (data.type) {
+        case 'config':
+          this.updateConfig(data);
+          break;
+        case 'text_to_speech':
+          this.generateAndStreamAudio(data.text);
+          break;
+        case 'ping':
+          this.sendMessage({ type: 'pong', timestamp: new Date().toISOString() });
+          break;
+        default:
+          console.log(`[${this.sessionId}] Unknown message type: ${data.type}`);
+      }
+    } catch (error) {
+      console.error(`[${this.sessionId}] Error handling text message:`, error);
+    }
+  }
+
+  updateConfig(config) {
+    if (config.language && config.language !== this.language) {
+      this.language = config.language;
+      console.log(`[${this.sessionId}] Language updated to: ${this.language}`);
+    }
+    
+    if (config.voice && config.voice !== this.voice) {
+      this.voice = config.voice;
+      console.log(`[${this.sessionId}] Voice updated to: ${this.voice}`);
+    }
+
+    this.sendMessage({
+      type: 'config_updated',
+      language: this.language,
+      voice: this.voice
     });
   }
 
-  cleanup(connectionId) {
-    const deepgramClient = this.deepgramClients.get(connectionId);
-    if (deepgramClient) {
-      try {
-        deepgramClient.close();
-        this.deepgramClients.delete(connectionId);
-        console.log(`Cleaned up Deepgram client for ${connectionId}`);
-      } catch (error) {
-        console.error(`Error cleaning up Deepgram client for ${connectionId}:`, error);
-      }
+  sendMessage(message) {
+    if (this.ws.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify(message));
     }
   }
 
-  generateConnectionId() {
-    return `voice_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-  }
-
-  sleep(ms) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  cleanup() {
+    console.log(`[${this.sessionId}] Cleaning up voice session`);
+    
+    if (this.deepgramClient) {
+      this.deepgramClient.close();
+      this.deepgramClient = null;
+    }
+    
+    this.lmntClient = null;
+    this.isProcessing = false;
   }
 }
 
-// Setup function to be used in server.js
 const setupUnifiedVoiceServer = (wss) => {
-  const unifiedServer = new UnifiedVoiceWebSocketServer();
-  unifiedServer.setupServer(wss);
-  return unifiedServer;
+  console.log('Unified Voice WebSocket server initialized');
+
+  wss.on('connection', (ws, req) => {
+    console.log('New unified voice connection established');
+    
+    // Parse query parameters
+    const url = new URL(req.url, 'http://localhost');
+    const language = url.searchParams.get('language') || 'hi';
+    const voice = url.searchParams.get('voice') || 'lily';
+    
+    // Create voice session
+    const voiceSession = new UnifiedVoiceSession(ws, { language, voice });
+
+    ws.on('message', (message) => {
+      try {
+        // Check if message is binary (audio data) or text
+        if (message instanceof Buffer) {
+          // Handle audio data
+          voiceSession.handleAudioData(message);
+        } else {
+          // Handle text message
+          voiceSession.handleTextMessage(message.toString());
+        }
+      } catch (error) {
+        console.error('Error handling message:', error);
+        voiceSession.sendMessage({
+          type: 'error',
+          error: 'Message handling failed',
+          details: error.message
+        });
+      }
+    });
+
+    ws.on('close', () => {
+      console.log('Unified voice connection closed');
+      voiceSession.cleanup();
+    });
+
+    ws.on('error', (error) => {
+      console.error('Unified voice WebSocket error:', error);
+      voiceSession.cleanup();
+    });
+  });
 };
 
-module.exports = { 
-  UnifiedVoiceWebSocketServer, 
-  setupUnifiedVoiceServer 
-};
+module.exports = { setupUnifiedVoiceServer, UnifiedVoiceSession };
