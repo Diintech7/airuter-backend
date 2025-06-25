@@ -1,12 +1,117 @@
 const WebSocket = require('ws');
-// const { DeepgramClient } = require('./deepgramClient'); // Comment out for now
+const { createClient } = require('@deepgram/sdk');
 const { LMNTStreamingClient } = require('./lmntStreaming');
 
+// Improved Deepgram Client
+class DeepgramClient {
+  constructor(apiKey) {
+    this.apiKey = apiKey;
+    this.deepgram = createClient(apiKey);
+    this.connection = null;
+    this.isConnected = false;
+    this.onTranscript = null;
+    this.onError = null;
+  }
+
+  async connect(options = {}) {
+    try {
+      console.log('🔍 Testing Deepgram API key...');
+      
+      // Test API key first
+      const projects = await this.deepgram.manage.getProjects();
+      console.log('✅ API key valid, projects found:', projects.projects?.length || 0);
+
+      // Create live connection with improved options
+      const connectionOptions = {
+        model: options.model || 'nova-2',
+        language: options.language || 'en-US',
+        smart_format: true,
+        interim_results: false,
+        punctuate: true,
+        diarize: false,
+        ...options
+      };
+
+      console.log('🔗 Creating Deepgram connection with options:', connectionOptions);
+      this.connection = this.deepgram.listen.live(connectionOptions);
+
+      return new Promise((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error('Connection timeout after 10 seconds'));
+        }, 10000);
+
+        this.connection.on('open', () => {
+          clearTimeout(timeout);
+          console.log('✅ Deepgram connection opened successfully');
+          this.isConnected = true;
+          resolve(true);
+        });
+
+        this.connection.on('transcript', (data) => {
+          try {
+            const transcript = data.channel?.alternatives?.[0]?.transcript;
+            if (transcript && transcript.trim() && this.onTranscript) {
+              console.log('📝 Transcript received:', transcript);
+              this.onTranscript(transcript, data);
+            }
+          } catch (error) {
+            console.error('Error processing transcript:', error);
+          }
+        });
+
+        this.connection.on('error', (error) => {
+          clearTimeout(timeout);
+          console.error('❌ Deepgram connection error:', error);
+          this.isConnected = false;
+          if (this.onError) {
+            this.onError(error);
+          }
+          reject(error);
+        });
+
+        this.connection.on('close', () => {
+          console.log('🔌 Deepgram connection closed');
+          this.isConnected = false;
+        });
+      });
+    } catch (error) {
+      console.error('❌ Failed to connect to Deepgram:', error);
+      throw error;
+    }
+  }
+
+  sendAudio(audioData) {
+    if (this.connection && this.isConnected) {
+      try {
+        this.connection.send(audioData);
+        return true;
+      } catch (error) {
+        console.error('Error sending audio to Deepgram:', error);
+        return false;
+      }
+    }
+    console.warn('⚠️ Deepgram not connected, cannot send audio');
+    return false;
+  }
+
+  close() {
+    if (this.connection) {
+      try {
+        this.connection.finish();
+      } catch (error) {
+        console.error('Error closing Deepgram connection:', error);
+      }
+      this.connection = null;
+      this.isConnected = false;
+    }
+  }
+}
+
 const setupUnifiedVoiceServer = (wss) => {
-  console.log('Unified Voice WebSocket server initialized');
+  console.log('🚀 Unified Voice WebSocket server initialized');
 
   wss.on('connection', (ws, req) => {
-    console.log('New unified voice connection established');
+    console.log('🔗 New unified voice connection established');
     
     let deepgramClient = null;
     let lmntClient = null;
@@ -19,17 +124,77 @@ const setupUnifiedVoiceServer = (wss) => {
     const url = new URL(req.url, 'http://localhost');
     const language = url.searchParams.get('language') || 'hi';
     
-    console.log(`Connection established with language: ${language}`);
-    console.log('Environment check:', {
+    console.log(`🌐 Connection established with language: ${language}`);
+    console.log('🔧 Environment check:', {
       hasDeepgramKey: !!process.env.DEEPGRAM_API_KEY,
       hasLmntKey: !!process.env.LMNT_API_KEY,
       deepgramKeyLength: process.env.DEEPGRAM_API_KEY ? process.env.DEEPGRAM_API_KEY.length : 0
     });
 
-    // Skip Deepgram initialization for now
+    // Initialize Deepgram with retry logic
     const initializeDeepgram = async () => {
-      console.log('Deepgram initialization skipped for testing');
-      return false; // Return false to indicate Deepgram is not available
+      if (!process.env.DEEPGRAM_API_KEY) {
+        console.error('❌ DEEPGRAM_API_KEY not configured');
+        return false;
+      }
+
+      try {
+        deepgramClient = new DeepgramClient(process.env.DEEPGRAM_API_KEY);
+        
+        deepgramClient.onTranscript = (transcript, data) => {
+          if (ws.readyState === WebSocket.OPEN) {
+            const response = {
+              event: 'transcription',
+              type: 'transcription',
+              text: transcript,
+              transcription: transcript,
+              data: {
+                text: transcript,
+                transcription: transcript,
+                transcript: transcript,
+                recognized_text: transcript,
+                session_id: sessionId,
+                language: language,
+                confidence: data.channel?.alternatives?.[0]?.confidence || 0.9,
+                words: data.channel?.alternatives?.[0]?.words || []
+              },
+              session_id: sessionId,
+              language: language,
+              timestamp: Date.now()
+            };
+            
+            console.log('📤 Sending transcription response:', response);
+            ws.send(JSON.stringify(response));
+          }
+        };
+
+        deepgramClient.onError = (error) => {
+          console.error('❌ Deepgram error:', error);
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ 
+              type: 'error', 
+              error: `Deepgram error: ${error.message}`,
+              session_id: sessionId,
+              service: 'deepgram'
+            }));
+          }
+        };
+
+        const deepgramLanguageCode = getDeepgramLanguageCode(language);
+        await deepgramClient.connect({
+          language: deepgramLanguageCode,
+          model: 'nova-2',
+          smart_format: true,
+          interim_results: false
+        });
+
+        console.log('✅ Deepgram client initialized successfully');
+        return true;
+      } catch (error) {
+        console.error('❌ Failed to initialize Deepgram:', error);
+        deepgramClient = null;
+        return false;
+      }
     };
 
     // Helper function to get proper Deepgram language code
@@ -60,7 +225,7 @@ const setupUnifiedVoiceServer = (wss) => {
         try {
           const messageStr = message.toString();
           data = JSON.parse(messageStr);
-          console.log('Received JSON message:', {
+          console.log('📥 Received JSON message:', {
             event: data.event,
             session_id: data.session_id,
             language: data.language,
@@ -68,7 +233,7 @@ const setupUnifiedVoiceServer = (wss) => {
             audioDataLength: data.audio_data ? data.audio_data.length : 0
           });
         } catch (parseError) {
-          console.error('Received invalid message format, size:', message.length);
+          console.error('❌ Received invalid message format, size:', message.length);
           return;
         }
 
@@ -79,20 +244,25 @@ const setupUnifiedVoiceServer = (wss) => {
             sessionId = data.uuid || data.session_id || generateSessionId();
             messageCount = 0;
             
-            console.log('Session started with ID:', sessionId);
+            console.log('🎬 Session started with ID:', sessionId);
             
-            // Skip Deepgram initialization
-            const deepgramInitialized = false;
+            // Initialize Deepgram
+            const deepgramInitialized = await initializeDeepgram();
             
             // Send connection confirmation
             if (ws.readyState === WebSocket.OPEN) {
+              const services = ['synthesis'];
+              if (deepgramInitialized) {
+                services.push('transcription');
+              }
+
               ws.send(JSON.stringify({ 
                 type: 'connected',
                 language: language,
-                services: ['synthesis'], // Only synthesis for now
+                services: services,
                 session_id: sessionId,
                 status: 'ready',
-                deepgram_status: 'disabled_for_testing',
+                deepgram_status: deepgramInitialized ? 'connected' : 'failed',
                 environment: {
                   hasDeepgramKey: !!process.env.DEEPGRAM_API_KEY,
                   hasLmntKey: !!process.env.LMNT_API_KEY
@@ -102,38 +272,74 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case 'transcribe':
-            // Handle transcription request - return mock response for testing
-            console.log('Processing transcribe event (mock response)...');
+            // Handle transcription request
+            console.log('🎤 Processing transcribe event...');
             
             if (!sessionId) {
               sessionId = data.session_id || generateSessionId();
             }
-            
-            // Send mock transcription response
-            setTimeout(() => {
-              if (ws.readyState === WebSocket.OPEN) {
-                const mockTranscriptionResponse = {
-                  event: 'transcription',
-                  type: 'transcription',
-                  text: 'Mock transcription: Hello, this is a test transcription',
-                  transcription: 'Mock transcription: Hello, this is a test transcription',
-                  data: {
+
+            if (!deepgramClient || !deepgramClient.isConnected) {
+              console.log('⚠️ Deepgram not available, sending mock response');
+              // Send mock transcription response
+              setTimeout(() => {
+                if (ws.readyState === WebSocket.OPEN) {
+                  const mockTranscriptionResponse = {
+                    event: 'transcription',
+                    type: 'transcription',
                     text: 'Mock transcription: Hello, this is a test transcription',
                     transcription: 'Mock transcription: Hello, this is a test transcription',
-                    transcript: 'Mock transcription: Hello, this is a test transcription',
-                    recognized_text: 'Mock transcription: Hello, this is a test transcription',
+                    data: {
+                      text: 'Mock transcription: Hello, this is a test transcription',
+                      transcription: 'Mock transcription: Hello, this is a test transcription',
+                      transcript: 'Mock transcription: Hello, this is a test transcription',
+                      recognized_text: 'Mock transcription: Hello, this is a test transcription',
+                      session_id: sessionId,
+                      language: language
+                    },
                     session_id: sessionId,
-                    language: language
-                  },
-                  session_id: sessionId,
-                  language: language,
-                  timestamp: Date.now()
-                };
-                
-                console.log('Sending mock transcription response:', mockTranscriptionResponse);
-                ws.send(JSON.stringify(mockTranscriptionResponse));
+                    language: language,
+                    timestamp: Date.now()
+                  };
+                  
+                  console.log('📤 Sending mock transcription response:', mockTranscriptionResponse);
+                  ws.send(JSON.stringify(mockTranscriptionResponse));
+                }
+              }, 1000);
+              break;
+            }
+
+            // Process real audio with Deepgram
+            if (data.audio_data) {
+              try {
+                const audioBuffer = Buffer.from(data.audio_data, 'base64');
+                const sent = deepgramClient.sendAudio(audioBuffer);
+                if (!sent) {
+                  throw new Error('Failed to send audio to Deepgram');
+                }
+                console.log('📤 Audio sent to Deepgram, size:', audioBuffer.length);
+              } catch (error) {
+                console.error('❌ Error processing audio:', error);
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(JSON.stringify({ 
+                    type: 'error', 
+                    error: `Audio processing failed: ${error.message}`,
+                    session_id: sessionId,
+                    service: 'deepgram'
+                  }));
+                }
               }
-            }, 1000); // 1 second delay to simulate processing
+            } else {
+              console.error('❌ No audio data provided');
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ 
+                  type: 'error', 
+                  error: 'No audio data provided for transcription',
+                  session_id: sessionId,
+                  service: 'validation'
+                }));
+              }
+            }
             break;
 
           case 'synthesize':
@@ -154,7 +360,7 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           default:
-            console.warn('Unknown message event:', data.event || data.type);
+            console.warn('⚠️ Unknown message event:', data.event || data.type);
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ 
                 type: 'error', 
@@ -167,7 +373,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
         
       } catch (error) {
-        console.error('Error processing message:', error);
+        console.error('❌ Error processing message:', error);
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ 
             type: 'error', 
@@ -182,11 +388,11 @@ const setupUnifiedVoiceServer = (wss) => {
     // Function to handle TTS requests
     async function handleTTSRequest(text, ws, sessionId) {
       try {
-        console.log('Processing TTS request for text:', text);
+        console.log('🎵 Processing TTS request for text:', text);
         
         // Check if LMNT API key is available
         if (!process.env.LMNT_API_KEY) {
-          console.error('LMNT API key not configured');
+          console.error('❌ LMNT API key not configured');
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ 
               type: 'error', 
@@ -202,9 +408,9 @@ const setupUnifiedVoiceServer = (wss) => {
         if (!lmntClient) {
           try {
             lmntClient = new LMNTStreamingClient(process.env.LMNT_API_KEY);
-            console.log('LMNT client initialized successfully');
+            console.log('✅ LMNT client initialized successfully');
           } catch (error) {
-            console.error('Failed to initialize LMNT client:', error);
+            console.error('❌ Failed to initialize LMNT client:', error);
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({ 
                 type: 'error', 
@@ -224,7 +430,7 @@ const setupUnifiedVoiceServer = (wss) => {
           speed: 1.0
         };
         
-        console.log('Synthesizing text with options:', synthesisOptions);
+        console.log('🎵 Synthesizing text with options:', synthesisOptions);
         const audioData = await lmntClient.synthesize(text, synthesisOptions);
         
         if (!audioData || audioData.length === 0) {
@@ -252,14 +458,14 @@ const setupUnifiedVoiceServer = (wss) => {
           timestamp: Date.now()
         };
         
-        console.log('Sending TTS response, audio size:', wavAudio.length);
+        console.log('📤 Sending TTS response, audio size:', wavAudio.length);
         
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(response));
         }
 
       } catch (error) {
-        console.error('Error in handleTTSRequest:', error);
+        console.error('❌ Error in handleTTSRequest:', error);
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({ 
             type: 'error', 
@@ -310,8 +516,17 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     ws.on('close', () => {
-      console.log('Unified voice connection closed');
+      console.log('🔌 Unified voice connection closed');
       connectionState = 'disconnected';
+      
+      if (deepgramClient) {
+        try {
+          deepgramClient.close();
+        } catch (error) {
+          console.error('❌ Error closing Deepgram client:', error);
+        }
+        deepgramClient = null;
+      }
       
       if (lmntClient) {
         try {
@@ -319,7 +534,7 @@ const setupUnifiedVoiceServer = (wss) => {
             lmntClient.close();
           }
         } catch (error) {
-          console.error('Error closing LMNT client:', error);
+          console.error('❌ Error closing LMNT client:', error);
         }
         lmntClient = null;
       }
@@ -328,7 +543,7 @@ const setupUnifiedVoiceServer = (wss) => {
     });
 
     ws.on('error', (error) => {
-      console.error('WebSocket error:', error);
+      console.error('❌ WebSocket error:', error);
       connectionState = 'error';
     });
 
@@ -338,7 +553,7 @@ const setupUnifiedVoiceServer = (wss) => {
       ws.send(JSON.stringify({ 
         type: 'connected',
         language: language,
-        services: ['synthesis'], // Only synthesis for now
+        services: ['synthesis'], // Will be updated after Deepgram initialization
         session_id: sessionId,
         status: 'ready',
         environment: {
