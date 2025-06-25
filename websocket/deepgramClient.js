@@ -9,65 +9,111 @@ class DeepgramClient {
     this.onTranscript = null;
     this.onError = null;
     this.isConnected = false;
+    this.connectionTimeout = null;
   }
 
   async connect(options = {}) {
     console.log('DeepgramClient: Connecting with options:', JSON.stringify(options));
     
     try {
-      // Create live transcription connection
-      this.connection = this.deepgram.listen.live({
+      // Clear any existing connection
+      if (this.connection) {
+        this.close();
+      }
+
+      // Simplified options for better compatibility
+      const connectionOptions = {
         language: options.language || 'en-US',
-        model: options.model || 'nova-2',
-        encoding: options.encoding || 'linear16',
-        sample_rate: parseInt(options.sample_rate) || 16000,
-        channels: parseInt(options.channels) || 1,
-        punctuate: options.punctuate !== undefined ? options.punctuate : true,
-        interim_results: options.interim_results !== undefined ? options.interim_results : false,
-        smart_format: options.smart_format !== undefined ? options.smart_format : true,
-        endpointing: options.endpointing || 300,
-        vad_events: options.vad_events !== undefined ? options.vad_events : false
-      });
+        model: 'nova-2', // Use stable model
+        encoding: 'linear16',
+        sample_rate: 16000, // Use number instead of string
+        channels: 1, // Use number instead of string
+        punctuate: true,
+        interim_results: false,
+        smart_format: true
+      };
+
+      console.log('DeepgramClient: Creating connection with simplified options:', connectionOptions);
+
+      // Create live transcription connection
+      this.connection = this.deepgram.listen.live(connectionOptions);
+
+      // Set up connection timeout
+      this.connectionTimeout = setTimeout(() => {
+        if (!this.isConnected) {
+          console.error('DeepgramClient: Connection timeout after 10 seconds');
+          if (this.onError) {
+            this.onError(new Error('Connection timeout'));
+          }
+        }
+      }, 10000);
 
       // Set up event handlers
       this.connection.on(LiveTranscriptionEvents.Open, () => {
         console.log('DeepgramClient: Connection opened successfully');
         this.isConnected = true;
+        if (this.connectionTimeout) {
+          clearTimeout(this.connectionTimeout);
+          this.connectionTimeout = null;
+        }
       });
 
       this.connection.on(LiveTranscriptionEvents.Transcript, (data) => {
-        console.log('DeepgramClient: Received transcript data:', data);
+        console.log('DeepgramClient: Received transcript data:', JSON.stringify(data, null, 2));
         
-        const transcript = data.channel?.alternatives?.[0]?.transcript;
-        if (transcript && transcript.trim() && this.onTranscript) {
-          console.log('DeepgramClient: Found transcript:', transcript);
-          this.onTranscript(transcript);
+        try {
+          const transcript = data.channel?.alternatives?.[0]?.transcript;
+          if (transcript && transcript.trim() && this.onTranscript) {
+            console.log('DeepgramClient: Found transcript:', transcript);
+            this.onTranscript(transcript);
+          }
+        } catch (error) {
+          console.error('DeepgramClient: Error processing transcript:', error);
         }
       });
 
       this.connection.on(LiveTranscriptionEvents.Error, (error) => {
         console.error('DeepgramClient: Error event:', error);
         this.isConnected = false;
+        
+        if (this.connectionTimeout) {
+          clearTimeout(this.connectionTimeout);
+          this.connectionTimeout = null;
+        }
+        
         if (this.onError) {
-          this.onError(error);
+          // Provide more specific error message
+          const errorMessage = error.message || error.type || 'Unknown Deepgram error';
+          this.onError(new Error(`Deepgram connection failed: ${errorMessage}`));
         }
       });
 
       this.connection.on(LiveTranscriptionEvents.Close, (event) => {
         console.log('DeepgramClient: Connection closed:', event);
         this.isConnected = false;
+        
+        if (this.connectionTimeout) {
+          clearTimeout(this.connectionTimeout);
+          this.connectionTimeout = null;
+        }
       });
 
       this.connection.on(LiveTranscriptionEvents.Metadata, (data) => {
-        console.log('DeepgramClient: Received metadata:', data);
+        console.log('DeepgramClient: Received metadata (connection confirmed):', data);
       });
 
-      console.log('DeepgramClient: Connection setup complete');
+      console.log('DeepgramClient: Connection setup complete, waiting for open event...');
       return Promise.resolve();
 
     } catch (error) {
       console.error('DeepgramClient: Failed to create connection:', error);
       this.isConnected = false;
+      
+      if (this.connectionTimeout) {
+        clearTimeout(this.connectionTimeout);
+        this.connectionTimeout = null;
+      }
+      
       if (this.onError) {
         this.onError(error);
       }
@@ -82,8 +128,7 @@ class DeepgramClient {
     }
     
     if (!this.isConnected) {
-      console.error('DeepgramClient: Cannot send audio - not connected');
-      return false;
+      console.warn('DeepgramClient: Sending audio while not fully connected (may still work)');
     }
     
     try {
@@ -98,7 +143,7 @@ class DeepgramClient {
   }
 
   finishAudio() {
-    if (this.connection && this.isConnected) {
+    if (this.connection) {
       try {
         console.log('DeepgramClient: Finishing audio stream');
         this.connection.finish();
@@ -111,6 +156,11 @@ class DeepgramClient {
   close() {
     console.log('DeepgramClient: Closing connection');
     this.isConnected = false;
+    
+    if (this.connectionTimeout) {
+      clearTimeout(this.connectionTimeout);
+      this.connectionTimeout = null;
+    }
     
     if (this.connection) {
       try {
