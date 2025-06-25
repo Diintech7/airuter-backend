@@ -15,56 +15,53 @@ class DeepgramClient {
     console.log('DeepgramClient: Connecting with options:', JSON.stringify(options));
     return new Promise((resolve, reject) => {
       try {
-        // Build URL with query parameters
+        // Build URL with query parameters - FIXED FORMAT
         const wsUrl = new URL('wss://api.deepgram.com/v1/listen');
         
-        // Add query parameters
-        wsUrl.searchParams.append('encoding', options.encoding || 'linear16');
-        wsUrl.searchParams.append('sample_rate', options.sample_rate || '16000');
-        wsUrl.searchParams.append('channels', options.channels || '1');
-        
-        // Language parameter
-        if (options.language) {
-          wsUrl.searchParams.append('language', options.language);
-        }
-        
-        // Model parameter
-        if (options.model) {
-          wsUrl.searchParams.append('model', options.model);
-        }
-        
-        // Other options
-        if (options.punctuate !== undefined) {
-          wsUrl.searchParams.append('punctuate', options.punctuate.toString());
-        }
-        
-        if (options.interim_results !== undefined) {
-          wsUrl.searchParams.append('interim_results', options.interim_results.toString());
-        }
-        
+        // Add query parameters in the correct format
+        const params = {
+          encoding: options.encoding || 'linear16',
+          sample_rate: options.sample_rate || '16000',
+          channels: options.channels || '1',
+          language: options.language || 'en-US',
+          model: options.model || 'nova-2',
+          punctuate: options.punctuate !== undefined ? options.punctuate.toString() : 'true',
+          interim_results: options.interim_results !== undefined ? options.interim_results.toString() : 'false',
+          smart_format: options.smart_format !== undefined ? options.smart_format.toString() : 'true'
+        };
+
+        // Add endpointing if specified
         if (options.endpointing !== undefined) {
-          wsUrl.searchParams.append('endpointing', options.endpointing.toString());
+          params.endpointing = options.endpointing.toString();
         }
-        
+
+        // Add VAD events if specified
         if (options.vad_events !== undefined) {
-          wsUrl.searchParams.append('vad_events', options.vad_events.toString());
+          params.vad_events = options.vad_events.toString();
         }
-        
-        if (options.smart_format !== undefined) {
-          wsUrl.searchParams.append('smart_format', options.smart_format.toString());
-        }
+
+        // Build query string
+        Object.keys(params).forEach(key => {
+          wsUrl.searchParams.append(key, params[key]);
+        });
 
         console.log('DeepgramClient: Connecting to URL:', wsUrl.toString());
         
-        // Create WebSocket with proper headers for authentication
-        const headers = {
-          'Authorization': `Token ${this.apiKey}`
+        // FIXED: Use proper authentication format for Deepgram
+        // Deepgram expects the API key in the Authorization header as "Token YOUR_API_KEY"
+        const wsOptions = {
+          headers: {
+            'Authorization': `Token ${this.apiKey}`,
+            'User-Agent': 'DeepgramNodeClient/1.0.0'
+          }
         };
         
-        this.ws = new WebSocket(wsUrl.toString(), {
-          headers: headers
+        console.log('DeepgramClient: Using headers:', {
+          'Authorization': `Token ${this.apiKey.substring(0, 10)}...`,
+          'User-Agent': 'DeepgramNodeClient/1.0.0'
         });
-
+        
+        this.ws = new WebSocket(wsUrl.toString(), wsOptions);
         this.ws.binaryType = 'arraybuffer';
         
         this.ws.onopen = () => {
@@ -93,8 +90,8 @@ class DeepgramClient {
                 this.onTranscript(transcript);
               }
             } else if (data.type === 'Metadata') {
-              // Metadata message
-              console.log('DeepgramClient: Received metadata:', data);
+              // Metadata message - connection successful
+              console.log('DeepgramClient: Received metadata (connection confirmed):', data);
             } else if (data.type === 'Error') {
               // Error message
               console.error('DeepgramClient: Received error from Deepgram:', data);
@@ -113,9 +110,10 @@ class DeepgramClient {
 
         this.ws.onerror = (error) => {
           console.error('DeepgramClient: WebSocket error:', error);
+          console.error('DeepgramClient: WebSocket readyState:', this.ws?.readyState);
           this.isConnected = false;
           if (this.onError) {
-            this.onError(error);
+            this.onError(new Error(`WebSocket connection failed: ${error.message || 'Unknown error'}`));
           }
           reject(error);
         };
@@ -124,6 +122,11 @@ class DeepgramClient {
           console.log(`DeepgramClient: Connection closed with code ${event.code}, reason: ${event.reason}`);
           this.isConnected = false;
           this.stopKeepAlive();
+          
+          // If connection closed unexpectedly, trigger error
+          if (event.code !== 1000 && this.onError) {
+            this.onError(new Error(`Connection closed unexpectedly: ${event.code} - ${event.reason}`));
+          }
         };
 
       } catch (error) {
@@ -191,9 +194,9 @@ class DeepgramClient {
     }
   }
 
-  // Keep-alive mechanism
+  // Keep-alive mechanism - FIXED TIMING
   startKeepAlive() {
-    // Send keep-alive every 8 seconds (Deepgram recommends 8-10 seconds)
+    // Send keep-alive every 5 seconds (more frequent to prevent timeout)
     this.keepAliveInterval = setInterval(() => {
       if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
         try {
@@ -204,7 +207,7 @@ class DeepgramClient {
           console.error('DeepgramClient: Error sending keep-alive:', error);
         }
       }
-    }, 8000);
+    }, 5000); // Changed from 8000 to 5000
   }
 
   stopKeepAlive() {
