@@ -33,8 +33,8 @@ const setupUnifiedVoiceServer = (wss) => {
           throw new Error('DEEPGRAM_API_KEY environment variable is not set');
         }
 
-        if (deepgramClient) {
-          console.log('Deepgram client already initialized');
+        if (deepgramClient && deepgramClient.isReady()) {
+          console.log('Deepgram client already initialized and ready');
           return true;
         }
 
@@ -46,7 +46,7 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log('Transcript received from Deepgram:', transcript);
           
           if (transcript && transcript.trim() && ws.readyState === WebSocket.OPEN) {
-            // Send transcription result in multiple formats for compatibility
+            // Send transcription result
             const transcriptionResponse = {
               event: 'transcription',
               type: 'transcription',
@@ -84,18 +84,18 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         };
 
-        // Connect to Deepgram with more robust configuration
+        // Connect to Deepgram with proper configuration
         const deepgramConfig = {
           language: getDeepgramLanguageCode(language),
           model: 'nova-2',
+          encoding: 'linear16',
+          sample_rate: '16000',
+          channels: '1',
           punctuate: true,
-          diarize: false,
-          tier: 'enhanced',
           interim_results: false,
           endpointing: 300,
-          vad_events: true,
-          smart_format: true,
-          profanity_filter: false
+          vad_events: false,
+          smart_format: true
         };
 
         console.log('Connecting to Deepgram with config:', deepgramConfig);
@@ -153,14 +153,20 @@ const setupUnifiedVoiceServer = (wss) => {
         try {
           const messageStr = message.toString();
           data = JSON.parse(messageStr);
-          console.log('Received JSON message:', data);
+          console.log('Received JSON message:', {
+            event: data.event,
+            session_id: data.session_id,
+            language: data.language,
+            hasAudioData: !!data.audio_data,
+            audioDataLength: data.audio_data ? data.audio_data.length : 0
+          });
         } catch (parseError) {
           // If not JSON, treat as binary audio data for transcription
           if (message instanceof Buffer && message.length > 100) {
             console.log('Received raw audio data for transcription, size:', message.length);
             
             // Ensure Deepgram is initialized
-            if (!deepgramClient || connectionState !== 'connected') {
+            if (!deepgramClient || !deepgramClient.isReady()) {
               console.log('Deepgram not ready, attempting to initialize...');
               const initialized = await initializeDeepgram();
               if (!initialized) {
@@ -219,102 +225,62 @@ const setupUnifiedVoiceServer = (wss) => {
               sessionId = data.session_id || generateSessionId();
             }
             
-            // Ensure Deepgram is initialized
-            if (!deepgramClient || connectionState !== 'connected') {
-              console.log('Deepgram not ready, attempting to initialize...');
-              const initialized = await initializeDeepgram();
-              if (!initialized) {
-                console.error('Failed to initialize Deepgram for transcription');
-                return;
-              }
-            }
-            
             if (data.audio_data) {
               try {
                 // Decode base64 audio data
                 const audioBuffer = Buffer.from(data.audio_data, 'base64');
                 console.log('Decoded audio buffer size:', audioBuffer.length);
                 
-                if (deepgramClient && audioBuffer.length > 0) {
-                  console.log('Sending decoded audio to Deepgram for transcription...');
-                  
-                  // Create a new Deepgram connection for this transcription request
-                  const tempDeepgramClient = new DeepgramClient(process.env.DEEPGRAM_API_KEY);
-                  
-                  // Set up one-time handlers for this transcription
-                  tempDeepgramClient.onTranscript = (transcript) => {
-                    console.log('One-time transcript received:', transcript);
-                    
-                    if (transcript && transcript.trim() && ws.readyState === WebSocket.OPEN) {
-                      const transcriptionResponse = {
-                        event: 'transcription',
-                        type: 'transcription',
-                        text: transcript.trim(),
-                        transcription: transcript.trim(),
-                        data: {
-                          text: transcript.trim(),
-                          transcription: transcript.trim(),
-                          transcript: transcript.trim(),
-                          recognized_text: transcript.trim(),
-                          session_id: sessionId,
-                          language: language
-                        },
-                        session_id: sessionId,
-                        language: language,
-                        timestamp: Date.now()
-                      };
-                      
-                      console.log('Sending one-time transcription response:', transcriptionResponse);
-                      ws.send(JSON.stringify(transcriptionResponse));
-                    }
-                    
-                    // Clean up the temporary client
-                    setTimeout(() => {
-                      try {
-                        tempDeepgramClient.close();
-                      } catch (error) {
-                        console.error('Error closing temp Deepgram client:', error);
-                      }
-                    }, 1000);
-                  };
-                  
-                  tempDeepgramClient.onError = (error) => {
-                    console.error('Temp Deepgram error:', error);
+                // Ensure Deepgram is initialized
+                if (!deepgramClient || !deepgramClient.isReady()) {
+                  console.log('Deepgram not ready, attempting to initialize...');
+                  const initialized = await initializeDeepgram();
+                  if (!initialized) {
+                    console.error('Failed to initialize Deepgram for transcription');
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(JSON.stringify({ 
                         type: 'error', 
-                        error: `Transcription failed: ${error.message}`,
+                        error: 'Failed to initialize transcription service',
                         session_id: sessionId,
                         service: 'deepgram'
                       }));
                     }
-                  };
+                    return;
+                  }
+                }
+                
+                if (audioBuffer.length > 0) {
+                  console.log('Sending decoded audio to Deepgram for transcription...');
                   
-                  // Connect and send audio
-                  await tempDeepgramClient.connect({
-                    language: getDeepgramLanguageCode(language),
-                    model: 'nova-2',
-                    punctuate: true,
-                    interim_results: false,
-                    endpointing: 300
-                  });
+                  // Send the audio data
+                  const sent = deepgramClient.sendAudio(audioBuffer);
                   
-                  // Send the entire audio buffer
-                  tempDeepgramClient.sendAudio(audioBuffer);
-                  
-                  // Signal end of audio stream
-                  setTimeout(() => {
-                    tempDeepgramClient.finishAudio();
-                  }, 100);
-                  
+                  if (!sent) {
+                    console.error('Failed to send audio to Deepgram');
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(JSON.stringify({ 
+                        type: 'error', 
+                        error: 'Failed to send audio for transcription',
+                        session_id: sessionId,
+                        service: 'deepgram'
+                      }));
+                    }
+                  } else {
+                    // Signal end of this audio segment after a brief delay
+                    setTimeout(() => {
+                      if (deepgramClient && deepgramClient.isReady()) {
+                        deepgramClient.finishAudio();
+                      }
+                    }, 100);
+                  }
                 } else {
-                  console.error('Invalid audio data or Deepgram not ready');
+                  console.error('Empty audio buffer received');
                   if (ws.readyState === WebSocket.OPEN) {
                     ws.send(JSON.stringify({ 
                       type: 'error', 
-                      error: 'Invalid audio data or transcription service not ready',
+                      error: 'Empty audio data received',
                       session_id: sessionId,
-                      service: 'deepgram'
+                      service: 'validation'
                     }));
                   }
                 }
@@ -347,7 +313,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log('Starting recording mode');
             isRecording = true;
             
-            if (!deepgramClient || connectionState !== 'connected') {
+            if (!deepgramClient || !deepgramClient.isReady()) {
               await initializeDeepgram();
             }
             
@@ -366,7 +332,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log('Stopping recording mode');
             isRecording = false;
             
-            if (deepgramClient) {
+            if (deepgramClient && deepgramClient.isReady()) {
               try {
                 deepgramClient.finishAudio();
               } catch (error) {
@@ -405,11 +371,11 @@ const setupUnifiedVoiceServer = (wss) => {
               const audioBuffer = Buffer.from(data.media.payload, 'base64');
               console.log('Received media payload, size:', audioBuffer.length);
               
-              if (!deepgramClient || connectionState !== 'connected') {
+              if (!deepgramClient || !deepgramClient.isReady()) {
                 await initializeDeepgram();
               }
               
-              if (deepgramClient && connectionState === 'connected') {
+              if (deepgramClient && deepgramClient.isReady()) {
                 deepgramClient.sendAudio(audioBuffer);
               }
             }
