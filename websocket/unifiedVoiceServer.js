@@ -29,6 +29,9 @@ class DeepgramClient {
         interim_results: false,
         punctuate: true,
         diarize: false,
+        encoding: "linear16",
+        sample_rate: 16000,
+        channels: 1,
         ...options,
       }
 
@@ -143,23 +146,22 @@ const setupUnifiedVoiceServer = (wss) => {
 
         deepgramClient.onTranscript = (transcript, data) => {
           if (ws.readyState === WebSocket.OPEN) {
+            // Format response according to client expectations
             const response = {
-              event: "transcription",
-              type: "transcription",
-              text: transcript,
-              transcription: transcript,
               data: {
-                text: transcript,
-                transcription: transcript,
-                transcript: transcript,
-                recognized_text: transcript,
                 session_id: sessionId,
-                language: language,
-                confidence: data.channel?.alternatives?.[0]?.confidence || 0.9,
-                words: data.channel?.alternatives?.[0]?.words || [],
+                count: ++messageCount,
+                text: transcript,
+                transcription_data: {
+                  transcript: transcript,
+                  confidence: data.channel?.alternatives?.[0]?.confidence || 0.9,
+                  words: data.channel?.alternatives?.[0]?.words || [],
+                  language: language,
+                  timestamp: Date.now()
+                }
               },
+              type: "transcription_response",
               session_id: sessionId,
-              language: language,
               timestamp: Date.now(),
             }
 
@@ -188,6 +190,9 @@ const setupUnifiedVoiceServer = (wss) => {
           model: "nova-2",
           smart_format: true,
           interim_results: false,
+          encoding: "linear16",
+          sample_rate: 16000,
+          channels: 1,
         })
 
         console.log("✅ Deepgram client initialized successfully")
@@ -204,7 +209,7 @@ const setupUnifiedVoiceServer = (wss) => {
       const languageMap = {
         hi: "hi-IN",
         en: "en-US",
-        te: "te-IN",
+        te: "te-IN", 
         ta: "ta-IN",
         bn: "bn-IN",
         gu: "gu-IN",
@@ -229,7 +234,7 @@ const setupUnifiedVoiceServer = (wss) => {
           data = JSON.parse(messageStr)
           console.log("📥 Received JSON message:", {
             event: data.event,
-            session_id: data.session_id,
+            session_id: data.session_id || data.uuid,
             language: data.language,
             hasAudioData: !!data.audio_data,
             audioDataLength: data.audio_data ? data.audio_data.length : 0,
@@ -242,7 +247,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Handle different message types
         switch (data.event) {
           case "start":
-            // Initialize session
+            // Initialize session - use uuid as session_id as per client requirement
             sessionId = data.uuid || data.session_id || generateSessionId()
             messageCount = 0
 
@@ -251,27 +256,29 @@ const setupUnifiedVoiceServer = (wss) => {
             // Initialize Deepgram
             const deepgramInitialized = await initializeDeepgram()
 
-            // Send connection confirmation
+            // Send connection confirmation in expected format
             if (ws.readyState === WebSocket.OPEN) {
               const services = ["synthesis"]
               if (deepgramInitialized) {
                 services.push("transcription")
               }
 
-              ws.send(
-                JSON.stringify({
-                  type: "connected",
-                  language: language,
-                  services: services,
+              const connectionResponse = {
+                data: {
                   session_id: sessionId,
-                  status: "ready",
+                  count: 0,
+                  status: "connected",
+                  services: services,
+                  language: language,
                   deepgram_status: deepgramInitialized ? "connected" : "failed",
-                  environment: {
-                    hasDeepgramKey: !!process.env.DEEPGRAM_API_KEY,
-                    hasLmntKey: !!process.env.LMNT_API_KEY,
-                  },
-                }),
-              )
+                },
+                type: "connection_established",
+                session_id: sessionId,
+                timestamp: Date.now(),
+              }
+
+              console.log("📤 Sending connection response:", connectionResponse)
+              ws.send(JSON.stringify(connectionResponse))
             }
             break
 
@@ -280,37 +287,35 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🎤 Processing transcribe event...")
 
             if (!sessionId) {
-              sessionId = data.session_id || generateSessionId()
+              sessionId = data.session_id || data.uuid || generateSessionId()
             }
 
             if (!deepgramClient || !deepgramClient.isConnected) {
-              console.log("⚠️ Deepgram not available, sending mock response")
-              // Send mock transcription response
-              setTimeout(() => {
+              console.error("⚠️ Deepgram not available - reinitializing...")
+              
+              // Try to reinitialize Deepgram
+              const reinitResult = await initializeDeepgram()
+              
+              if (!reinitResult) {
+                // Send error response in expected format
                 if (ws.readyState === WebSocket.OPEN) {
-                  const mockTranscriptionResponse = {
-                    event: "transcription",
-                    type: "transcription",
-                    text: "Mock transcription: Hello, this is a test transcription",
-                    transcription: "Mock transcription: Hello, this is a test transcription",
+                  const errorResponse = {
                     data: {
-                      text: "Mock transcription: Hello, this is a test transcription",
-                      transcription: "Mock transcription: Hello, this is a test transcription",
-                      transcript: "Mock transcription: Hello, this is a test transcription",
-                      recognized_text: "Mock transcription: Hello, this is a test transcription",
                       session_id: sessionId,
-                      language: language,
+                      count: ++messageCount,
+                      error: "Transcription service unavailable",
+                      status: "error"
                     },
+                    type: "transcription_error",
                     session_id: sessionId,
-                    language: language,
                     timestamp: Date.now(),
                   }
-
-                  console.log("📤 Sending mock transcription response:", mockTranscriptionResponse)
-                  ws.send(JSON.stringify(mockTranscriptionResponse))
+                  
+                  console.log("📤 Sending error response:", errorResponse)
+                  ws.send(JSON.stringify(errorResponse))
                 }
-              }, 1000)
-              break
+                break
+              }
             }
 
             // Process real audio with Deepgram
@@ -325,27 +330,35 @@ const setupUnifiedVoiceServer = (wss) => {
               } catch (error) {
                 console.error("❌ Error processing audio:", error)
                 if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: "error",
-                      error: `Audio processing failed: ${error.message}`,
+                  const errorResponse = {
+                    data: {
                       session_id: sessionId,
-                      service: "deepgram",
-                    }),
-                  )
+                      count: ++messageCount,
+                      error: `Audio processing failed: ${error.message}`,
+                      status: "error"
+                    },
+                    type: "transcription_error",
+                    session_id: sessionId,
+                    timestamp: Date.now(),
+                  }
+                  ws.send(JSON.stringify(errorResponse))
                 }
               }
             } else {
               console.error("❌ No audio data provided")
               if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "error",
-                    error: "No audio data provided for transcription",
+                const errorResponse = {
+                  data: {
                     session_id: sessionId,
-                    service: "validation",
-                  }),
-                )
+                    count: ++messageCount,
+                    error: "No audio data provided for transcription",
+                    status: "error"
+                  },
+                  type: "transcription_error", 
+                  session_id: sessionId,
+                  timestamp: Date.now(),
+                }
+                ws.send(JSON.stringify(errorResponse))
               }
             }
             break
@@ -357,14 +370,18 @@ const setupUnifiedVoiceServer = (wss) => {
               await handleTTSRequest(textToSynthesize, ws, sessionId)
             } else {
               if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "error",
-                    error: "No text provided for synthesis",
+                const errorResponse = {
+                  data: {
                     session_id: sessionId,
-                    service: "tts",
-                  }),
-                )
+                    count: ++messageCount,
+                    error: "No text provided for synthesis",
+                    status: "error"
+                  },
+                  type: "tts_error",
+                  session_id: sessionId,
+                  timestamp: Date.now(),
+                }
+                ws.send(JSON.stringify(errorResponse))
               }
             }
             break
@@ -372,28 +389,36 @@ const setupUnifiedVoiceServer = (wss) => {
           default:
             console.warn("⚠️ Unknown message event:", data.event || data.type)
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  error: `Unknown event type: ${data.event || data.type}`,
+              const errorResponse = {
+                data: {
                   session_id: sessionId,
-                  service: "validation",
-                }),
-              )
+                  count: ++messageCount,
+                  error: `Unknown event type: ${data.event || data.type}`,
+                  status: "error"
+                },
+                type: "unknown_event_error",
+                session_id: sessionId,
+                timestamp: Date.now(),
+              }
+              ws.send(JSON.stringify(errorResponse))
             }
             break
         }
       } catch (error) {
         console.error("❌ Error processing message:", error)
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              error: error.message,
+          const errorResponse = {
+            data: {
               session_id: sessionId,
-              service: "message_processing",
-            }),
-          )
+              count: ++messageCount,
+              error: error.message,
+              status: "error"
+            },
+            type: "message_processing_error",
+            session_id: sessionId,
+            timestamp: Date.now(),
+          }
+          ws.send(JSON.stringify(errorResponse))
         }
       }
     })
@@ -407,14 +432,18 @@ const setupUnifiedVoiceServer = (wss) => {
         if (!process.env.LMNT_API_KEY) {
           console.error("❌ LMNT API key not configured")
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: "error",
-                error: "TTS service not configured - LMNT API key missing",
+            const errorResponse = {
+              data: {
                 session_id: sessionId,
-                service: "tts",
-              }),
-            )
+                count: ++messageCount,
+                error: "TTS service not configured - LMNT API key missing",
+                status: "error"
+              },
+              type: "tts_error",
+              session_id: sessionId,
+              timestamp: Date.now(),
+            }
+            ws.send(JSON.stringify(errorResponse))
           }
           return
         }
@@ -427,14 +456,18 @@ const setupUnifiedVoiceServer = (wss) => {
           } catch (error) {
             console.error("❌ Failed to initialize LMNT client:", error)
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  error: `Failed to initialize TTS service: ${error.message}`,
+              const errorResponse = {
+                data: {
                   session_id: sessionId,
-                  service: "lmnt",
-                }),
-              )
+                  count: ++messageCount,
+                  error: `Failed to initialize TTS service: ${error.message}`,
+                  status: "error"
+                },
+                type: "tts_error",
+                session_id: sessionId,
+                timestamp: Date.now(),
+              }
+              ws.send(JSON.stringify(errorResponse))
             }
             return
           }
@@ -460,7 +493,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         messageCount++
 
-        // Send response in the expected format
+        // Send response in the expected format matching the client requirement
         const response = {
           data: {
             session_id: sessionId,
@@ -483,14 +516,18 @@ const setupUnifiedVoiceServer = (wss) => {
       } catch (error) {
         console.error("❌ Error in handleTTSRequest:", error)
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              error: `TTS processing failed: ${error.message}`,
+          const errorResponse = {
+            data: {
               session_id: sessionId,
-              service: "tts",
-            }),
-          )
+              count: ++messageCount,
+              error: `TTS processing failed: ${error.message}`,
+              status: "error"
+            },
+            type: "tts_error",
+            session_id: sessionId,
+            timestamp: Date.now(),
+          }
+          ws.send(JSON.stringify(errorResponse))
         }
       }
     }
@@ -581,20 +618,26 @@ const setupUnifiedVoiceServer = (wss) => {
     // Send initial connection confirmation
     if (ws.readyState === WebSocket.OPEN) {
       sessionId = generateSessionId()
-      ws.send(
-        JSON.stringify({
-          type: "connected",
-          language: language,
-          services: ["synthesis"], // Will be updated after Deepgram initialization
+      const initialResponse = {
+        data: {
           session_id: sessionId,
-          status: "ready",
+          count: 0,
+          status: "connected",
+          services: ["synthesis"], // Will be updated after Deepgram initialization
+          language: language,
           environment: {
             hasDeepgramKey: !!process.env.DEEPGRAM_API_KEY,
             hasLmntKey: !!process.env.LMNT_API_KEY,
             nodeEnv: process.env.NODE_ENV || "development",
           },
-        }),
-      )
+        },
+        type: "connection_established",
+        session_id: sessionId,
+        timestamp: Date.now(),
+      }
+      
+      console.log("📤 Sending initial connection response:", initialResponse)
+      ws.send(JSON.stringify(initialResponse))
     }
   })
 }
