@@ -1,180 +1,118 @@
-const { createClient, LiveTranscriptionEvents } = require('@deepgram/sdk');
+const WebSocket = require('ws');
 
 class DeepgramClient {
   constructor(apiKey) {
-    console.log('DeepgramClient: Initializing with official Deepgram SDK');
+    console.log('DeepgramClient: Initializing with API key');
     this.apiKey = apiKey;
-    this.deepgram = createClient(apiKey);
-    this.connection = null;
+    this.ws = null;
     this.onTranscript = null;
-    this.onError = null;
-    this.isConnected = false;
-    this.connectionTimeout = null;
   }
 
-  async connect(options = {}) {
+  connect(options = {}) {
     console.log('DeepgramClient: Connecting with options:', JSON.stringify(options));
-    
-    try {
-      // Clear any existing connection
-      if (this.connection) {
-        this.close();
-      }
+    return new Promise((resolve, reject) => {
+      try {
+        // Build URL with query parameters matching the desired format
+        const wsUrl = new URL('wss://api.deepgram.com/v1/listen');
+        wsUrl.searchParams.append('sample_rate', '16000');
+        wsUrl.searchParams.append('channels', '1');
+        wsUrl.searchParams.append('interim_results', 'true');
+        wsUrl.searchParams.append('language', options.language || 'hi');
+        wsUrl.searchParams.append('model', 'nova-2');
 
-      // Simplified options for better compatibility
-      const connectionOptions = {
-        language: options.language || 'en-US',
-        model: 'nova-2', // Use stable model
-        encoding: 'linear16',
-        sample_rate: 16000, // Use number instead of string
-        channels: 1, // Use number instead of string
-        punctuate: true,
-        interim_results: false,
-        smart_format: true
-      };
+        console.log('DeepgramClient: Connecting to URL:', wsUrl.toString());
+        
+        // Connect with token in WebSocket protocol array
+        this.ws = new WebSocket(wsUrl.toString(), ['token', this.apiKey]);
 
-      console.log('DeepgramClient: Creating connection with simplified options:', connectionOptions);
+        this.ws.binaryType = 'arraybuffer';
+        
+        this.ws.onopen = () => {
+          console.log('DeepgramClient: WebSocket connection established successfully');
+          resolve();
+        };
 
-      // Create live transcription connection
-      this.connection = this.deepgram.listen.live(connectionOptions);
-
-      // Set up connection timeout
-      this.connectionTimeout = setTimeout(() => {
-        if (!this.isConnected) {
-          console.error('DeepgramClient: Connection timeout after 10 seconds');
-          if (this.onError) {
-            this.onError(new Error('Connection timeout'));
+        this.ws.onmessage = (event) => {
+          console.log('DeepgramClient: Received message from Deepgram');
+          try {
+            // Check if event.data is a string or needs conversion
+            const rawData = typeof event.data === 'string' ? event.data : 
+                          Buffer.from(event.data).toString();
+            console.log('DeepgramClient: Raw message data:', rawData);
+            
+            const data = JSON.parse(rawData);
+            console.log('DeepgramClient: Parsed data:', JSON.stringify(data));
+            
+            if (data.channel?.alternatives?.[0]?.transcript) {
+              const transcript = data.channel.alternatives[0].transcript;
+              console.log('DeepgramClient: Found transcript:', transcript);
+              if (transcript.trim() && this.onTranscript) {
+                console.log('DeepgramClient: Calling onTranscript with:', transcript);
+                this.onTranscript(transcript);
+              } else {
+                console.log('DeepgramClient: Transcript empty or onTranscript not set');
+              }
+            } else {
+              console.log('DeepgramClient: No transcript in response');
+            }
+          } catch (parseError) {
+            console.error('DeepgramClient: Error parsing Deepgram message:', parseError);
+            console.error('DeepgramClient: Raw message type:', typeof event.data);
+            // If it's binary data, log its size
+            if (event.data instanceof ArrayBuffer) {
+              console.error('DeepgramClient: Binary data size:', event.data.byteLength);
+            }
           }
-        }
-      }, 10000);
+        };
 
-      // Set up event handlers
-      this.connection.on(LiveTranscriptionEvents.Open, () => {
-        console.log('DeepgramClient: Connection opened successfully');
-        this.isConnected = true;
-        if (this.connectionTimeout) {
-          clearTimeout(this.connectionTimeout);
-          this.connectionTimeout = null;
-        }
-      });
+        this.ws.onerror = (error) => {
+          console.error('DeepgramClient: WebSocket error:', error);
+          reject(error);
+        };
 
-      this.connection.on(LiveTranscriptionEvents.Transcript, (data) => {
-        console.log('DeepgramClient: Received transcript data:', JSON.stringify(data, null, 2));
-        
-        try {
-          const transcript = data.channel?.alternatives?.[0]?.transcript;
-          if (transcript && transcript.trim() && this.onTranscript) {
-            console.log('DeepgramClient: Found transcript:', transcript);
-            this.onTranscript(transcript);
-          }
-        } catch (error) {
-          console.error('DeepgramClient: Error processing transcript:', error);
-        }
-      });
+        this.ws.onclose = (event) => {
+          console.log(`DeepgramClient: Connection closed with code ${event.code}, reason: ${event.reason}`);
+        };
 
-      this.connection.on(LiveTranscriptionEvents.Error, (error) => {
-        console.error('DeepgramClient: Error event:', error);
-        this.isConnected = false;
-        
-        if (this.connectionTimeout) {
-          clearTimeout(this.connectionTimeout);
-          this.connectionTimeout = null;
-        }
-        
-        if (this.onError) {
-          // Provide more specific error message
-          const errorMessage = error.message || error.type || 'Unknown Deepgram error';
-          this.onError(new Error(`Deepgram connection failed: ${errorMessage}`));
-        }
-      });
-
-      this.connection.on(LiveTranscriptionEvents.Close, (event) => {
-        console.log('DeepgramClient: Connection closed:', event);
-        this.isConnected = false;
-        
-        if (this.connectionTimeout) {
-          clearTimeout(this.connectionTimeout);
-          this.connectionTimeout = null;
-        }
-      });
-
-      this.connection.on(LiveTranscriptionEvents.Metadata, (data) => {
-        console.log('DeepgramClient: Received metadata (connection confirmed):', data);
-      });
-
-      console.log('DeepgramClient: Connection setup complete, waiting for open event...');
-      return Promise.resolve();
-
-    } catch (error) {
-      console.error('DeepgramClient: Failed to create connection:', error);
-      this.isConnected = false;
-      
-      if (this.connectionTimeout) {
-        clearTimeout(this.connectionTimeout);
-        this.connectionTimeout = null;
+      } catch (error) {
+        console.error('DeepgramClient: Error during setup:', error);
+        reject(error);
       }
-      
-      if (this.onError) {
-        this.onError(error);
-      }
-      throw error;
-    }
+    });
   }
 
   sendAudio(audioData) {
-    if (!this.connection) {
-      console.error('DeepgramClient: Cannot send audio - connection not initialized');
-      return false;
+    if (!this.ws) {
+      console.error('DeepgramClient: Cannot send audio - WebSocket not initialized');
+      return;
     }
     
-    if (!this.isConnected) {
-      console.warn('DeepgramClient: Sending audio while not fully connected (may still work)');
+    if (this.ws.readyState !== WebSocket.OPEN) {
+      console.error('DeepgramClient: Cannot send audio - WebSocket not open, current state:', this.ws.readyState);
+      return;
     }
     
     try {
       const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData);
       console.log('DeepgramClient: Sending audio data, size:', buffer.length, 'bytes');
-      this.connection.send(buffer);
-      return true;
+      this.ws.send(buffer);
     } catch (error) {
       console.error('DeepgramClient: Error sending audio data:', error);
-      return false;
-    }
-  }
-
-  finishAudio() {
-    if (this.connection) {
-      try {
-        console.log('DeepgramClient: Finishing audio stream');
-        this.connection.finish();
-      } catch (error) {
-        console.error('DeepgramClient: Error finishing audio stream:', error);
-      }
     }
   }
 
   close() {
     console.log('DeepgramClient: Closing connection');
-    this.isConnected = false;
-    
-    if (this.connectionTimeout) {
-      clearTimeout(this.connectionTimeout);
-      this.connectionTimeout = null;
-    }
-    
-    if (this.connection) {
+    if (this.ws) {
       try {
-        this.connection.finish();
-        console.log('DeepgramClient: Connection closed successfully');
+        this.ws.close();
+        console.log('DeepgramClient: WebSocket closed successfully');
       } catch (error) {
-        console.error('DeepgramClient: Error closing connection:', error);
+        console.error('DeepgramClient: Error closing WebSocket:', error);
       }
-      this.connection = null;
+    } else {
+      console.log('DeepgramClient: No WebSocket to close');
     }
-  }
-
-  isReady() {
-    return this.isConnected && this.connection;
   }
 }
 
