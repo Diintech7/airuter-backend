@@ -48,6 +48,16 @@ if (!fs.existsSync(tempDir)) {
   fs.mkdirSync(tempDir, { recursive: true });
 }
 
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log('Authentication endpoints available:');
+  console.log('  - GET /api/auth/check (Universal auth check)');
+  console.log('  - GET /api/auth/validate (User validation)');
+  console.log('  - GET /api/candidate/validate (Candidate validation)');
+  console.log('  - GET /api/admin/validate (Admin validation)');
+});
+
 connectDB();
 
 app.use(cors({
@@ -290,12 +300,3 @@ process.on('unhandledRejection', (err) => {
   console.error('Unhandled Promise Rejection:', err);
 });
 
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-  console.log('Authentication endpoints available:');
-  console.log('  - GET /api/auth/check (Universal auth check)');
-  console.log('  - GET /api/auth/validate (User validation)');
-  console.log('  - GET /api/candidate/validate (Candidate validation)');
-  console.log('  - GET /api/admin/validate (Admin validation)');
-});
