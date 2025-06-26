@@ -21,6 +21,16 @@ const setupUnifiedVoiceServer = (wss) => {
     let audioBuffer = []
     let deepgramConnected = false
 
+    // Rate limiting state
+    let audioQueue = []
+    let isProcessingQueue = false
+    let lastSentTime = 0
+    const MIN_SEND_INTERVAL = 250 // Minimum 250ms between sends to Deepgram
+    const MAX_QUEUE_SIZE = 50 // Maximum queued audio chunks
+    let reconnectAttempts = 0
+    const MAX_RECONNECT_ATTEMPTS = 5
+    let reconnectDelay = 1000 // Start with 1 second
+
     // LMNT client state
     const lmntApiKey = process.env.LMNT_API_KEY
 
@@ -35,7 +45,102 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 LMNT API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
 
-    // Deepgram WebSocket connection function
+    // Audio queue processor with rate limiting
+    const processAudioQueue = async () => {
+      if (isProcessingQueue || audioQueue.length === 0) {
+        return
+      }
+
+      isProcessingQueue = true
+
+      while (audioQueue.length > 0 && deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+        const now = Date.now()
+        const timeSinceLastSend = now - lastSentTime
+
+        // Enforce minimum interval between sends
+        if (timeSinceLastSend < MIN_SEND_INTERVAL) {
+          const waitTime = MIN_SEND_INTERVAL - timeSinceLastSend
+          console.log(`⏱️ Rate limiting: waiting ${waitTime}ms before next send`)
+          await new Promise((resolve) => setTimeout(resolve, waitTime))
+        }
+
+        const audioData = audioQueue.shift()
+        const success = await sendAudioToDeepgramThrottled(audioData)
+
+        if (!success) {
+          // If send failed, put the audio back at the front of the queue
+          audioQueue.unshift(audioData)
+          break
+        }
+
+        lastSentTime = Date.now()
+
+        // Small delay between chunks to prevent overwhelming
+        await new Promise((resolve) => setTimeout(resolve, 50))
+      }
+
+      isProcessingQueue = false
+
+      // Continue processing if there are more items in queue
+      if (audioQueue.length > 0) {
+        setTimeout(processAudioQueue, MIN_SEND_INTERVAL)
+      }
+    }
+
+    // Enhanced audio sending with better error handling
+    const sendAudioToDeepgramThrottled = async (audioData) => {
+      if (!deepgramWs) {
+        console.error("❌ Deepgram: Cannot send audio - WebSocket not initialized")
+        return false
+      }
+
+      if (deepgramWs.readyState !== WebSocket.OPEN) {
+        console.error("❌ Deepgram: Cannot send audio - WebSocket not open, current state:", deepgramWs.readyState)
+        return false
+      }
+
+      if (!deepgramReady) {
+        console.error("❌ Deepgram: Cannot send audio - Client not ready")
+        return false
+      }
+
+      try {
+        const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
+        console.log("🎵 Deepgram: Sending audio data, size:", buffer.length, "bytes")
+
+        deepgramWs.send(buffer)
+        return true
+      } catch (error) {
+        console.error("❌ Deepgram: Error sending audio data:", error)
+
+        // If it's a rate limiting error, we should back off
+        if (error.message.includes("429") || error.message.includes("rate limit")) {
+          console.log("🚫 Rate limit detected, backing off...")
+          await new Promise((resolve) => setTimeout(resolve, 2000))
+        }
+
+        return false
+      }
+    }
+
+    // Queue audio data with overflow protection
+    const queueAudioData = (audioData) => {
+      // Prevent queue overflow
+      if (audioQueue.length >= MAX_QUEUE_SIZE) {
+        console.warn("⚠️ Audio queue full, dropping oldest chunk")
+        audioQueue.shift() // Remove oldest chunk
+      }
+
+      audioQueue.push(audioData)
+      console.log(`📊 Audio queued. Queue size: ${audioQueue.length}`)
+
+      // Start processing if not already running
+      if (!isProcessingQueue) {
+        processAudioQueue()
+      }
+    }
+
+    // Deepgram WebSocket connection function with exponential backoff
     const connectToDeepgram = async (options = {}) => {
       return new Promise((resolve, reject) => {
         try {
@@ -69,27 +174,28 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", process.env.DEEPGRAM_API_KEY])
           deepgramWs.binaryType = "arraybuffer"
 
-          // Add connection timeout
+          // Add connection timeout with exponential backoff
           const connectionTimeout = setTimeout(() => {
-            console.error("❌ Deepgram: Connection timeout after 10 seconds")
+            console.error("❌ Deepgram: Connection timeout after 15 seconds")
             if (deepgramWs) {
               deepgramWs.close()
             }
             reject(new Error("Deepgram connection timeout"))
-          }, 10000)
+          }, 15000)
 
           deepgramWs.onopen = () => {
             clearTimeout(connectionTimeout)
             console.log("✅ Deepgram: WebSocket connection established successfully")
             deepgramReady = true
             deepgramConnected = true
+            reconnectAttempts = 0 // Reset reconnect attempts on successful connection
+            reconnectDelay = 1000 // Reset delay
 
-            // Process buffered audio
-            console.log("🎙️ Deepgram: Processing", audioBuffer.length, "buffered audio chunks")
-            audioBuffer.forEach((audioData) => {
-              sendAudioToDeepgram(audioData)
-            })
-            audioBuffer = []
+            // Process any queued audio
+            console.log("🎙️ Deepgram: Processing", audioQueue.length, "queued audio chunks")
+            if (audioQueue.length > 0) {
+              processAudioQueue()
+            }
 
             resolve()
           }
@@ -150,6 +256,21 @@ const setupUnifiedVoiceServer = (wss) => {
             console.error("❌ Deepgram: WebSocket error:", error)
             deepgramReady = false
             deepgramConnected = false
+
+            // Check if it's a rate limiting error
+            if (error.message && error.message.includes("429")) {
+              console.log("🚫 Deepgram: Rate limit error detected")
+              // Send rate limit error to client
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "error",
+                    error: "Rate limit exceeded. Please slow down audio transmission.",
+                  }),
+                )
+              }
+            }
+
             reject(error)
           }
 
@@ -159,14 +280,34 @@ const setupUnifiedVoiceServer = (wss) => {
             deepgramReady = false
             deepgramConnected = false
 
-            // Auto-reconnect if connection was lost unexpectedly
-            if (event.code !== 1000 && event.code !== 1001) {
-              console.log("🔄 Deepgram: Attempting to reconnect in 2 seconds...")
-              setTimeout(() => {
-                connectToDeepgram(options).catch((err) => {
-                  console.error("❌ Deepgram: Reconnection failed:", err)
-                })
-              }, 2000)
+            // Handle rate limiting (429) or other recoverable errors
+            if (event.code === 1006 || event.code === 1011 || event.reason.includes("429")) {
+              console.log("🔄 Deepgram: Attempting to reconnect due to recoverable error...")
+
+              if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttempts++
+                const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000) // Max 30 seconds
+
+                console.log(
+                  `🔄 Deepgram: Reconnect attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS} in ${delay}ms`,
+                )
+
+                setTimeout(() => {
+                  connectToDeepgram(options).catch((err) => {
+                    console.error("❌ Deepgram: Reconnection failed:", err)
+                  })
+                }, delay)
+              } else {
+                console.error("❌ Deepgram: Max reconnection attempts reached")
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(
+                    JSON.stringify({
+                      type: "error",
+                      error: "Deepgram connection failed after multiple attempts. Please refresh and try again.",
+                    }),
+                  )
+                }
+              }
             }
           }
         } catch (error) {
@@ -176,46 +317,14 @@ const setupUnifiedVoiceServer = (wss) => {
       })
     }
 
-    // Send audio to Deepgram function
-    const sendAudioToDeepgram = (audioData) => {
-      if (!deepgramWs) {
-        console.error("❌ Deepgram: Cannot send audio - WebSocket not initialized")
-        return false
-      }
-
-      if (deepgramWs.readyState !== WebSocket.OPEN) {
-        console.error("❌ Deepgram: Cannot send audio - WebSocket not open, current state:", deepgramWs.readyState)
-        return false
-      }
-
-      if (!deepgramReady) {
-        console.error("❌ Deepgram: Cannot send audio - Client not ready")
-        return false
-      }
-
-      try {
-        const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
-        console.log("🎵 Deepgram: Sending audio data, size:", buffer.length, "bytes")
-
-        // Log first few bytes for debugging
-        const firstBytes = Array.from(buffer.slice(0, 16))
-          .map((b) => b.toString(16).padStart(2, "0"))
-          .join(" ")
-        console.log("🎵 Deepgram: First 16 bytes:", firstBytes)
-
-        deepgramWs.send(buffer)
-        return true
-      } catch (error) {
-        console.error("❌ Deepgram: Error sending audio data:", error)
-        return false
-      }
-    }
-
     // Close Deepgram connection function
     const closeDeepgram = () => {
       console.log("🎙️ Deepgram: Closing connection")
       deepgramReady = false
       deepgramConnected = false
+      audioQueue = [] // Clear queue
+      isProcessingQueue = false
+
       if (deepgramWs) {
         try {
           deepgramWs.close(1000, "Client closing")
@@ -629,18 +738,8 @@ const setupUnifiedVoiceServer = (wss) => {
           // Convert browser audio to PCM format
           const pcmAudio = await convertToPCM(message)
 
-          if (deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-            // Send audio directly if Deepgram is ready
-            const success = sendAudioToDeepgram(pcmAudio)
-            if (!success) {
-              console.log("🎙️ Failed to send audio, buffering...")
-              audioBuffer.push(pcmAudio)
-            }
-          } else {
-            // Buffer audio until Deepgram is ready
-            console.log("🎙️ Buffering audio data until Deepgram is ready...")
-            audioBuffer.push(pcmAudio)
-          }
+          // Queue the audio data instead of sending immediately
+          queueAudioData(pcmAudio)
         }
       } catch (error) {
         console.error("❌ ==================== MESSAGE PROCESSING ERROR ====================")
@@ -669,8 +768,10 @@ const setupUnifiedVoiceServer = (wss) => {
       sessionId = null
       audioChunkCount = 0
       audioBuffer = []
+      audioQueue = []
       deepgramReady = false
       deepgramConnected = false
+      isProcessingQueue = false
     })
 
     // Handle connection errors
@@ -686,6 +787,10 @@ const setupUnifiedVoiceServer = (wss) => {
           language: language,
           services: ["transcription", "synthesis"],
           lmnt_configured: !!lmntApiKey,
+          rate_limiting: {
+            min_send_interval: MIN_SEND_INTERVAL,
+            max_queue_size: MAX_QUEUE_SIZE,
+          },
         }),
       )
     }
