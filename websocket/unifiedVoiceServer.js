@@ -37,6 +37,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Session state
     let sessionId = null
     let audioChunkCount = 0
+    let connectionGreetingSent = false
 
     // Extract language from URL parameters
     const url = new URL(req.url, "http://localhost")
@@ -44,6 +45,103 @@ const setupUnifiedVoiceServer = (wss) => {
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
+
+    // Default greeting messages based on language
+    const getGreetingMessage = (lang) => {
+      const greetings = {
+        'hi': 'नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ। आप मुझसे कुछ भी पूछ सकते हैं।',
+        'en': 'Hi! Hello, how can I help you today? Feel free to ask me anything.',
+        'es': '¡Hola! ¿Cómo puedo ayudarte hoy?',
+        'fr': 'Bonjour! Comment puis-je vous aider aujourd\'hui?',
+        'de': 'Hallo! Wie kann ich Ihnen heute helfen?',
+        'it': 'Ciao! Come posso aiutarti oggi?',
+        'pt': 'Olá! Como posso ajudá-lo hoje?',
+        'ja': 'こんにちは！今日はどのようにお手伝いできますか？',
+        'ko': '안녕하세요! 오늘 어떻게 도와드릴까요?',
+        'zh': '你好！我今天可以如何帮助您？',
+        'ar': 'مرحبا! كيف يمكنني مساعدتك اليوم؟',
+        'ru': 'Привет! Как я могу помочь вам сегодня?'
+      }
+      return greetings[lang] || greetings['en']
+    }
+
+    // Function to send default greeting
+    const sendGreeting = async () => {
+      if (connectionGreetingSent || !lmntApiKey) {
+        return
+      }
+
+      console.log("👋 ==================== SENDING CONNECTION GREETING ====================")
+      console.log("👋 Language:", language)
+      
+      const greetingText = getGreetingMessage(language)
+      console.log("👋 Greeting text:", greetingText)
+
+      try {
+        // Generate session ID if not exists
+        if (!sessionId) {
+          sessionId = generateSessionId()
+        }
+
+        const synthesisOptions = {
+          voice: "lily",
+          language: language === 'hi' ? 'hi' : 'en', // LMNT might not support all languages
+          speed: 1.0,
+        }
+
+        console.log("👋 Synthesizing greeting with options:", synthesisOptions)
+        const audioData = await synthesizeWithErrorHandling(greetingText, synthesisOptions)
+
+        if (!audioData || audioData.length === 0) {
+          throw new Error("Received empty greeting audio data from TTS")
+        }
+
+        console.log("✅ Greeting: Successfully received audio data, size:", audioData.length, "bytes")
+
+        // Convert audio to the required JSON format
+        const audioBuffer = Buffer.from(audioData)
+        const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+        const base64AudioWithHeader = audioWithHeader.toString("base64")
+
+        // Increment chunk count
+        audioChunkCount++
+
+        // Send greeting audio in the required JSON format
+        const greetingResponse = {
+          data: {
+            session_id: sessionId,
+            count: audioChunkCount,
+            audio_bytes_to_play: base64AudioWithHeader,
+            sample_rate: 8000,
+            channels: 1,
+            sample_width: 2,
+          },
+          type: "greeting"
+        }
+
+        console.log("✅ ==================== SENDING GREETING AUDIO ====================")
+        console.log("✅ Greeting session_id:", greetingResponse.data.session_id)
+        console.log("✅ Greeting count:", greetingResponse.data.count)
+        console.log("✅ Greeting audio size:", base64AudioWithHeader.length, "characters (base64)")
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(greetingResponse))
+          console.log("✅ 👋 Connection greeting sent successfully!")
+          connectionGreetingSent = true
+        } else {
+          console.error("❌ WebSocket not open, cannot send greeting")
+        }
+
+      } catch (error) {
+        console.error("❌ ==================== GREETING ERROR ====================")
+        console.error("❌ Failed to send greeting:", error.message)
+        console.error("❌ Full error:", error)
+        
+        // Don't send error to client for greeting failure, just log it
+        // The connection should still work normally
+        connectionGreetingSent = true // Mark as sent to avoid retrying
+      }
+    }
 
     // Audio queue processor with rate limiting
     const processAudioQueue = async () => {
@@ -221,7 +319,16 @@ const setupUnifiedVoiceServer = (wss) => {
                   console.log("📝 STT: Confidence:", confidence)
                   console.log("📝 STT: Is final:", is_final)
 
+                  // Enhanced console logging for STT text
                   if (transcript.trim()) {
+                    console.log("🗣️ ==================== STT TRANSCRIPT ====================")
+                    console.log("🗣️ SPEECH TO TEXT:", transcript)
+                    console.log("🗣️ CONFIDENCE SCORE:", (confidence * 100).toFixed(2) + "%")
+                    console.log("🗣️ STATUS:", is_final ? "FINAL" : "INTERIM")
+                    console.log("🗣️ LANGUAGE:", language)
+                    console.log("🗣️ TIMESTAMP:", new Date().toISOString())
+                    console.log("🗣️ =====================================================")
+
                     console.log("📤 STT: Sending transcript to client:", transcript)
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(
@@ -240,8 +347,16 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log("🎙️ STT: Received Metadata:", JSON.stringify(data, null, 2))
               } else if (data.type === "SpeechStarted") {
                 console.log("🎙️ STT: Speech started detected")
+                console.log("🗣️ ==================== SPEECH DETECTION ====================")
+                console.log("🗣️ USER STARTED SPEAKING")
+                console.log("🗣️ TIMESTAMP:", new Date().toISOString())
+                console.log("🗣️ =====================================================")
               } else if (data.type === "UtteranceEnd") {
                 console.log("🎙️ STT: Utterance end detected")
+                console.log("🗣️ ==================== SPEECH DETECTION ====================")
+                console.log("🗣️ USER STOPPED SPEAKING")
+                console.log("🗣️ TIMESTAMP:", new Date().toISOString())
+                console.log("🗣️ =====================================================")
               } else {
                 console.log("🎙️ STT: Unknown message type:", data.type)
               }
@@ -637,6 +752,12 @@ const setupUnifiedVoiceServer = (wss) => {
                 }),
               )
             }
+
+            // Send greeting after session start (with a small delay to ensure client is ready)
+            setTimeout(() => {
+              sendGreeting()
+            }, 1000)
+
           } else if (data.type === "synthesize") {
             console.log("🔊 ==================== PROCESSING SYNTHESIZE COMMAND ====================")
             console.log("🔊 Synthesis text:", data.text)
@@ -772,6 +893,7 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramReady = false
       deepgramConnected = false
       isProcessingQueue = false
+      connectionGreetingSent = false
     })
 
     // Handle connection errors
@@ -793,6 +915,11 @@ const setupUnifiedVoiceServer = (wss) => {
           },
         }),
       )
+
+      // Send greeting after a short delay to ensure client is ready
+      setTimeout(() => {
+        sendGreeting()
+      }, 1500)
     }
   })
 }
