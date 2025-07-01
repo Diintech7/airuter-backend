@@ -30,7 +30,6 @@ const cookieParser = require("cookie-parser")
 const profileRoutess = require("./routes/profileRoutes")
 const { validateToken, checkAuth } = require("./middleware/candidateAuth")
 const { setupUnifiedVoiceServer } = require("./websocket/unifiedVoiceServer")
-const partnerProfileRoutes = require("./routes/partnerProfile")
 const candidateProfileRoutes = require("./routes/candidateProfile")
 
 const app = express()
