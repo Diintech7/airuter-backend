@@ -379,7 +379,6 @@ const setupUnifiedVoiceServer = (wss) => {
             }
           }
         } catch (error) {
-          console.error("❌ STT: Error during setup:", error)
           reject(error)
         }
       })
