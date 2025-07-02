@@ -745,7 +745,6 @@ const setupUnifiedVoiceServer = (wss) => {
                 diarize: false,
                 tier: "enhanced",
               })
-              console.log("✅ STT connection established")
             } catch (error) {
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(
