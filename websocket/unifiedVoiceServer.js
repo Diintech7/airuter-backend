@@ -41,7 +41,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
     // Extract language from URL parameters
     const url = new URL(req.url, "http://localhost")
-    const language = url.searchParams.get("language") || "hi"
+    const language = url.searchParams.get("language") || "en"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
@@ -102,7 +102,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         const synthesisOptions = {
           voice: "lily",
-          language: language === 'hi' ? 'hi' : 'en', // LMNT might not support all languages
+          language: language === 'en' ? 'en' : 'hi', // LMNT might not support all languages
           speed: 1.0,
         }
 
