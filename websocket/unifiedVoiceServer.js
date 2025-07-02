@@ -262,6 +262,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("punctuate", "true")
           deepgramUrl.searchParams.append("diarize", "false")
 
+          deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", process.env.DEEPGRAM_API_KEY])
 
           deepgramWs.binaryType = "arraybuffer"
 
