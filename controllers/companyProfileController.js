@@ -1,21 +1,22 @@
-const AdminProfile = require('../models/AdminProfile');
-const User = require('../models/User');
+const AdminProfile = require("../models/AdminProfile")
+const User = require("../models/User")
 
 exports.getCompanyProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (user.role !== 'recruiter') {
+    const user = await User.findById(req.user.id)
+    if (user.role !== "recruiter") {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. Recruiter only route.'
-      });
+        message: "Access denied. Recruiter only route.",
+      })
     }
-    const profile = await AdminProfile.findOne({ user: req.user.id });
+    
+    const profile = await AdminProfile.findOne({ user: req.user.id })
     if (!profile) {
       return res.status(404).json({
         success: false,
-        message: 'Company profile not found'
-      });
+        message: "Recruiter profile not found",
+      })
     }
 
     res.json({
@@ -34,30 +35,29 @@ exports.getCompanyProfile = async (req, res) => {
         socialLinks: {
           linkedin: profile.socialLinks.linkedin,
           twitter: profile.socialLinks.twitter,
-          facebook: profile.socialLinks.facebook
+          facebook: profile.socialLinks.facebook,
         },
-        isComplete: profile.isComplete
-      }
-    });
-
+        isComplete: profile.isComplete,
+      },
+    })
   } catch (error) {
-    console.error('Error in getCompanyProfile:', error);
+    console.error("Error in getCompanyProfile:", error)
     res.status(500).json({
       success: false,
-      message: 'Server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+      message: "Server error",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    })
   }
-};
+}
 
 exports.updateCompanyProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (user.role !== 'recruiter') {
+    const user = await User.findById(req.user.id)
+    if (user.role !== "recruiter") {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. Recruiter only route.'
-      });
+        message: "Access denied. Recruiter only route.",
+      })
     }
 
     const {
@@ -71,45 +71,46 @@ exports.updateCompanyProfile = async (req, res) => {
       contactEmail,
       contactPhone,
       logo,
-      socialLinks
-    } = req.body;
-    let profile = await AdminProfile.findOne({ user: req.user.id });
+      socialLinks,
+    } = req.body
     
+    let profile = await AdminProfile.findOne({ user: req.user.id })
+
     if (!profile) {
       return res.status(404).json({
         success: false,
-        message: 'Company profile not found'
-      });
+        message: "Recruiter profile not found",
+      })
     }
-    
-    profile.companyName = name || profile.companyName;
-    profile.industry = industry || profile.industry;
-    profile.companySize = size || profile.companySize;
-    profile.location = location || profile.location;
-    profile.website = website || profile.website;
-    profile.position = position || profile.position;
-    profile.description = description || profile.description;
-    profile.contactEmail = contactEmail || profile.contactEmail;
-    profile.contactPhone = contactPhone || profile.contactPhone;
-    
+
+    profile.companyName = name || profile.companyName
+    profile.industry = industry || profile.industry
+    profile.companySize = size || profile.companySize
+    profile.location = location || profile.location
+    profile.website = website || profile.website
+    profile.position = position || profile.position
+    profile.description = description || profile.description
+    profile.contactEmail = contactEmail || profile.contactEmail
+    profile.contactPhone = contactPhone || profile.contactPhone
+
     // Update logo if provided
     if (logo) {
-      profile.logo = logo;
+      profile.logo = logo
     }
-    
+
     // Update social links if provided
     if (socialLinks) {
       profile.socialLinks = {
         linkedin: socialLinks.linkedin || profile.socialLinks.linkedin,
         twitter: socialLinks.twitter || profile.socialLinks.twitter,
-        facebook: socialLinks.facebook || profile.socialLinks.facebook
-      };
+        facebook: socialLinks.facebook || profile.socialLinks.facebook,
+      }
     }
-    
-    profile.isComplete = true;
-    profile.updatedAt = Date.now();
 
-    await profile.save();
+    profile.isComplete = true
+    profile.updatedAt = Date.now()
+
+    await profile.save()
 
     res.json({
       success: true,
@@ -127,37 +128,37 @@ exports.updateCompanyProfile = async (req, res) => {
         socialLinks: {
           linkedin: profile.socialLinks.linkedin,
           twitter: profile.socialLinks.twitter,
-          facebook: profile.socialLinks.facebook
+          facebook: profile.socialLinks.facebook,
         },
-        isComplete: profile.isComplete
-      }
-    });
-
+        isComplete: profile.isComplete,
+      },
+    })
   } catch (error) {
-    console.error('Error in updateCompanyProfile:', error);
+    console.error("Error in updateCompanyProfile:", error)
     res.status(500).json({
       success: false,
-      message: 'Server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+      message: "Server error",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    })
   }
-};
+}
 
 exports.createCompanyProfile = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
-    if (user.role !== 'recruiter') {
+    const user = await User.findById(req.user.id)
+    if (user.role !== "recruiter") {
       return res.status(403).json({
         success: false,
-        message: 'Access denied. Recruiter only route.'
-      });
+        message: "Access denied. Recruiter only route.",
+      })
     }
-    let profile = await AdminProfile.findOne({ user: req.user.id });
+    
+    let profile = await AdminProfile.findOne({ user: req.user.id })
     if (profile) {
       return res.status(400).json({
         success: false,
-        message: 'Profile already exists'
-      });
+        message: "Recruiter profile already exists",
+      })
     }
 
     const {
@@ -171,9 +172,9 @@ exports.createCompanyProfile = async (req, res) => {
       contactEmail,
       contactPhone,
       logo,
-      socialLinks
-    } = req.body;
-    
+      socialLinks,
+    } = req.body
+
     profile = new AdminProfile({
       user: req.user.id,
       companyName: name,
@@ -187,14 +188,14 @@ exports.createCompanyProfile = async (req, res) => {
       contactPhone,
       logo,
       socialLinks: {
-        linkedin: socialLinks?.linkedin || '',
-        twitter: socialLinks?.twitter || '',
-        facebook: socialLinks?.facebook || ''
+        linkedin: socialLinks?.linkedin || "",
+        twitter: socialLinks?.twitter || "",
+        facebook: socialLinks?.facebook || "",
       },
-      isComplete: true
-    });
+      isComplete: true,
+    })
 
-    await profile.save();
+    await profile.save()
 
     res.status(201).json({
       success: true,
@@ -212,18 +213,54 @@ exports.createCompanyProfile = async (req, res) => {
         socialLinks: {
           linkedin: profile.socialLinks.linkedin,
           twitter: profile.socialLinks.twitter,
-          facebook: profile.socialLinks.facebook
+          facebook: profile.socialLinks.facebook,
         },
-        isComplete: profile.isComplete
-      }
-    });
-
+        isComplete: profile.isComplete,
+      },
+    })
   } catch (error) {
-    console.error('Error in createCompanyProfile:', error);
+    console.error("Error in createCompanyProfile:", error)
     res.status(500).json({
       success: false,
-      message: 'Server error',
-      error: process.env.NODE_ENV === 'development' ? error.message : undefined
-    });
+      message: "Server error",
+      error: process.env.NODE_ENV === "development" ? error.message : undefined,
+    })
   }
-};
+}
+
+// Remove the CompanyProfile-specific methods since we're using AdminProfile
+exports.deleteCompanyProfile = async (req, res) => {
+  try {
+    const profile = await AdminProfile.findOneAndDelete({ user: req.user.id })
+    if (!profile) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Recruiter profile not found" 
+      })
+    }
+    res.status(200).json({ 
+      success: true, 
+      message: "Recruiter profile deleted successfully" 
+    })
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    })
+  }
+}
+
+exports.getAllCompanyProfiles = async (req, res) => {
+  try {
+    const profiles = await AdminProfile.find().populate('user', 'name email role')
+    res.status(200).json({ 
+      success: true, 
+      data: profiles 
+    })
+  } catch (error) {
+    res.status(500).json({ 
+      success: false, 
+      message: error.message 
+    })
+  }
+}
