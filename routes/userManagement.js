@@ -317,97 +317,72 @@ router.get("/users/:userId/resume", optionalAuth, isAdmin, async (req, res) => {
 // Fixed user impersonation endpoint
 router.post("/users/:userId/impersonate", optionalAuth, isAdmin, async (req, res) => {
   try {
-    const { userId } = req.params
-    console.log("Admin impersonating user ID:", userId)
-
-    // Find the user to impersonate
-    const user = await User.findById(userId).select("-password")
+    const { userId } = req.params;
+    const user = await User.findById(userId).select("-password");
+    
     if (!user) {
       return res.status(404).json({
         success: false,
         message: "User not found",
-      })
+      });
     }
 
-    console.log("Found user for impersonation:", user)
-
     // Generate token with proper role and permissions
-    const permissions = []
-    let dashboardRoute = "/dashboard"
+    const permissions = [];
+    let dashboardRoute = "/dashboard";
 
     // Set permissions and dashboard route based on user role
     switch (user.role) {
       case "recruiter":
-        permissions.push("recruiter")
-        dashboardRoute = "/dashboard"
-        break
+        permissions.push("recruiter");
+        dashboardRoute = "/dashboard";
+        break;
       case "partner":
-        permissions.push("partner", "recruiter") // Partners get both permissions
-        dashboardRoute = "/partner/overview"
-        break
+        permissions.push("partner", "recruiter");
+        dashboardRoute = "/partner/overview";
+        break;
       case "jobSeeker":
       case "user":
-        permissions.push("user")
-        dashboardRoute = "/dashboard"
-        break
+        permissions.push("user");
+        dashboardRoute = "/dashboard";
+        break;
       default:
-        permissions.push("user")
-        dashboardRoute = "/dashboard"
+        permissions.push("user");
+        dashboardRoute = "/dashboard";
     }
 
     const tokenPayload = {
       id: user._id,
       role: user.role,
       email: user.email,
+      name: user.name,
       permissions: permissions,
-    }
+    };
 
     const token = jwt.sign(tokenPayload, JWT_SECRET, {
       expiresIn: "30d",
-    })
-
-    console.log("Generated token payload:", tokenPayload)
-
-    // Get user profile data if available
-    let profileData = null
-    try {
-      const profile = await Profile.findOne({ user: userId })
-      if (profile) {
-        profileData = {
-          resumePath: profile.resumePath,
-          skills: profile.skills,
-          experience: profile.experience,
-        }
-      }
-    } catch (profileError) {
-      console.log("No profile found for user:", userId)
-    }
-
-    const userResponse = {
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: user.role,
-      permissions: permissions,
-      isActive: user.isActive,
-      profile: profileData,
-    }
-
-    console.log("Sending user response:", userResponse)
+    });
 
     res.json({
       success: true,
       token,
-      user: userResponse,
-      dashboardRoute: dashboardRoute,
-    })
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role,
+        permissions: permissions,
+        isActive: user.isActive,
+      },
+      dashboardRoute,
+    });
   } catch (error) {
-    console.error("Error during user impersonation:", error)
+    console.error("Impersonation error:", error);
     res.status(500).json({
       success: false,
-      message: "Server error during user impersonation",
-    })
+      message: "Server error during impersonation",
+    });
   }
-})
+});
 
 module.exports = router

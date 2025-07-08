@@ -6,11 +6,185 @@ const InterviewResponse = require("../models/InterviewResponse")
 const OpenAIService = require("../services/nvidiaService")
 const Interview = require("../models/Interview")
 
-// Add new endpoint for generating adaptive questions
+// Language-specific prompts and fallbacks
+const getLanguagePrompts = (language) => {
+  const prompts = {
+    en: {
+      questionPrompt: `Based on the candidate's recent responses, generate ONE specific follow-up question for a technical interview.
+
+RECENT RESPONSES:
+{previousContext}
+
+JOB REQUIREMENTS: {document}
+
+Generate a {questionType} question that builds on their answers. Keep it conversational and specific.
+
+Question:`,
+      analysisPrompt: `PROVIDE A VALID JSON RESPONSE EXACTLY MATCHING THIS STRUCTURE:
+{
+  "overallScores": {
+    "selfIntroduction": 7,
+    "projectExplanation": 7,
+    "englishCommunication": 7
+  },
+  "feedback": {
+    "selfIntroduction": {
+      "strengths": "Detailed feedback on strengths",
+      "areasOfImprovement": "Detailed feedback on areas to improve"
+    },
+    "projectExplanation": {
+      "strengths": "Detailed feedback on strengths", 
+      "areasOfImprovement": "Detailed feedback on areas to improve"
+    },
+    "englishCommunication": {
+      "strengths": "Detailed feedback on strengths",
+      "areasOfImprovement": "Detailed feedback on areas to improve"
+    }
+  },
+  "focusAreas": [
+    "Key area to focus on for improvement",
+    "Another area to focus on for improvement", 
+    "Third most important area to focus on"
+  ]
+}
+
+INTERVIEW DATA:
+{interviewData}
+
+INSTRUCTIONS:
+- Respond ONLY with the JSON
+- Ensure valid JSON syntax
+- Scores should be between 1-10
+- Evaluate the candidate holistically across all answers
+- For Self Introduction: Assess how well they presented their background, skills, and career goals
+- For Project Explanation: Evaluate their ability to explain technical projects clearly and highlight their contributions
+- For English Communication: Assess overall fluency, grammar, vocabulary, and clarity across all answers
+- In focusAreas, list 3-5 specific, actionable improvement areas ordered by priority
+- Consider that this was an adaptive interview with personalized follow-up questions`,
+      fallbackQuestions: [
+        "How would you approach debugging a complex issue in your recent project?",
+        "What's the most challenging technical decision you've made recently?",
+        "How do you stay updated with new technologies in your field?",
+        "What motivates you to continuously improve your technical skills?",
+      ],
+      defaultAnalysis: {
+        overallScores: {
+          selfIntroduction: 5,
+          projectExplanation: 5,
+          englishCommunication: 5,
+        },
+        feedback: {
+          selfIntroduction: {
+            strengths: "Unable to generate detailed feedback",
+            areasOfImprovement: "Unable to generate detailed feedback",
+          },
+          projectExplanation: {
+            strengths: "Unable to generate detailed feedback",
+            areasOfImprovement: "Unable to generate detailed feedback",
+          },
+          englishCommunication: {
+            strengths: "Unable to generate detailed feedback",
+            areasOfImprovement: "Unable to generate detailed feedback",
+          },
+        },
+        focusAreas: [
+          "Improve communication clarity and structure",
+          "Enhance technical explanation skills",
+          "Work on presentation of self-introduction",
+        ],
+      },
+    },
+    hi: {
+      questionPrompt: `उम्मीदवार के हाल के उत्तरों के आधार पर, तकनीकी साक्षात्कार के लिए एक विशिष्ट फॉलो-अप प्रश्न तैयार करें।
+
+हाल के उत्तर:
+{previousContext}
+
+नौकरी की आवश्यकताएं: {document}
+
+एक {questionType} प्रश्न तैयार करें जो उनके उत्तरों पर आधारित हो। इसे संवादात्मक और विशिष्ट रखें।
+
+प्रश्न:`,
+      analysisPrompt: `इस संरचना के अनुसार एक वैध JSON प्रतिक्रिया प्रदान करें:
+{
+  "overallScores": {
+    "selfIntroduction": 7,
+    "projectExplanation": 7,
+    "englishCommunication": 7
+  },
+  "feedback": {
+    "selfIntroduction": {
+      "strengths": "शक्तियों पर विस्तृत फीडबैक",
+      "areasOfImprovement": "सुधार के क्षेत्रों पर विस्तृत फीडबैक"
+    },
+    "projectExplanation": {
+      "strengths": "शक्तियों पर विस्तृत फीडबैक",
+      "areasOfImprovement": "सुधार के क्षेत्रों पर विस्तृत फीडबैक"
+    },
+    "englishCommunication": {
+      "strengths": "शक्तियों पर विस्तृत फीडबैक",
+      "areasOfImprovement": "सुधार के क्षेत्रों पर विस्तृत फीडबैक"
+    }
+  },
+  "focusAreas": [
+    "सुधार के लिए मुख्य क्षेत्र",
+    "सुधार के लिए दूसरा क्षेत्र",
+    "सुधार के लिए तीसरा महत्वपूर्ण क्षेत्र"
+  ]
+}
+
+साक्षात्कार डेटा:
+{interviewData}
+
+निर्देश:
+- केवल JSON के साथ उत्तर दें
+- वैध JSON सिंटैक्स सुनिश्चित करें
+- स्कोर 1-10 के बीच होना चाहिए
+- सभी उत्तरों में उम्मीदवार का समग्र मूल्यांकन करें
+- स्व-परिचय के लिए: उन्होंने अपनी पृष्ठभूमि, कौशल और करियर लक्ष्यों को कितनी अच्छी तरह प्रस्तुत किया
+- परियोजना व्याख्या के लिए: तकनीकी परियोजनाओं को स्पष्ट रूप से समझाने और अपने योगदान को उजागर करने की उनकी क्षमता का मूल्यांकन करें
+- अंग्रेजी संचार के लिए: सभी उत्तरों में समग्र प्रवाहता, व्याकरण, शब्दावली और स्पष्टता का आकलन करें
+- focusAreas में, प्राथमिकता के अनुसार 3-5 विशिष्ट, कार्यान्वित सुधार क्षेत्रों की सूची बनाएं
+- यह व्यक्तिगत फॉलो-अप प्रश्नों के साथ एक अनुकूली साक्षात्कार था`,
+      fallbackQuestions: [
+        "आप अपनी हाल की परियोजना में एक जटिल समस्या को डिबग करने के लिए कैसे दृष्टिकोण अपनाएंगे?",
+        "हाल ही में आपने जो सबसे चुनौतीपूर्ण तकनीकी निर्णय लिया है वह क्या है?",
+        "आप अपने क्षेत्र में नई तकनीकों के साथ कैसे अपडेट रहते हैं?",
+        "आपको अपने तकनीकी कौशल में निरंतर सुधार करने के लिए क्या प्रेरित करता है?",
+      ],
+      defaultAnalysis: {
+        overallScores: {
+          selfIntroduction: 5,
+          projectExplanation: 5,
+          englishCommunication: 5,
+        },
+        feedback: {
+          selfIntroduction: {
+            strengths: "विस्तृत फीडबैक तैयार करने में असमर्थ",
+            areasOfImprovement: "विस्तृत फीडबैक तैयार करने में असमर्थ",
+          },
+          projectExplanation: {
+            strengths: "विस्तृत फीडबैक तैयार करने में असमर्थ",
+            areasOfImprovement: "विस्तृत फीडबैक तैयार करने में असमर्थ",
+          },
+          englishCommunication: {
+            strengths: "विस्तृत फीडबैक तैयार करने में असमर्थ",
+            areasOfImprovement: "विस्तृत फीडबैक तैयार करने में असमर्थ",
+          },
+        },
+        focusAreas: ["संचार स्पष्टता और संरचना में सुधार करें", "तकनीकी व्याख्या कौशल बढ़ाएं", "स्व-परिचय की प्रस्तुति पर काम करें"],
+      },
+    },
+  }
+
+  return prompts[language] || prompts["en"]
+}
+
+// Add new endpoint for generating adaptive questions with language support
 exports.generateAdaptiveQuestion = async (req, res) => {
   console.log("[Generate Adaptive Question] Request received:", req.body)
   try {
-    const { roomId, previousQA, document, questionNumber } = req.body
+    const { roomId, previousQA, document, questionNumber, language = "en" } = req.body
 
     // Find the interview to get context
     const interview = await Interview.findOne({ roomId })
@@ -18,21 +192,39 @@ exports.generateAdaptiveQuestion = async (req, res) => {
       return res.status(404).json({ message: "Interview not found" })
     }
 
+    // Get language-specific prompts
+    const languagePrompts = getLanguagePrompts(language)
+
     // Build context more efficiently - limit to last 2 Q&As to reduce prompt size
     const recentQA = previousQA.slice(-2)
     const previousContext = recentQA.map((qa, index) => `Q: ${qa.question}\nA: ${qa.answer}`).join("\n\n")
 
-    // Create a more focused, shorter prompt for faster generation
-    const prompt = `Based on the candidate's recent responses, generate ONE specific follow-up question for a technical interview.
+    // Determine question type based on question number
+    const questionTypes = {
+      en: {
+        1: "technical depth",
+        2: "problem-solving",
+        3: "experience-based",
+      },
+      hi: {
+        1: "तकनीकी गहराई",
+        2: "समस्या-समाधान",
+        3: "अनुभव-आधारित",
+      },
+    }
 
-RECENT RESPONSES:
-${previousContext}
+    const questionType =
+      questionTypes[language]?.[questionNumber] ||
+      questionTypes["en"][questionNumber] ||
+      (language === "hi" ? "तकनीकी" : "technical")
 
-JOB REQUIREMENTS: ${document.substring(0, 500)}...
+    // Create language-specific prompt
+    const prompt = languagePrompts.questionPrompt
+      .replace("{previousContext}", previousContext)
+      .replace("{document}", document.substring(0, 500) + "...")
+      .replace("{questionType}", questionType)
 
-Generate a ${questionNumber === 1 ? "technical depth" : questionNumber === 2 ? "problem-solving" : "experience-based"} question that builds on their answers. Keep it conversational and specific.
-
-Question:`
+    console.log(`[Generate Adaptive Question] Using ${language} prompt`)
 
     // Use a shorter timeout for faster response
     const controller = new AbortController()
@@ -41,17 +233,17 @@ Question:`
     try {
       const aiResponse = await OpenAIService.generateText(prompt, {
         signal: controller.signal,
-        maxTokens: 100, // Limit response length for faster generation
+        maxTokens: 150, // Increased for Hindi which may need more tokens
       })
       clearTimeout(timeoutId)
 
       // Clean up the response
       let question = aiResponse.trim()
       question = question.replace(/^["']|["']$/g, "")
-      question = question.replace(/^Question:\s*/i, "")
+      question = question.replace(/^(Question|प्रश्न):\s*/i, "")
 
-      if (!question.endsWith("?")) {
-        question += "?"
+      if (!question.endsWith("?") && !question.endsWith("।")) {
+        question += language === "hi" ? "?" : "?"
       }
 
       console.log("[Generate Adaptive Question] Generated question:", question)
@@ -67,16 +259,11 @@ Question:`
   } catch (error) {
     console.error("[Generate Adaptive Question] Error:", error)
 
-    // Fast fallback questions
-    const fallbackQuestions = [
-      "How would you approach debugging a complex issue in your recent project?",
-      "What's the most challenging technical decision you've made recently?",
-      "How do you stay updated with new technologies in your field?",
-    ]
-
+    // Language-specific fallback questions
+    const languagePrompts = getLanguagePrompts(req.body.language || "en")
     const fallbackQuestion =
-      fallbackQuestions[req.body.questionNumber - 1] ||
-      "What motivates you to continuously improve your technical skills?"
+      languagePrompts.fallbackQuestions[req.body.questionNumber - 1] ||
+      languagePrompts.fallbackQuestions[languagePrompts.fallbackQuestions.length - 1]
 
     res.json({
       success: true,
@@ -214,7 +401,7 @@ exports.submitResponse = async (req, res) => {
 exports.analyzeResponses = async (req, res) => {
   console.log("[Analyze Responses] Request received for room ID:", req.body.roomId)
   try {
-    const { roomId, questions, answers } = req.body
+    const { roomId, questions, answers, language = "en" } = req.body
 
     // Ensure questions and answers are defined
     if (!questions || !answers) {
@@ -228,47 +415,16 @@ exports.analyzeResponses = async (req, res) => {
       return res.status(404).json({ message: "Interview not found" })
     }
 
-    const analysisPrompt = `PROVIDE A VALID JSON RESPONSE EXACTLY MATCHING THIS STRUCTURE:
-{
-  "overallScores": {
-    "selfIntroduction": 7,
-    "projectExplanation": 7,
-    "englishCommunication": 7
-  },
-  "feedback": {
-    "selfIntroduction": {
-      "strengths": "Detailed feedback on strengths",
-      "areasOfImprovement": "Detailed feedback on areas to improve"
-    },
-    "projectExplanation": {
-      "strengths": "Detailed feedback on strengths",
-      "areasOfImprovement": "Detailed feedback on areas to improve"
-    },
-    "englishCommunication": {
-      "strengths": "Detailed feedback on strengths",
-      "areasOfImprovement": "Detailed feedback on areas to improve"
-    }
-  },
-  "focusAreas": [
-    "Key area to focus on for improvement",
-    "Another area to focus on for improvement",
-    "Third most important area to focus on"
-  ]
-}
+    // Get language-specific prompts
+    const languagePrompts = getLanguagePrompts(language)
 
-INTERVIEW DATA:
-${questions.map((q, i) => `Question ${i + 1}: ${q}\nResponse: ${answers[i]}`).join("\n\n")}
+    // Prepare interview data
+    const interviewData = questions.map((q, i) => `Question ${i + 1}: ${q}\nResponse: ${answers[i]}`).join("\n\n")
 
-INSTRUCTIONS:
-- Respond ONLY with the JSON
-- Ensure valid JSON syntax
-- Scores should be between 1-10
-- Evaluate the candidate holistically across all answers
-- For Self Introduction: Assess how well they presented their background, skills, and career goals
-- For Project Explanation: Evaluate their ability to explain technical projects clearly and highlight their contributions
-- For English Communication: Assess overall fluency, grammar, vocabulary, and clarity across all answers
-- In focusAreas, list 3-5 specific, actionable improvement areas ordered by priority
-- Consider that this was an adaptive interview with personalized follow-up questions`
+    // Create language-specific analysis prompt
+    const analysisPrompt = languagePrompts.analysisPrompt.replace("{interviewData}", interviewData)
+
+    console.log(`[Analyze Responses] Using ${language} analysis prompt`)
 
     const aiResponse = await OpenAIService.generateText(analysisPrompt)
 
@@ -301,59 +457,31 @@ INSTRUCTIONS:
         // Check and set default feedback if missing
         if (!parsedAnalysis.feedback[field]) {
           parsedAnalysis.feedback[field] = {
-            strengths: "Unable to generate detailed feedback",
-            areasOfImprovement: "Unable to generate detailed feedback",
+            strengths: languagePrompts.defaultAnalysis.feedback[field].strengths,
+            areasOfImprovement: languagePrompts.defaultAnalysis.feedback[field].areasOfImprovement,
           }
         } else {
           // Ensure the feedback has both strengths and areas of improvement
           if (!parsedAnalysis.feedback[field].strengths) {
-            parsedAnalysis.feedback[field].strengths = "Unable to generate detailed feedback"
+            parsedAnalysis.feedback[field].strengths = languagePrompts.defaultAnalysis.feedback[field].strengths
           }
           if (!parsedAnalysis.feedback[field].areasOfImprovement) {
-            parsedAnalysis.feedback[field].areasOfImprovement = "Unable to generate detailed feedback"
+            parsedAnalysis.feedback[field].areasOfImprovement =
+              languagePrompts.defaultAnalysis.feedback[field].areasOfImprovement
           }
         }
       }
 
       // Ensure focusAreas is an array with at least 3 items
       if (!Array.isArray(parsedAnalysis.focusAreas) || parsedAnalysis.focusAreas.length < 1) {
-        parsedAnalysis.focusAreas = [
-          "Improve communication clarity and structure",
-          "Enhance technical explanation skills",
-          "Work on presentation of self-introduction",
-        ]
+        parsedAnalysis.focusAreas = languagePrompts.defaultAnalysis.focusAreas
       }
     } catch (parseError) {
       console.error("Parsing error:", parseError)
       console.error("Problematic response:", aiResponse)
 
-      // Fallback to a default analysis structure
-      parsedAnalysis = {
-        overallScores: {
-          selfIntroduction: 5,
-          projectExplanation: 5,
-          englishCommunication: 5,
-        },
-        feedback: {
-          selfIntroduction: {
-            strengths: "Unable to generate detailed feedback",
-            areasOfImprovement: "Unable to generate detailed feedback",
-          },
-          projectExplanation: {
-            strengths: "Unable to generate detailed feedback",
-            areasOfImprovement: "Unable to generate detailed feedback",
-          },
-          englishCommunication: {
-            strengths: "Unable to generate detailed feedback",
-            areasOfImprovement: "Unable to generate detailed feedback",
-          },
-        },
-        focusAreas: [
-          "Improve communication clarity and structure",
-          "Enhance technical explanation skills",
-          "Work on presentation of self-introduction",
-        ],
-      }
+      // Fallback to language-specific default analysis structure
+      parsedAnalysis = languagePrompts.defaultAnalysis
     }
 
     // Logging for debugging
@@ -365,6 +493,7 @@ INSTRUCTIONS:
       feedback: parsedAnalysis.feedback,
       focusAreas: parsedAnalysis.focusAreas,
       analyzedAt: new Date(),
+      language: language, // Store the language used for analysis
     }
 
     await interview.save()
@@ -377,32 +506,10 @@ INSTRUCTIONS:
     })
   } catch (error) {
     console.error("[Analyze Responses] Error:", error)
-    const defaultAnalysis = {
-      overallScores: {
-        selfIntroduction: 5,
-        projectExplanation: 5,
-        englishCommunication: 5,
-      },
-      feedback: {
-        selfIntroduction: {
-          strengths: "Unable to generate analysis",
-          areasOfImprovement: "Unable to generate analysis",
-        },
-        projectExplanation: {
-          strengths: "Unable to generate analysis",
-          areasOfImprovement: "Unable to generate analysis",
-        },
-        englishCommunication: {
-          strengths: "Unable to generate analysis",
-          areasOfImprovement: "Unable to generate analysis",
-        },
-      },
-      focusAreas: [
-        "Improve oral communication skills",
-        "Structure technical explanations more clearly",
-        "Develop more comprehensive self-introduction",
-      ],
-    }
+
+    // Get language-specific default analysis
+    const languagePrompts = getLanguagePrompts(req.body.language || "en")
+    const defaultAnalysis = languagePrompts.defaultAnalysis
 
     // Attempt to save default analysis if there's an interview
     try {
@@ -412,6 +519,7 @@ INSTRUCTIONS:
           interview.analysis = {
             ...defaultAnalysis,
             analyzedAt: new Date(),
+            language: req.body.language || "en",
           }
           await interview.save()
           console.log("[Analyze Responses] Default analysis saved for room ID:", req.body.roomId)
@@ -452,6 +560,7 @@ exports.getInterviewAnalyses = async (req, res) => {
       analyzedAt: interview.analysis.analyzedAt,
       recordedAt: interview.recordedAt,
       screenRecordingUrl: interview.screenRecordingUrl,
+      language: interview.analysis.language || "en",
     }))
 
     console.log("[Get Interview Analyses] Found analyses:", analyses.length)
