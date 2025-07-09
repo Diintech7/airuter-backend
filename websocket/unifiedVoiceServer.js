@@ -50,7 +50,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const getGreetingMessage = (lang) => {
       const greetings = {
         'hi': 'नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ। आप मुझसे कुछ भी पूछ सकते हैं।',
-        'en': 'Hi! Hello, how can I help you today? Feel free to ask me anything.',
+        'en': 'Hi! Hello, how can I help you today? Feel free to ask me anything. I am hear to help you with any kind of problems and for giving good responses and make you happy',
         'es': '¡Hola! ¿Cómo puedo ayudarte hoy?',
         'fr': 'Bonjour! Comment puis-je vous aider aujourd\'hui?',
         'de': 'Hallo! Wie kann ich Ihnen heute helfen?',
@@ -529,13 +529,7 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         // Send immediate acknowledgment to client
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "synthesis_started",
-              text: text.substring(0, 50) + "...",
-              status: "processing",
-            }),
-          )
+         
         }
 
         const result = await synthesizeWithLMNT(text, options)
@@ -801,18 +795,7 @@ const setupUnifiedVoiceServer = (wss) => {
     
     // Send connection confirmation
     if (ws.readyState === WebSocket.OPEN) {
-      ws.send(
-        JSON.stringify({
-          type: "connected",
-          language: language,
-          services: ["transcription", "synthesis"],
-          lmnt_configured: !!lmntApiKey,
-          rate_limiting: {
-            min_send_interval: MIN_SEND_INTERVAL,
-            max_queue_size: MAX_QUEUE_SIZE,
-          },
-        }),
-      )
+      
     
       // Send greeting after a short delay to ensure client is ready
       setTimeout(() => {
