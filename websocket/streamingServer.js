@@ -1,8 +1,8 @@
 const WebSocket = require("ws")
-const { LMNTStreamingClient } = require("./lmntStreaming")
+const { SarvamStreamingClient } = require("./sarvamStreaming")
 
 const setupWebSocketServer = (wss) => {
-  console.log("WebSocket server initialized")
+  console.log("WebSocket server initialized with Sarvam AI")
 
   wss.on("connection", async (ws) => {
     console.log("New WebSocket connection established")
@@ -13,39 +13,42 @@ const setupWebSocketServer = (wss) => {
         const data = JSON.parse(message)
         console.log("Received message data:", JSON.stringify(data, null, 2))
 
-        if (!process.env.LMNT_API_KEY) {
-          console.error("Error: LMNT API key not configured")
-          throw new Error("LMNT API key is not configured")
+        if (!process.env.SARVAM_API_KEY) {
+          console.error("Error: Sarvam AI API key not configured")
+          throw new Error("Sarvam AI API key is not configured")
         }
 
-        console.log("Initializing LMNT client...")
-        const lmntClient = new LMNTStreamingClient(process.env.LMNT_API_KEY)
+        console.log("Initializing Sarvam AI client...")
+        const sarvamClient = new SarvamStreamingClient(process.env.SARVAM_API_KEY)
 
-        // Ensure we use supported voices only
-        const supportedVoices = ["lily", "anthony", "rachel", "josh", "emma"]
-        const requestedVoice = data.voice || "lily"
-        const voice = supportedVoices.includes(requestedVoice) ? requestedVoice : "lily"
+        // Sarvam AI voice options
+        const supportedSpeakers = ["meera", "aditi", "kabir", "raghav", "arjun"]
+        const requestedSpeaker = data.speaker || "meera"
+        const speaker = supportedSpeakers.includes(requestedSpeaker) ? requestedSpeaker : "meera"
 
-        if (voice !== requestedVoice) {
-          console.warn(`Requested voice "${requestedVoice}" not supported, using "${voice}" instead`)
+        if (speaker !== requestedSpeaker) {
+          console.warn(`Requested speaker "${requestedSpeaker}" not supported, using "${speaker}" instead`)
         }
 
         const synthesisOptions = {
-          voice: voice,
-          language: data.language || "en",
-          speed: data.speed || 1.0,
-          format: "mp3",
-          sample_rate: 16000,
+          language_code: data.language_code || "en-IN",
+          speaker: speaker,
+          pitch: data.pitch || 0,
+          pace: data.pace || 1.0,
+          loudness: data.loudness || 1.0,
+          speech_sample_rate: data.speech_sample_rate || 22050,
+          enable_preprocessing: data.enable_preprocessing || true,
+          model: data.model || "bulbul:v1"
         }
 
         console.log("Final synthesis options:", JSON.stringify(synthesisOptions, null, 2))
 
-        console.log("Starting audio synthesis...")
-        const audioData = await lmntClient.synthesize(data.text, synthesisOptions)
+        console.log("Starting audio synthesis with Sarvam AI...")
+        const audioData = await sarvamClient.synthesize(data.text, synthesisOptions)
 
         if (!audioData || audioData.length === 0) {
           console.error("Error: Received empty audio data")
-          throw new Error("Received empty audio data from LMNT")
+          throw new Error("Received empty audio data from Sarvam AI")
         }
 
         const audioBuffer = Buffer.from(audioData)
@@ -83,7 +86,7 @@ const setupWebSocketServer = (wss) => {
           const errorMessage = {
             type: "error",
             error: error.message,
-            details: "Speech synthesis failed",
+            details: "Speech synthesis failed with Sarvam AI",
           }
           console.error("Sending error to client:", errorMessage)
           ws.send(JSON.stringify(errorMessage))
