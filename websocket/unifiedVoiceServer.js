@@ -82,43 +82,195 @@ const setupUnifiedVoiceServer = (wss) => {
       return result
     }
 
+    // LMNT synthesis function with comprehensive error handling and multiple API approaches
+    const synthesizeWithLMNT = async (text, options = {}) => {
+      console.log("[LMNT] synthesizeWithLMNT called with text:", text, "options:", options)
+      if (!lmntApiKey) {
+        const error = "TTS API key not configured in environment variables"
+        console.error("[LMNT] Error:", error)
+        throw new Error(error)
+      }
+
+      const synthesisOptions = {
+        voice: options.voice || "lily",
+        language: options.language || "en",
+        speed: options.speed || 1.0,
+        format: "wav",
+        sample_rate: 8000,
+      }
+      console.log("[LMNT] Synthesis options:", synthesisOptions)
+
+      // Try multiple LMNT API approaches
+      const apiAttempts = [
+        {
+          name: "LMNT v1/ai/speech (JSON)",
+          url: "https://api.lmnt.com/v1/ai/speech",
+          method: "json",
+        },
+        {
+          name: "LMNT v1/ai/speech (FormData)",
+          url: "https://api.lmnt.com/v1/ai/speech",
+          method: "form",
+        },
+      ]
+
+      for (const attempt of apiAttempts) {
+        try {
+          console.log(`[LMNT] Attempting: ${attempt.name}`)
+          const requestOptions = {
+            method: "POST",
+            headers: {
+              "X-API-Key": lmntApiKey,
+            },
+          }
+
+          if (attempt.method === "json") {
+            requestOptions.headers["Content-Type"] = "application/json"
+            requestOptions.body = JSON.stringify({
+              text: text,
+              voice: synthesisOptions.voice,
+              format: synthesisOptions.format,
+              language: synthesisOptions.language,
+              sample_rate: synthesisOptions.sample_rate,
+              speed: synthesisOptions.speed,
+            })
+            console.log("[LMNT] JSON request body:", requestOptions.body)
+          } else if (attempt.method === "form") {
+            const form = new FormData()
+            form.append("text", text)
+            form.append("voice", synthesisOptions.voice)
+            form.append("format", synthesisOptions.format)
+            form.append("language", synthesisOptions.language)
+            form.append("sample_rate", synthesisOptions.sample_rate.toString())
+            form.append("speed", synthesisOptions.speed.toString())
+
+            requestOptions.headers = {
+              ...requestOptions.headers,
+              ...form.getHeaders(),
+            }
+            requestOptions.body = form
+            console.log("[LMNT] FormData request headers:", requestOptions.headers)
+          }
+
+          const response = await fetch(attempt.url, requestOptions)
+          console.log(`[LMNT] Response status: ${response.status} (${response.statusText}) for ${attempt.name}`)
+
+          if (!response.ok) {
+            const errorText = await response.text()
+            console.error(`[LMNT] Error response from LMNT (${attempt.name}):`, errorText)
+            continue // Try next approach
+          }
+
+          const contentType = response.headers.get("content-type")
+          console.log(`[LMNT] Response content-type: ${contentType}`)
+
+          if (contentType && contentType.includes("application/json")) {
+            // Handle JSON response
+            const jsonResponse = await response.json()
+            console.log(`[LMNT] JSON response:`, jsonResponse)
+
+            if (jsonResponse.audio_url) {
+              console.log(`[LMNT] Fetching audio from audio_url:`, jsonResponse.audio_url)
+              const audioResponse = await fetch(jsonResponse.audio_url)
+              if (!audioResponse.ok) {
+                console.error(`[LMNT] Failed to fetch audio from URL: ${audioResponse.status}`)
+                throw new Error(`Failed to fetch audio from URL: ${audioResponse.status}`)
+              }
+              const audioBuffer = await audioResponse.arrayBuffer()
+              console.log(`[LMNT] Received audio buffer from audio_url, size:`, audioBuffer.byteLength)
+              return Buffer.from(audioBuffer)
+            } else if (jsonResponse.audio) {
+              // Direct audio data in JSON
+              const audioBuffer = Buffer.from(jsonResponse.audio, "base64")
+              console.log(`[LMNT] Received base64 audio in JSON, size:`, audioBuffer.length)
+              return audioBuffer
+            } else {
+              console.error("[LMNT] Unexpected JSON response format:", jsonResponse)
+              throw new Error("Unexpected JSON response format: " + JSON.stringify(jsonResponse))
+            }
+          } else {
+            // Handle binary audio response
+            const audioBuffer = await response.arrayBuffer()
+            console.log(`[LMNT] Received binary audio buffer, size:`, audioBuffer.byteLength)
+            if (audioBuffer.byteLength === 0) {
+              console.error("[LMNT] TTS returned empty audio buffer")
+              throw new Error("TTS returned empty audio buffer")
+            }
+            console.log(`✅ [LMNT] Successfully got audio from ${attempt.name}`)
+            return Buffer.from(audioBuffer)
+          }
+        } catch (error) {
+          console.error(`[LMNT] Error in attempt ${attempt.name}:`, error)
+          // If this is the last attempt, throw the error
+          if (attempt === apiAttempts[apiAttempts.length - 1]) {
+            throw error
+          }
+          continue // Try next approach
+        }
+      }
+      console.error("[LMNT] All TTS API attempts failed")
+      throw new Error("All TTS API attempts failed")
+    }
+
+    // Enhanced synthesis wrapper with comprehensive error handling
+    const synthesizeWithErrorHandling = async (text, options = {}) => {
+      console.log("[LMNT] synthesizeWithErrorHandling called with text:", text, "options:", options)
+      try {
+        // Send immediate acknowledgment to client
+        if (ws.readyState === WebSocket.OPEN) {
+          // Optionally log that acknowledgment would be sent
+        }
+        const result = await synthesizeWithLMNT(text, options)
+        console.log("[LMNT] Synthesis wrapper: Success, audio size:", result.length)
+        return result
+      } catch (error) {
+        console.error("[LMNT] Synthesis error:", error)
+        // Send error to client
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "synthesis_error",
+              error: error.message,
+              details: error.stack,
+            }),
+          )
+        }
+        throw error
+      }
+    }
+
     // Function to send default greeting
     const sendGreeting = async () => {
+      console.log("[LMNT] sendGreeting called. connectionGreetingSent:", connectionGreetingSent, "lmntApiKey:", !!lmntApiKey)
       if (connectionGreetingSent || !lmntApiKey) {
         return
       }
-      
       const greetingText = getGreetingMessage(language)
-      console.log("👋 Greeting text:", greetingText)
-
+      console.log("[LMNT] Greeting text:", greetingText)
       try {
         // Generate session ID if not exists
         if (!sessionId) {
           sessionId = generateSessionId()
+          console.log("[LMNT] Generated new sessionId for greeting:", sessionId)
         }
-
         const synthesisOptions = {
           voice: "lily",
           language: language === 'en' ? 'en' : 'hi', // LMNT might not support all languages
           speed: 1.0,
         }
-
+        console.log("[LMNT] Greeting synthesis options:", synthesisOptions)
         const audioData = await synthesizeWithErrorHandling(greetingText, synthesisOptions)
-
         if (!audioData || audioData.length === 0) {
+          console.error("[LMNT] Received empty greeting audio data from TTS")
           throw new Error("Received empty greeting audio data from TTS")
         }
-
-        console.log("✅ Greeting: Successfully received audio data, size:", audioData.length, "bytes")
-
+        console.log("[LMNT] Greeting: Successfully received audio data, size:", audioData.length, "bytes")
         // Convert audio to the required format with raw bytes
         const audioBuffer = Buffer.from(audioData)
         const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
         const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
         // Increment chunk count
         audioChunkCount++
-
         // Send greeting audio in the required format with raw bytes
         const greetingResponse = {
           data: {
@@ -131,23 +283,20 @@ const setupUnifiedVoiceServer = (wss) => {
           },
           type: "greeting"
         }
-
-        console.log("✅ ==================== SENDING GREETING AUDIO ====================")
-        console.log("✅ Greeting session_id:", greetingResponse.data.session_id)
-        console.log("✅ Greeting count:", greetingResponse.data.count)
-        console.log("✅ Greeting audio bytes preview:", pythonBytesString.substring(0, 100) + "...")
-
+        console.log("[LMNT] SENDING GREETING AUDIO:", {
+          session_id: greetingResponse.data.session_id,
+          count: greetingResponse.data.count,
+          audio_bytes_preview: pythonBytesString.substring(0, 100) + "..."
+        })
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(greetingResponse))
-          console.log("✅ 👋 Connection greeting sent successfully!")
+          console.log("[LMNT] 👋 Connection greeting sent successfully!")
           connectionGreetingSent = true
         } else {
-          console.log("❌ WebSocket not open, cannot send greeting")
+          console.log("[LMNT] ❌ WebSocket not open, cannot send greeting")
         }
-
       } catch (error) {
-        console.log("❌ Failed to send greeting:")
-        
+        console.error("[LMNT] Failed to send greeting:", error)
         // Don't send error to client for greeting failure, just log it
         // The connection should still work normally
         connectionGreetingSent = true // Mark as sent to avoid retrying
@@ -399,158 +548,6 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("✅ STT: WebSocket closed successfully")
         } catch (error) {
         }
-      }
-    }
-
-    // LMNT synthesis function with comprehensive error handling and multiple API approaches
-    const synthesizeWithLMNT = async (text, options = {}) => {
-    
-      if (!lmntApiKey) {
-        const error = "TTS API key not configured in environment variables"
-        throw new Error(error)
-      }
-
-      const synthesisOptions = {
-        voice: options.voice || "lily",
-        language: options.language || "en",
-        speed: options.speed || 1.0,
-        format: "wav",
-        sample_rate: 8000,
-      }
-
-
-      // Try multiple LMNT API approaches
-      const apiAttempts = [
-        {
-          name: "LMNT v1/ai/speech (JSON)",
-          url: "https://api.lmnt.com/v1/ai/speech",
-          method: "json",
-        },
-        {
-          name: "LMNT v1/ai/speech (FormData)",
-          url: "https://api.lmnt.com/v1/ai/speech",
-          method: "form",
-        },
-      ]
-
-      for (const attempt of apiAttempts) {
-        try {
-
-          const requestOptions = {
-            method: "POST",
-            headers: {
-              "X-API-Key": lmntApiKey,
-            },
-          }
-
-          if (attempt.method === "json") {
-            requestOptions.headers["Content-Type"] = "application/json"
-            requestOptions.body = JSON.stringify({
-              text: text,
-              voice: synthesisOptions.voice,
-              format: synthesisOptions.format,
-              language: synthesisOptions.language,
-              sample_rate: synthesisOptions.sample_rate,
-              speed: synthesisOptions.speed,
-            })
-          } else if (attempt.method === "form") {
-            const form = new FormData()
-            form.append("text", text)
-            form.append("voice", synthesisOptions.voice)
-            form.append("format", synthesisOptions.format)
-            form.append("language", synthesisOptions.language)
-            form.append("sample_rate", synthesisOptions.sample_rate.toString())
-            form.append("speed", synthesisOptions.speed.toString())
-
-            requestOptions.headers = {
-              ...requestOptions.headers,
-              ...form.getHeaders(),
-            }
-            requestOptions.body = form
-          }
-
-
-          const response = await fetch(attempt.url, requestOptions)
-
-
-          if (!response.ok) {
-            const errorText = await response.text()
-            continue // Try next approach
-          }
-
-          const contentType = response.headers.get("content-type")
-
-          if (contentType && contentType.includes("application/json")) {
-            // Handle JSON response
-            const jsonResponse = await response.json()
-
-            if (jsonResponse.audio_url) {
-              const audioResponse = await fetch(jsonResponse.audio_url)
-              if (!audioResponse.ok) {
-                throw new Error(`Failed to fetch audio from URL: ${audioResponse.status}`)
-              }
-              const audioBuffer = await audioResponse.arrayBuffer()
-              return Buffer.from(audioBuffer)
-            } else if (jsonResponse.audio) {
-              // Direct audio data in JSON
-              const audioBuffer = Buffer.from(jsonResponse.audio, "base64")
-              return audioBuffer
-            } else {
-              throw new Error("Unexpected JSON response format: " + JSON.stringify(jsonResponse))
-            }
-          } else {
-            // Handle binary audio response
-            const audioBuffer = await response.arrayBuffer()
-
-            if (audioBuffer.byteLength === 0) {
-              throw new Error("TTS returned empty audio buffer")
-            }
-
-            console.log(`✅ TTS: Successfully got audio from ${attempt.name}`)
-            return Buffer.from(audioBuffer)
-          }
-        } catch (error) {
-
-          // If this is the last attempt, throw the error
-          if (attempt === apiAttempts[apiAttempts.length - 1]) {
-            throw error
-          }
-
-          continue // Try next approach
-        }
-      }
-
-      throw new Error("All TTS API attempts failed")
-    }
-
-    // Enhanced synthesis wrapper with comprehensive error handling
-    const synthesizeWithErrorHandling = async (text, options = {}) => {
-
-      try {
-        // Send immediate acknowledgment to client
-        if (ws.readyState === WebSocket.OPEN) {
-         
-        }
-
-        const result = await synthesizeWithLMNT(text, options)
-
-        console.log("✅ Synthesis wrapper: Success, audio size:", result.length)
-        return result
-      } catch (error) {
-       
-
-        // Send error to client
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "synthesis_error",
-              error: error.message,
-              details: error.stack,
-            }),
-          )
-        }
-
-        throw error
       }
     }
 
