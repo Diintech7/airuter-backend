@@ -52,13 +52,24 @@ if (!fs.existsSync(tempDir)) {
 }
 
 const PORT = process.env.PORT || 5000
+
+// Enhanced server startup with WebSocket logging
 server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`)
-  console.log("Authentication endpoints available:")
-  console.log("  - GET /api/auth/check (Universal auth check)")
-  console.log("  - GET /api/auth/validate (User validation)")
-  console.log("  - GET /api/candidate/validate (Candidate validation)")
-  console.log("  - GET /api/admin/validate (Admin validation)")
+  console.log("=".repeat(80))
+  console.log(`🚀 SERVER STARTED ON PORT ${PORT}`)
+  console.log("=".repeat(80))
+  console.log("📡 WebSocket Endpoints Available:")
+  console.log("   - ws://localhost:" + PORT + "/ws/unified-voice (SIP Voice Communication)")
+  console.log("   - ws://localhost:" + PORT + "/ws/transcribe (Speech-to-Text)")
+  console.log("   - ws://localhost:" + PORT + "/ws/speech (Text-to-Speech)")
+  console.log("   - ws://localhost:" + PORT + "/ws/interview (Interview Sessions)")
+  console.log("")
+  console.log("🔐 Authentication endpoints available:")
+  console.log("   - GET /api/auth/check (Universal auth check)")
+  console.log("   - GET /api/auth/validate (User validation)")
+  console.log("   - GET /api/candidate/validate (Candidate validation)")
+  console.log("   - GET /api/admin/validate (Admin validation)")
+  console.log("=".repeat(80))
 })
 
 connectDB()
@@ -271,41 +282,80 @@ app.use((err, req, res, next) => {
   })
 })
 
-// WebSocket servers
+// WebSocket servers with enhanced logging
 const wss = new WebSocket.Server({ noServer: true })
 const deepgramWss = new WebSocket.Server({ noServer: true })
 const interviewWss = new WebSocket.Server({ noServer: true })
 const unifiedVoiceWss = new WebSocket.Server({ noServer: true })
 
+console.log("🔧 Setting up WebSocket servers...")
 setupWebSocketServer(wss)
 setupDeepgramServer(deepgramWss)
 setupUnifiedVoiceServer(unifiedVoiceWss)
+console.log("✅ All WebSocket servers configured")
 
+// Enhanced WebSocket upgrade handler with detailed logging
 server.on("upgrade", (request, socket, head) => {
   const pathname = request.url
+  const clientIP = request.socket.remoteAddress
+  const timestamp = new Date().toISOString()
+
+  console.log("🔄 WebSocket upgrade request:")
+  console.log(`   Path: ${pathname}`)
+  console.log(`   Client IP: ${clientIP}`)
+  console.log(`   Timestamp: ${timestamp}`)
 
   if (pathname.startsWith("/ws/unified-voice")) {
-    // New unified voice endpoint
+    console.log("📞 Routing to Unified Voice WebSocket (SIP Communication)")
     unifiedVoiceWss.handleUpgrade(request, socket, head, (ws) => {
       unifiedVoiceWss.emit("connection", ws, request)
     })
   } else if (pathname.startsWith("/ws/transcribe")) {
+    console.log("🎙️ Routing to Deepgram Transcription WebSocket")
     deepgramWss.handleUpgrade(request, socket, head, (ws) => {
       deepgramWss.emit("connection", ws, request)
     })
   } else if (pathname.startsWith("/ws/speech")) {
+    console.log("🔊 Routing to Speech WebSocket")
     wss.handleUpgrade(request, socket, head, (ws) => {
       wss.emit("connection", ws, request)
     })
   } else if (pathname.startsWith("/ws/interview")) {
+    console.log("💼 Routing to Interview WebSocket")
     interviewWss.handleUpgrade(request, socket, head, (ws) => {
       interviewWss.emit("connection", ws, request)
     })
   } else {
+    console.log("❌ Unknown WebSocket path, destroying connection:", pathname)
     socket.destroy()
   }
 })
 
+// Enhanced process error handling
 process.on("unhandledRejection", (err) => {
-  console.error("Unhandled Promise Rejection:", err)
+  console.error("❌ Unhandled Promise Rejection:", err)
+  console.error("Stack trace:", err.stack)
+})
+
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err)
+  console.error("Stack trace:", err.stack)
+  process.exit(1)
+})
+
+// Graceful shutdown handling
+process.on("SIGTERM", () => {
+  console.log("🛑 SIGTERM received, shutting down gracefully...")
+  server.close(() => {
+    console.log("✅ Server closed")
+    process.exit(0)
+  })
+})
+
+process.on("SIGINT", () => {
+  console.log("🛑 SIGINT received, shutting down gracefully...")
+  server.close(() => {
+    console.log("✅ Server closed")
+    process.exit(0)
+  })
 })

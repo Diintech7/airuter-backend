@@ -14,6 +14,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 New unified voice connection established")
+    console.log("📡 SIP Connection Details:", {
+      timestamp: new Date().toISOString(),
+      clientIP: req.socket.remoteAddress,
+      userAgent: req.headers['user-agent'],
+      origin: req.headers.origin
+    })
 
     // Deepgram client state
     let deepgramWs = null
@@ -38,6 +44,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let sessionId = null
     let audioChunkCount = 0
     let connectionGreetingSent = false
+    let sipDataReceived = 0
 
     // Extract language from URL parameters
     const url = new URL(req.url, "http://localhost")
@@ -46,11 +53,46 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
 
+    // Enhanced SIP data logging function
+    const logSipData = (data, type = "UNKNOWN") => {
+      const timestamp = new Date().toISOString()
+      sipDataReceived++
+      
+      console.log("=" .repeat(80))
+      console.log(`📞 SIP TEAM DATA RECEIVED [${sipDataReceived}] - ${timestamp}`)
+      console.log("=" .repeat(80))
+      console.log(`🔍 Data Type: ${type}`)
+      console.log(`📊 Data Size: ${typeof data === 'string' ? data.length : data.byteLength || 'unknown'} bytes`)
+      
+      if (typeof data === 'string') {
+        console.log(`📝 Text Content: ${data.substring(0, 200)}${data.length > 200 ? '...' : ''}`)
+      } else if (data instanceof Buffer) {
+        console.log(`🎵 Audio Buffer: ${data.length} bytes`)
+        console.log(`🎵 Audio Preview: ${data.toString('hex').substring(0, 40)}...`)
+      }
+      
+      console.log(`🔗 Session ID: ${sessionId || 'Not set'}`)
+      console.log(`🌍 Language: ${language}`)
+      console.log("=" .repeat(80))
+      
+      // Send real-time notification to client about SIP data
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({
+          type: "sip_data_received",
+          timestamp: timestamp,
+          dataType: type,
+          dataSize: typeof data === 'string' ? data.length : data.byteLength || 0,
+          sessionId: sessionId,
+          count: sipDataReceived
+        }))
+      }
+    }
+
     // Default greeting messages based on language
     const getGreetingMessage = (lang) => {
       const greetings = {
         'hi': 'नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ। आप मुझसे कुछ भी पूछ सकते हैं।',
-        'en': 'Hi! Hello, how can I help you today? Feel free to ask me anything. I am hear to help you with any kind of problems and for giving good responses and make you happy',
+        'en': 'Hi! Hello, how can I help you today? Feel free to ask me anything. I am here to help you with any kind of problems and for giving good responses and make you happy',
         'es': '¡Hola! ¿Cómo puedo ayudarte hoy?',
         'fr': 'Bonjour! Comment puis-je vous aider aujourd\'hui?',
         'de': 'Hallo! Wie kann ich Ihnen heute helfen?',
@@ -82,195 +124,43 @@ const setupUnifiedVoiceServer = (wss) => {
       return result
     }
 
-    // LMNT synthesis function with comprehensive error handling and multiple API approaches
-    const synthesizeWithLMNT = async (text, options = {}) => {
-      console.log("[LMNT] synthesizeWithLMNT called with text:", text, "options:", options)
-      if (!lmntApiKey) {
-        const error = "TTS API key not configured in environment variables"
-        console.error("[LMNT] Error:", error)
-        throw new Error(error)
-      }
-
-      const synthesisOptions = {
-        voice: options.voice || "lily",
-        language: options.language || "en",
-        speed: options.speed || 1.0,
-        format: "wav",
-        sample_rate: 8000,
-      }
-      console.log("[LMNT] Synthesis options:", synthesisOptions)
-
-      // Try multiple LMNT API approaches
-      const apiAttempts = [
-        {
-          name: "LMNT v1/ai/speech (JSON)",
-          url: "https://api.lmnt.com/v1/ai/speech",
-          method: "json",
-        },
-        {
-          name: "LMNT v1/ai/speech (FormData)",
-          url: "https://api.lmnt.com/v1/ai/speech",
-          method: "form",
-        },
-      ]
-
-      for (const attempt of apiAttempts) {
-        try {
-          console.log(`[LMNT] Attempting: ${attempt.name}`)
-          const requestOptions = {
-            method: "POST",
-            headers: {
-              "X-API-Key": lmntApiKey,
-            },
-          }
-
-          if (attempt.method === "json") {
-            requestOptions.headers["Content-Type"] = "application/json"
-            requestOptions.body = JSON.stringify({
-              text: text,
-              voice: synthesisOptions.voice,
-              format: synthesisOptions.format,
-              language: synthesisOptions.language,
-              sample_rate: synthesisOptions.sample_rate,
-              speed: synthesisOptions.speed,
-            })
-            console.log("[LMNT] JSON request body:", requestOptions.body)
-          } else if (attempt.method === "form") {
-            const form = new FormData()
-            form.append("text", text)
-            form.append("voice", synthesisOptions.voice)
-            form.append("format", synthesisOptions.format)
-            form.append("language", synthesisOptions.language)
-            form.append("sample_rate", synthesisOptions.sample_rate.toString())
-            form.append("speed", synthesisOptions.speed.toString())
-
-            requestOptions.headers = {
-              ...requestOptions.headers,
-              ...form.getHeaders(),
-            }
-            requestOptions.body = form
-            console.log("[LMNT] FormData request headers:", requestOptions.headers)
-          }
-
-          const response = await fetch(attempt.url, requestOptions)
-          console.log(`[LMNT] Response status: ${response.status} (${response.statusText}) for ${attempt.name}`)
-
-          if (!response.ok) {
-            const errorText = await response.text()
-            console.error(`[LMNT] Error response from LMNT (${attempt.name}):`, errorText)
-            continue // Try next approach
-          }
-
-          const contentType = response.headers.get("content-type")
-          console.log(`[LMNT] Response content-type: ${contentType}`)
-
-          if (contentType && contentType.includes("application/json")) {
-            // Handle JSON response
-            const jsonResponse = await response.json()
-            console.log(`[LMNT] JSON response:`, jsonResponse)
-
-            if (jsonResponse.audio_url) {
-              console.log(`[LMNT] Fetching audio from audio_url:`, jsonResponse.audio_url)
-              const audioResponse = await fetch(jsonResponse.audio_url)
-              if (!audioResponse.ok) {
-                console.error(`[LMNT] Failed to fetch audio from URL: ${audioResponse.status}`)
-                throw new Error(`Failed to fetch audio from URL: ${audioResponse.status}`)
-              }
-              const audioBuffer = await audioResponse.arrayBuffer()
-              console.log(`[LMNT] Received audio buffer from audio_url, size:`, audioBuffer.byteLength)
-              return Buffer.from(audioBuffer)
-            } else if (jsonResponse.audio) {
-              // Direct audio data in JSON
-              const audioBuffer = Buffer.from(jsonResponse.audio, "base64")
-              console.log(`[LMNT] Received base64 audio in JSON, size:`, audioBuffer.length)
-              return audioBuffer
-            } else {
-              console.error("[LMNT] Unexpected JSON response format:", jsonResponse)
-              throw new Error("Unexpected JSON response format: " + JSON.stringify(jsonResponse))
-            }
-          } else {
-            // Handle binary audio response
-            const audioBuffer = await response.arrayBuffer()
-            console.log(`[LMNT] Received binary audio buffer, size:`, audioBuffer.byteLength)
-            if (audioBuffer.byteLength === 0) {
-              console.error("[LMNT] TTS returned empty audio buffer")
-              throw new Error("TTS returned empty audio buffer")
-            }
-            console.log(`✅ [LMNT] Successfully got audio from ${attempt.name}`)
-            return Buffer.from(audioBuffer)
-          }
-        } catch (error) {
-          console.error(`[LMNT] Error in attempt ${attempt.name}:`, error)
-          // If this is the last attempt, throw the error
-          if (attempt === apiAttempts[apiAttempts.length - 1]) {
-            throw error
-          }
-          continue // Try next approach
-        }
-      }
-      console.error("[LMNT] All TTS API attempts failed")
-      throw new Error("All TTS API attempts failed")
-    }
-
-    // Enhanced synthesis wrapper with comprehensive error handling
-    const synthesizeWithErrorHandling = async (text, options = {}) => {
-      console.log("[LMNT] synthesizeWithErrorHandling called with text:", text, "options:", options)
-      try {
-        // Send immediate acknowledgment to client
-        if (ws.readyState === WebSocket.OPEN) {
-          // Optionally log that acknowledgment would be sent
-        }
-        const result = await synthesizeWithLMNT(text, options)
-        console.log("[LMNT] Synthesis wrapper: Success, audio size:", result.length)
-        return result
-      } catch (error) {
-        console.error("[LMNT] Synthesis error:", error)
-        // Send error to client
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "synthesis_error",
-              error: error.message,
-              details: error.stack,
-            }),
-          )
-        }
-        throw error
-      }
-    }
-
     // Function to send default greeting
     const sendGreeting = async () => {
-      console.log("[LMNT] sendGreeting called. connectionGreetingSent:", connectionGreetingSent, "lmntApiKey:", !!lmntApiKey)
       if (connectionGreetingSent || !lmntApiKey) {
         return
       }
+      
       const greetingText = getGreetingMessage(language)
-      console.log("[LMNT] Greeting text:", greetingText)
+      console.log("👋 Greeting text:", greetingText)
+
       try {
         // Generate session ID if not exists
         if (!sessionId) {
           sessionId = generateSessionId()
-          console.log("[LMNT] Generated new sessionId for greeting:", sessionId)
         }
+
         const synthesisOptions = {
           voice: "lily",
           language: language === 'en' ? 'en' : 'hi', // LMNT might not support all languages
           speed: 1.0,
         }
-        console.log("[LMNT] Greeting synthesis options:", synthesisOptions)
+
         const audioData = await synthesizeWithErrorHandling(greetingText, synthesisOptions)
+
         if (!audioData || audioData.length === 0) {
-          console.error("[LMNT] Received empty greeting audio data from TTS")
           throw new Error("Received empty greeting audio data from TTS")
         }
-        console.log("[LMNT] Greeting: Successfully received audio data, size:", audioData.length, "bytes")
+
+        console.log("✅ Greeting: Successfully received audio data, size:", audioData.length, "bytes")
+
         // Convert audio to the required format with raw bytes
         const audioBuffer = Buffer.from(audioData)
         const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
         const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
         // Increment chunk count
         audioChunkCount++
+
         // Send greeting audio in the required format with raw bytes
         const greetingResponse = {
           data: {
@@ -283,20 +173,23 @@ const setupUnifiedVoiceServer = (wss) => {
           },
           type: "greeting"
         }
-        console.log("[LMNT] SENDING GREETING AUDIO:", {
-          session_id: greetingResponse.data.session_id,
-          count: greetingResponse.data.count,
-          audio_bytes_preview: pythonBytesString.substring(0, 100) + "..."
-        })
+
+        console.log("✅ ==================== SENDING GREETING AUDIO ====================")
+        console.log("✅ Greeting session_id:", greetingResponse.data.session_id)
+        console.log("✅ Greeting count:", greetingResponse.data.count)
+        console.log("✅ Greeting audio bytes preview:", pythonBytesString.substring(0, 100) + "...")
+
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(greetingResponse))
-          console.log("[LMNT] 👋 Connection greeting sent successfully!")
+          console.log("✅ 👋 Connection greeting sent successfully!")
           connectionGreetingSent = true
         } else {
-          console.log("[LMNT] ❌ WebSocket not open, cannot send greeting")
+          console.log("❌ WebSocket not open, cannot send greeting")
         }
+
       } catch (error) {
-        console.error("[LMNT] Failed to send greeting:", error)
+        console.log("❌ Failed to send greeting:", error.message)
+        
         // Don't send error to client for greeting failure, just log it
         // The connection should still work normally
         connectionGreetingSent = true // Mark as sent to avoid retrying
@@ -347,26 +240,31 @@ const setupUnifiedVoiceServer = (wss) => {
     // Enhanced audio sending with better error handling
     const sendAudioToDeepgramThrottled = async (audioData) => {
       if (!deepgramWs) {
+        console.log("⚠️ Deepgram WebSocket not available")
         return false
       }
 
       if (deepgramWs.readyState !== WebSocket.OPEN) {
+        console.log("⚠️ Deepgram WebSocket not open, state:", deepgramWs.readyState)
         return false
       }
 
       if (!deepgramReady) {
+        console.log("⚠️ Deepgram not ready")
         return false
       }
 
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
-
+        console.log(`🎵 Sending ${buffer.length} bytes to Deepgram`)
         deepgramWs.send(buffer)
         return true
       } catch (error) {
+        console.log("❌ Error sending audio to Deepgram:", error.message)
 
         // If it's a rate limiting error, we should back off
         if (error.message.includes("429") || error.message.includes("rate limit")) {
+          console.log("⏳ Rate limit detected, backing off...")
           await new Promise((resolve) => setTimeout(resolve, 2000))
         }
 
@@ -378,10 +276,12 @@ const setupUnifiedVoiceServer = (wss) => {
     const queueAudioData = (audioData) => {
       // Prevent queue overflow
       if (audioQueue.length >= MAX_QUEUE_SIZE) {
-        audioQueue.shift() // Remove oldest chunk
+        const removed = audioQueue.shift() // Remove oldest chunk
+        console.log(`⚠️ Audio queue overflow, removed oldest chunk (${removed.length} bytes)`)
       }
 
       audioQueue.push(audioData)
+      console.log(`🎵 Audio queued: ${audioData.length} bytes, queue size: ${audioQueue.length}`)
 
       // Start processing if not already running
       if (!isProcessingQueue) {
@@ -393,9 +293,11 @@ const setupUnifiedVoiceServer = (wss) => {
     const connectToDeepgram = async (options = {}) => {
       return new Promise((resolve, reject) => {
         try {
+          console.log("🎙️ Connecting to Deepgram STT service...")
 
           if (!process.env.DEEPGRAM_API_KEY) {
             const error = "STT API key not configured"
+            console.log("❌", error)
             reject(new Error(error))
             return
           }
@@ -429,9 +331,11 @@ const setupUnifiedVoiceServer = (wss) => {
             deepgramConnected = true
             reconnectAttempts = 0 // Reset reconnect attempts on successful connection
             reconnectDelay = 1000 // Reset delay
+            console.log("✅ Deepgram STT connection established")
 
             // Process any queued audio
             if (audioQueue.length > 0) {
+              console.log(`🎵 Processing ${audioQueue.length} queued audio chunks`)
               processAudioQueue()
             }
 
@@ -446,6 +350,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
               // Check for different types of Deepgram responses
               if (data.type === "Results") {
+                console.log("🎙️ STT Result received:", data.type)
 
                 if (data.channel?.alternatives?.[0]?.transcript) {
                   const transcript = data.channel.alternatives[0].transcript
@@ -454,7 +359,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
                   // Enhanced console logging for STT text
                   if (transcript.trim()) {
-                   
+                    console.log("🗣️ TRANSCRIPT DETECTED:")
+                    console.log(`   Text: "${transcript}"`)
+                    console.log(`   Confidence: ${confidence}`)
+                    console.log(`   Final: ${is_final}`)
+                    console.log(`   Language: ${language}`)
+                    
                     console.log("📤 STT: Sending transcript to client:", transcript)
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(
@@ -470,12 +380,16 @@ const setupUnifiedVoiceServer = (wss) => {
                   }
                 }
               } else if (data.type === "Metadata") {
+                console.log("🎙️ STT Metadata:", data)
               } else if (data.type === "SpeechStarted") {
-               
+                console.log("🎙️ STT: Speech started detected")
               } else if (data.type === "UtteranceEnd") {
+                console.log("🎙️ STT: Utterance end detected")
               } else {
+                console.log("🎙️ STT: Unknown message type:", data.type)
               }
             } catch (parseError) {
+              console.log("❌ Error parsing STT response:", parseError.message)
             }
           }
 
@@ -483,9 +397,11 @@ const setupUnifiedVoiceServer = (wss) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
+            console.log("❌ Deepgram STT error:", error.message)
 
             // Check if it's a rate limiting error
             if (error.message && error.message.includes("429")) {
+              console.log("⚠️ Rate limit exceeded for STT service")
               // Send rate limit error to client
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(
@@ -504,19 +420,24 @@ const setupUnifiedVoiceServer = (wss) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
+            console.log(`🎙️ STT connection closed: ${event.code} - ${event.reason}`)
 
             // Handle rate limiting (429) or other recoverable errors
             if (event.code === 1006 || event.code === 1011 || event.reason.includes("429")) {
+              console.log("🔄 Attempting to reconnect to STT service...")
 
               if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 reconnectAttempts++
                 const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000) // Max 30 seconds
+                console.log(`⏳ Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
 
                 setTimeout(() => {
                   connectToDeepgram(options).catch((err) => {
+                    console.log("❌ STT reconnection failed:", err.message)
                   })
                 }, delay)
               } else {
+                console.log("❌ Max STT reconnection attempts reached")
                 if (ws.readyState === WebSocket.OPEN) {
                   ws.send(
                     JSON.stringify({
@@ -529,6 +450,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
           }
         } catch (error) {
+          console.log("❌ Error creating Deepgram connection:", error.message)
           reject(error)
         }
       })
@@ -547,7 +469,174 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramWs.close(1000, "Client closing")
           console.log("✅ STT: WebSocket closed successfully")
         } catch (error) {
+          console.log("⚠️ Error closing STT WebSocket:", error.message)
         }
+      }
+    }
+
+    // LMNT synthesis function with comprehensive error handling and multiple API approaches
+    const synthesizeWithLMNT = async (text, options = {}) => {
+      console.log("🔊 TTS: Starting synthesis for text:", text.substring(0, 100) + "...")
+    
+      if (!lmntApiKey) {
+        const error = "TTS API key not configured in environment variables"
+        console.log("❌", error)
+        throw new Error(error)
+      }
+
+      const synthesisOptions = {
+        voice: options.voice || "lily",
+        language: options.language || "en",
+        speed: options.speed || 1.0,
+        format: "wav",
+        sample_rate: 8000,
+      }
+
+      console.log("🔊 TTS synthesis options:", synthesisOptions)
+
+      // Try multiple LMNT API approaches
+      const apiAttempts = [
+        {
+          name: "LMNT v1/ai/speech (JSON)",
+          url: "https://api.lmnt.com/v1/ai/speech",
+          method: "json",
+        },
+        {
+          name: "LMNT v1/ai/speech (FormData)",
+          url: "https://api.lmnt.com/v1/ai/speech",
+          method: "form",
+        },
+      ]
+
+      for (const attempt of apiAttempts) {
+        try {
+          console.log(`🔊 TTS: Trying ${attempt.name}`)
+
+          const requestOptions = {
+            method: "POST",
+            headers: {
+              "X-API-Key": lmntApiKey,
+            },
+          }
+
+          if (attempt.method === "json") {
+            requestOptions.headers["Content-Type"] = "application/json"
+            requestOptions.body = JSON.stringify({
+              text: text,
+              voice: synthesisOptions.voice,
+              format: synthesisOptions.format,
+              language: synthesisOptions.language,
+              sample_rate: synthesisOptions.sample_rate,
+              speed: synthesisOptions.speed,
+            })
+          } else if (attempt.method === "form") {
+            const form = new FormData()
+            form.append("text", text)
+            form.append("voice", synthesisOptions.voice)
+            form.append("format", synthesisOptions.format)
+            form.append("language", synthesisOptions.language)
+            form.append("sample_rate", synthesisOptions.sample_rate.toString())
+            form.append("speed", synthesisOptions.speed.toString())
+
+            requestOptions.headers = {
+              ...requestOptions.headers,
+              ...form.getHeaders(),
+            }
+            requestOptions.body = form
+          }
+
+          console.log(`🔊 TTS: Making request to ${attempt.url}`)
+
+          const response = await fetch(attempt.url, requestOptions)
+
+          console.log(`🔊 TTS: Response status: ${response.status}`)
+
+          if (!response.ok) {
+            const errorText = await response.text()
+            console.log(`❌ TTS: ${attempt.name} failed:`, errorText)
+            continue // Try next approach
+          }
+
+          const contentType = response.headers.get("content-type")
+          console.log(`🔊 TTS: Response content-type: ${contentType}`)
+
+          if (contentType && contentType.includes("application/json")) {
+            // Handle JSON response
+            const jsonResponse = await response.json()
+            console.log("🔊 TTS: Received JSON response")
+
+            if (jsonResponse.audio_url) {
+              console.log("🔊 TTS: Fetching audio from URL:", jsonResponse.audio_url)
+              const audioResponse = await fetch(jsonResponse.audio_url)
+              if (!audioResponse.ok) {
+                throw new Error(`Failed to fetch audio from URL: ${audioResponse.status}`)
+              }
+              const audioBuffer = await audioResponse.arrayBuffer()
+              console.log(`✅ TTS: Audio fetched from URL, size: ${audioBuffer.byteLength} bytes`)
+              return Buffer.from(audioBuffer)
+            } else if (jsonResponse.audio) {
+              // Direct audio data in JSON
+              const audioBuffer = Buffer.from(jsonResponse.audio, "base64")
+              console.log(`✅ TTS: Direct audio from JSON, size: ${audioBuffer.length} bytes`)
+              return audioBuffer
+            } else {
+              throw new Error("Unexpected JSON response format: " + JSON.stringify(jsonResponse))
+            }
+          } else {
+            // Handle binary audio response
+            const audioBuffer = await response.arrayBuffer()
+
+            if (audioBuffer.byteLength === 0) {
+              throw new Error("TTS returned empty audio buffer")
+            }
+
+            console.log(`✅ TTS: Successfully got audio from ${attempt.name}, size: ${audioBuffer.byteLength} bytes`)
+            return Buffer.from(audioBuffer)
+          }
+        } catch (error) {
+          console.log(`❌ TTS: ${attempt.name} failed:`, error.message)
+
+          // If this is the last attempt, throw the error
+          if (attempt === apiAttempts[apiAttempts.length - 1]) {
+            throw error
+          }
+
+          continue // Try next approach
+        }
+      }
+
+      throw new Error("All TTS API attempts failed")
+    }
+
+    // Enhanced synthesis wrapper with comprehensive error handling
+    const synthesizeWithErrorHandling = async (text, options = {}) => {
+      console.log("🔊 Starting TTS synthesis process...")
+
+      try {
+        // Send immediate acknowledgment to client
+        if (ws.readyState === WebSocket.OPEN) {
+          console.log("📤 Sending TTS processing notification to client")
+        }
+
+        const result = await synthesizeWithLMNT(text, options)
+
+        console.log("✅ Synthesis wrapper: Success, audio size:", result.length)
+        return result
+      } catch (error) {
+        console.log("❌ Synthesis wrapper failed:", error.message)
+
+        // Send error to client
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "synthesis_error",
+              error: error.message,
+              details: error.stack,
+            }),
+          )
+        }
+
+        throw error
       }
     }
 
@@ -556,8 +645,11 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         // Browser audio is typically already in the right format
         // Just ensure it's a proper buffer
-        return audioBuffer instanceof Buffer ? audioBuffer : Buffer.from(audioBuffer)
+        const result = audioBuffer instanceof Buffer ? audioBuffer : Buffer.from(audioBuffer)
+        console.log(`🎵 Audio converted to PCM: ${result.length} bytes`)
+        return result
       } catch (error) {
+        console.log("⚠️ PCM conversion warning:", error.message)
         return audioBuffer
       }
     }
@@ -603,18 +695,22 @@ const setupUnifiedVoiceServer = (wss) => {
       offset += 4
       header.writeUInt32LE(dataSize, offset)
 
+      console.log(`🎵 WAV header created: ${sampleRate}Hz, ${channels}ch, ${bitsPerSample}bit, ${dataSize} bytes`)
       return Buffer.concat([header, audioBuffer])
     }
 
     // Generate session ID
     const generateSessionId = () => {
-      return "session_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9)
+      const id = "session_" + Date.now() + "_" + Math.random().toString(36).substr(2, 9)
+      console.log("🆔 Generated session ID:", id)
+      return id
     }
 
     // Handle incoming messages
     ws.on("message", async (message) => {
       try {
-     
+        console.log("📨 Message received from SIP team")
+        
         // Check if message is binary (audio data) or text (JSON commands)
         let isTextMessage = false
         let data = null
@@ -622,9 +718,12 @@ const setupUnifiedVoiceServer = (wss) => {
         if (typeof message === "string") {
           // Definitely a text message
           isTextMessage = true
+          logSipData(message, "TEXT_MESSAGE")
           try {
             data = JSON.parse(message)
+            console.log("📋 Parsed JSON data:", JSON.stringify(data, null, 2))
           } catch (parseError) {
+            console.log("❌ Failed to parse JSON:", parseError.message)
             return
           }
         } else if (message instanceof Buffer) {
@@ -636,23 +735,29 @@ const setupUnifiedVoiceServer = (wss) => {
             if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
               data = JSON.parse(messageStr)
               isTextMessage = true
+              logSipData(messageStr, "JSON_BUFFER")
+              console.log("📋 Parsed JSON from buffer:", JSON.stringify(data, null, 2))
             } else {
               // Doesn't look like JSON, treat as binary audio
               isTextMessage = false
+              logSipData(message, "AUDIO_BUFFER")
             }
           } catch (parseError) {
             // Failed to parse as JSON, treat as binary audio data
             isTextMessage = false
+            logSipData(message, "BINARY_AUDIO")
           }
         }
 
         if (isTextMessage && data) {
-        
+          console.log("🔄 Processing text/JSON message...")
+          
           if (data.type === "start" && data.uuid) {
             // Handle session start
             sessionId = data.uuid
             audioChunkCount = 0
             console.log("✅ Session started with ID:", sessionId)
+            console.log("🔄 Resetting audio chunk count to 0")
     
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(
@@ -662,14 +767,18 @@ const setupUnifiedVoiceServer = (wss) => {
                   language: language,
                 }),
               )
+              console.log("📤 Session started confirmation sent to client")
             }
     
             // Send greeting after session start (with a small delay to ensure client is ready)
             setTimeout(() => {
+              console.log("👋 Sending greeting after session start...")
               sendGreeting()
             }, 1000)
     
           } else if (data.type === "synthesize") {
+            console.log("🔊 TTS synthesis request received")
+            console.log("📝 Text to synthesize:", data.text)
 
             try {
               const synthesisOptions = {
@@ -677,6 +786,8 @@ const setupUnifiedVoiceServer = (wss) => {
                 language: data.language || language,
                 speed: data.speed || 1.0,
               }
+              
+              console.log("🔊 TTS options:", synthesisOptions)
     
               const audioData = await synthesizeWithErrorHandling(data.text, synthesisOptions)
     
@@ -693,6 +804,7 @@ const setupUnifiedVoiceServer = (wss) => {
     
               // Increment chunk count
               audioChunkCount++
+              console.log("📊 Audio chunk count incremented to:", audioChunkCount)
     
               // Send audio in the required format with raw bytes
               const audioResponse = {
@@ -705,12 +817,20 @@ const setupUnifiedVoiceServer = (wss) => {
                   sample_width: 2,
                 },
               }
+              
+              console.log("📤 Sending synthesized audio response:")
+              console.log("   Session ID:", audioResponse.data.session_id)
+              console.log("   Count:", audioResponse.data.count)
+              console.log("   Audio bytes preview:", pythonBytesString.substring(0, 50) + "...")
     
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify(audioResponse))
+                console.log("✅ Synthesized audio sent successfully!")
               } else {
+                console.log("❌ WebSocket not open, cannot send audio")
               }
             } catch (error) {
+              console.log("❌ TTS synthesis failed:", error.message)
     
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(
@@ -721,13 +841,17 @@ const setupUnifiedVoiceServer = (wss) => {
                 )
               }
             }
+          } else {
+            console.log("❓ Unknown message type or missing required fields:", data.type)
           }
         } else {
+          console.log("🎵 Processing audio data for transcription...")
     
           // This is audio data for transcription
     
           // Initialize Deepgram if not already connected
           if (!deepgramConnected) {
+            console.log("🎙️ Initializing Deepgram connection...")
             try {
               await connectToDeepgram({
                 language: language,
@@ -736,7 +860,9 @@ const setupUnifiedVoiceServer = (wss) => {
                 diarize: false,
                 tier: "enhanced",
               })
+              console.log("✅ Deepgram connection established")
             } catch (error) {
+              console.log("❌ Failed to initialize Deepgram:", error.message)
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(
                   JSON.stringify({
@@ -756,6 +882,8 @@ const setupUnifiedVoiceServer = (wss) => {
           queueAudioData(pcmAudio)
         }
       } catch (error) {
+        console.log("❌ Error processing message:", error.message)
+        console.log("❌ Error stack:", error.stack)
     
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(
@@ -771,6 +899,10 @@ const setupUnifiedVoiceServer = (wss) => {
     // Handle connection close
     ws.on("close", () => {
       console.log("🔗 Unified voice connection closed")
+      console.log("📊 Session statistics:")
+      console.log(`   SIP data received: ${sipDataReceived} messages`)
+      console.log(`   Audio chunks processed: ${audioChunkCount}`)
+      console.log(`   Session ID: ${sessionId || 'Not set'}`)
     
       // Clean up Deepgram connection
       closeDeepgram()
@@ -784,18 +916,21 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramConnected = false
       isProcessingQueue = false
       connectionGreetingSent = false
+      sipDataReceived = 0
     })
     
     // Handle connection errors
     ws.on("error", (error) => {
+      console.log("❌ WebSocket connection error:", error.message)
     })
     
     // Send connection confirmation
     if (ws.readyState === WebSocket.OPEN) {
-      
+      console.log("✅ WebSocket connection confirmed, sending initial status")
     
       // Send greeting after a short delay to ensure client is ready
       setTimeout(() => {
+        console.log("👋 Sending initial greeting...")
         sendGreeting()
       }, 1500)
     }
