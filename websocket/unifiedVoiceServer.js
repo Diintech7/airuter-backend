@@ -76,7 +76,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Voicebot conversation state
     let currentTranscript = ""
     let emptyAudioCount = 0
-    const SILENCE_THRESHOLD = 10 // Number of consecutive empty/non-final Deepgram results to trigger TTS
+    const SILENCE_THRESHOLD = 1500 // Number of consecutive empty/non-final Deepgram results to trigger TTS
     let isSpeaking = false // Flag to track if user is actively speaking
 
     // Extract language from URL parameters
