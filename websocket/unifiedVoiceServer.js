@@ -422,13 +422,18 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    const queueAudioData = (audioData) => {
+    const queueAudioData = async (audioData) => {
       if (audioQueue.length >= MAX_QUEUE_SIZE) {
-        audioQueue.shift()
-        console.log(`⚠️ Audio queue overflow, removed oldest chunk. Current queue size: ${audioQueue.length}`)
+        console.log(
+          `⚠️ Audio queue full (${MAX_QUEUE_SIZE} chunks). Sending current queue to Deepgram and skipping new chunk.`,
+        )
+        await processAudioQueue()
+        audioQueue = []
+        return
       }
 
       audioQueue.push(audioData)
+      console.log(`🎵 Audio queued: ${audioData.length} bytes, current queue size: ${audioQueue.length}`)
 
       if (!isProcessingQueue) {
         processAudioQueue()
