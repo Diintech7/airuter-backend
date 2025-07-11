@@ -506,7 +506,8 @@ const setupUnifiedVoiceServer = (wss) => {
                     currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
                     emptyAudioCount = 0
                     isSpeaking = true
-                    console.log("📝 Accumulated Transcript:", currentTranscript)
+                    // Display the text from Deepgram in console log
+                    console.log("📝 Deepgram Transcript:", currentTranscript)
 
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(
