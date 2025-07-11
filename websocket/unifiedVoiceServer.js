@@ -202,10 +202,12 @@ const setupUnifiedVoiceServer = (wss) => {
     // Audio queue processor with rate limiting
     const processAudioQueue = async () => {
       if (isProcessingQueue || audioQueue.length === 0) {
+        console.log("⏩ Skipping audio queue processing: already running or queue is empty.")
         return
       }
 
       isProcessingQueue = true
+      console.log(`🎵 Starting audio queue processing. Queue size: ${audioQueue.length}`)
 
       while (audioQueue.length > 0 && deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
         const now = Date.now()
@@ -214,6 +216,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Enforce minimum interval between sends
         if (timeSinceLastSend < MIN_SEND_INTERVAL) {
           const waitTime = MIN_SEND_INTERVAL - timeSinceLastSend
+          console.log(`⏳ Waiting ${waitTime}ms before sending next audio chunk to Deepgram.`)
           await new Promise((resolve) => setTimeout(resolve, waitTime))
         }
 
@@ -223,6 +226,7 @@ const setupUnifiedVoiceServer = (wss) => {
         if (!success) {
           // If send failed, put the audio back at the front of the queue
           audioQueue.unshift(audioData)
+          console.log("⚠️ Failed to send audio to Deepgram, re-queueing and pausing processing.")
           break
         }
 
@@ -233,9 +237,11 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       isProcessingQueue = false
+      console.log("🎵 Audio queue processing finished.")
 
       // Continue processing if there are more items in queue
       if (audioQueue.length > 0) {
+        console.log("🎵 More audio in queue, scheduling next processing cycle.")
         setTimeout(processAudioQueue, MIN_SEND_INTERVAL)
       }
     }
@@ -243,23 +249,23 @@ const setupUnifiedVoiceServer = (wss) => {
     // Enhanced audio sending with better error handling
     const sendAudioToDeepgramThrottled = async (audioData) => {
       if (!deepgramWs) {
-        console.log("⚠️ Deepgram WebSocket not available")
+        console.log("⚠️ Deepgram WebSocket not available for sending.")
         return false
       }
 
       if (deepgramWs.readyState !== WebSocket.OPEN) {
-        console.log("⚠️ Deepgram WebSocket not open, state:", deepgramWs.readyState)
+        console.log("⚠️ Deepgram WebSocket not open for sending, state:", deepgramWs.readyState)
         return false
       }
 
       if (!deepgramReady) {
-        console.log("⚠️ Deepgram not ready")
+        console.log("⚠️ Deepgram not ready for sending.")
         return false
       }
 
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
-        console.log(`🎵 Sending ${buffer.length} bytes to Deepgram for transcription.`) // Added log
+        console.log(`🎵 Sending ${buffer.length} bytes to Deepgram for transcription.`)
         deepgramWs.send(buffer)
         return true
       } catch (error) {
@@ -280,11 +286,13 @@ const setupUnifiedVoiceServer = (wss) => {
       // Prevent queue overflow
       if (audioQueue.length >= MAX_QUEUE_SIZE) {
         const removed = audioQueue.shift() // Remove oldest chunk
-        console.log(`⚠️ Audio queue overflow, removed oldest chunk (${removed.length} bytes)`)
+        console.log(
+          `⚠️ Audio queue overflow, removed oldest chunk (${removed.length} bytes). Current queue size: ${audioQueue.length}`,
+        )
       }
 
       audioQueue.push(audioData)
-      console.log(`🎵 Audio queued: ${audioData.length} bytes, queue size: ${audioQueue.length}`)
+      console.log(`🎵 Audio queued: ${audioData.length} bytes, current queue size: ${audioQueue.length}`)
 
       // Start processing if not already running
       if (!isProcessingQueue) {
@@ -307,8 +315,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
           // Build Deepgram WebSocket URL
           const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-          // MODIFIED: Changed sample_rate to 8000Hz, common for telephony
-          deepgramUrl.searchParams.append("sample_rate", "8000")
+          deepgramUrl.searchParams.append("sample_rate", "8000") // Explicitly set to 8kHz
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("language", options.language || "en")
@@ -316,8 +323,9 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("punctuate", "true")
           deepgramUrl.searchParams.append("diarize", "false")
+          deepgramUrl.searchParams.append("encoding", "linear16") // Explicitly set encoding
 
-          console.log(`🎙️ Deepgram URL: ${deepgramUrl.toString()}`) // Added log for Deepgram URL
+          console.log(`🎙️ Deepgram URL: ${deepgramUrl.toString()}`)
 
           deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", process.env.DEEPGRAM_API_KEY])
 
@@ -1015,7 +1023,7 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         } else {
           console.log("🎵 Audio data received.")
-          logSipData(message, "AUDIO_DATA_QUEUED")
+          logSipData(message, "BINARY_AUDIO") // Changed type to BINARY_AUDIO for clarity
 
           // If Deepgram is ready, queue audio for transcription
           if (deepgramConnected && deepgramReady) {
@@ -1027,7 +1035,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
             // Limit buffer size to prevent memory issues
             if (audioBuffer.length > MAX_BUFFER_SIZE) {
-              // Use MAX_BUFFER_SIZE here
               audioBuffer.shift() // Remove oldest audio chunk
               console.log(
                 `⚠️ Audio buffer overflow, removed oldest chunk (before STT connected). Current size: ${audioBuffer.length}`,
