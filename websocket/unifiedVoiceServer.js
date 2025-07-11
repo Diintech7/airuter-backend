@@ -1,5 +1,7 @@
 const WebSocket = require("ws")
 const FormData = require("form-data")
+const fs = require("fs")
+const path = require("path")
 
 // Use native fetch (Node.js 18+) or fallback
 const fetch = globalThis.fetch || require("node-fetch")
@@ -11,6 +13,12 @@ if (!fetch) {
 
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized for SIP Integration")
+
+  // Create audio storage directory
+  const audioDir = path.join(__dirname, "audio_storage")
+  if (!fs.existsSync(audioDir)) {
+    fs.mkdirSync(audioDir, { recursive: true })
+  }
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 New SIP voice connection established")
@@ -32,10 +40,14 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramWs = null
     let deepgramReady = false
     let deepgramConnected = false
-    let accumulatedTranscripts = [] // Array to store all transcripts
+    let accumulatedTranscripts = []
     let emptyAudioCount = 0
     let isProcessingResponse = false
-    let audioBuffer = [] // Buffer for incoming audio
+
+    // Audio Storage
+    let audioFileList = []
+    let audioFileCounter = 0
+    let audioPlaybackInterval = null
 
     // TTS Configuration
     const lmntApiKey = process.env.LMNT_API_KEY
@@ -133,6 +145,34 @@ const setupUnifiedVoiceServer = (wss) => {
       return Buffer.concat([header, audioBuffer])
     }
 
+    // Save audio file to storage
+    const saveAudioFile = (audioData) => {
+      try {
+        const timestamp = Date.now()
+        const filename = `audio_${sessionId}_${timestamp}.wav`
+        const filepath = path.join(audioDir, filename)
+
+        // Create WAV file with header
+        const audioWithHeader = createWAVHeader(audioData, 8000, 1, 16)
+        fs.writeFileSync(filepath, audioWithHeader)
+
+        audioFileList.push({
+          filename: filename,
+          filepath: filepath,
+          timestamp: timestamp,
+          size: audioData.length,
+        })
+
+        console.log(`💾 Audio file saved: ${filename} (${audioData.length} bytes)`)
+        console.log(`📁 Total audio files: ${audioFileList.length}`)
+
+        return filepath
+      } catch (error) {
+        console.log("❌ Error saving audio file:", error.message)
+        return null
+      }
+    }
+
     // LMNT TTS synthesis
     const synthesizeWithLMNT = async (text, options = {}) => {
       console.log("🔊 TTS: Synthesizing text:", text.substring(0, 100) + "...")
@@ -203,27 +243,79 @@ const setupUnifiedVoiceServer = (wss) => {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(audioResponse))
           console.log(`✅ ${isGreeting ? "Greeting" : "Response"} audio sent successfully!`)
+          return true
         } else {
           console.log("❌ WebSocket not open, cannot send audio")
+          return false
         }
       } catch (error) {
         console.log("❌ Failed to send audio to SIP:", error.message)
+        return false
       }
     }
 
     // Send initial greeting when session starts
     const sendInitialGreeting = async () => {
-      if (!sessionStarted || !lmntApiKey) return
+      if (!sessionStarted || !lmntApiKey) {
+        console.log("⚠️ Cannot send greeting: session not started or TTS not configured")
+        return
+      }
 
       try {
         const greetingText = getGreetingMessage(language)
-        console.log("👋 Sending initial greeting:", greetingText)
+        console.log("👋 Generating initial greeting:", greetingText)
 
         const audioData = await synthesizeWithLMNT(greetingText, { voice: "lily", speed: 1.0 })
-        await sendAudioToSIP(audioData, true)
+        const success = await sendAudioToSIP(audioData, true)
+
+        if (success) {
+          console.log("✅ Initial greeting sent successfully!")
+        } else {
+          console.log("❌ Failed to send initial greeting")
+        }
       } catch (error) {
-        console.log("❌ Failed to send initial greeting:", error.message)
+        console.log("❌ Failed to generate/send initial greeting:", error.message)
       }
+    }
+
+    // Start audio playback cycle (every 5 seconds)
+    const startAudioPlaybackCycle = () => {
+      if (audioPlaybackInterval) {
+        clearInterval(audioPlaybackInterval)
+      }
+
+      audioPlaybackInterval = setInterval(async () => {
+        if (!sessionStarted || audioFileList.length === 0) {
+          return
+        }
+
+        try {
+          // Get next audio file in rotation
+          const audioFile = audioFileList[audioFileCounter % audioFileList.length]
+          audioFileCounter++
+
+          console.log(`🔄 Playing audio file ${audioFileCounter}: ${audioFile.filename}`)
+
+          // Read the audio file
+          const audioData = fs.readFileSync(audioFile.filepath)
+
+          // Remove WAV header (44 bytes) to get raw audio data
+          const rawAudioData = audioData.slice(44)
+
+          // Send to SIP
+          const success = await sendAudioToSIP(rawAudioData, false)
+
+          if (success) {
+            console.log(`✅ Audio file ${audioFile.filename} sent successfully`)
+          } else {
+            console.log(`❌ Failed to send audio file ${audioFile.filename}`)
+          }
+        } catch (error) {
+          console.log("❌ Error in audio playback cycle:", error.message)
+        }
+      }, 5000) // Every 5 seconds
+
+      console.log("🔄 Audio playback cycle started (every 5 seconds)")
     }
 
     // Connect to Deepgram for STT
@@ -292,11 +384,19 @@ const setupUnifiedVoiceServer = (wss) => {
             reject(error)
           }
 
-          deepgramWs.onclose = () => {
+          deepgramWs.onclose = (event) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
-            console.log("🎙️ Deepgram connection closed")
+            console.log(`🎙️ Deepgram connection closed: ${event.code} - ${event.reason}`)
+
+            // Auto-reconnect after 2 seconds
+            setTimeout(() => {
+              console.log("🔄 Attempting to reconnect to Deepgram...")
+              connectToDeepgram().catch((err) => {
+                console.log("❌ Deepgram reconnection failed:", err.message)
+              })
+            }, 2000)
           }
         } catch (error) {
           reject(error)
@@ -332,6 +432,9 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       try {
+        // Save all incoming audio files
+        saveAudioFile(audioData)
+
         const isEmpty = isAudioEmpty(audioData)
 
         if (isEmpty) {
@@ -349,13 +452,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log(`🎵 Sending audio to Deepgram: ${audioData.length} bytes`)
             deepgramWs.send(audioData)
           } else {
-            console.log("⚠️ Deepgram not ready, buffering audio")
-            audioBuffer.push(audioData)
-
-            // Limit buffer size
-            if (audioBuffer.length > 100) {
-              audioBuffer.shift()
-            }
+            console.log("⚠️ Deepgram not ready, audio saved but not transcribed")
           }
         }
       } catch (error) {
@@ -373,7 +470,7 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🔄 Converting accumulated transcripts to speech:", allTranscripts)
 
       try {
-        // Generate AI response (you can integrate with OpenAI/Claude here)
+        // Generate AI response
         const responseText = `I heard you say: ${allTranscripts}. Thank you for sharing that with me. How can I help you further?`
 
         // Convert to audio
@@ -431,13 +528,15 @@ const setupUnifiedVoiceServer = (wss) => {
 
           // Handle SIP start event - FIXED: Check for both uuid and session_id
           if (data.event === "start" && (data.uuid || data.session_id)) {
-            sessionId = data.uuid || data.session_id // Use either uuid or session_id
+            sessionId = data.uuid || data.session_id
             source = data.Source
             destination = data.Destination
             sessionStarted = true
             audioChunkCount = 0
             accumulatedTranscripts = []
             emptyAudioCount = 0
+            audioFileList = []
+            audioFileCounter = 0
 
             console.log("✅ SIP SESSION STARTED:")
             console.log(`   Session ID: ${sessionId}`)
@@ -448,25 +547,18 @@ const setupUnifiedVoiceServer = (wss) => {
             try {
               await connectToDeepgram()
               console.log("✅ Deepgram initialized for session")
-
-              // Process any buffered audio
-              if (audioBuffer.length > 0) {
-                console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
-                for (const bufferedAudio of audioBuffer) {
-                  if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-                    deepgramWs.send(bufferedAudio)
-                  }
-                }
-                audioBuffer = []
-              }
             } catch (error) {
               console.log("❌ Failed to initialize Deepgram:", error.message)
             }
 
-            // Send initial greeting
-            setTimeout(() => {
-              sendInitialGreeting()
-            }, 1000)
+            // Send initial greeting immediately
+            setTimeout(async () => {
+              await sendInitialGreeting()
+              // Start audio playback cycle after greeting
+              setTimeout(() => {
+                startAudioPlaybackCycle()
+              }, 2000)
+            }, 500)
 
             // Send session started confirmation
             if (ws.readyState === WebSocket.OPEN) {
@@ -493,13 +585,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("🎵 Processing audio data for session:", sessionId)
             await processAudioData(message)
           } else {
-            console.log("⚠️ Received audio data but session not started - buffering")
-            audioBuffer.push(message)
-
-            // Limit buffer size
-            if (audioBuffer.length > 50) {
-              audioBuffer.shift()
-            }
+            console.log("⚠️ Received audio data but session not started")
           }
         }
       } catch (error) {
@@ -514,8 +600,14 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("📊 Session statistics:")
       console.log(`   Session ID: ${sessionId || "Not set"}`)
       console.log(`   Audio chunks sent: ${audioChunkCount}`)
+      console.log(`   Audio files saved: ${audioFileList.length}`)
       console.log(`   Accumulated transcripts: ${accumulatedTranscripts.length}`)
-      console.log(`   Final transcripts: ${accumulatedTranscripts.join(" ")}`)
+
+      // Clean up intervals
+      if (audioPlaybackInterval) {
+        clearInterval(audioPlaybackInterval)
+        audioPlaybackInterval = null
+      }
 
       // Clean up Deepgram connection
       if (deepgramWs) {
@@ -532,7 +624,8 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramReady = false
       deepgramConnected = false
       isProcessingResponse = false
-      audioBuffer = []
+      audioFileList = []
+      audioFileCounter = 0
     })
 
     // Handle connection errors
