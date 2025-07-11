@@ -93,19 +93,20 @@ const setupUnifiedVoiceServer = (wss) => {
     // Default greeting messages based on language
     const getGreetingMessage = (lang) => {
       const greetings = {
-        hi: "नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ। आप मुझसे कुछ भी पूछ सकते हैं।",
-        en: "Hi! Hello, how can I help you today? Feel free to ask me anything. I am here to help you with any kind of problems and for giving good responses and make you happy",
-        es: "¡Hola! ¿Cómo puedo ayudarte hoy?",
-        fr: "Bonjour! Comment puis-je vous aider aujourd'hui?",
-        de: "Hallo! Wie kann ich Ihnen heute helfen?",
-        it: "Ciao! Come posso aiutarti oggi?",
-        pt: "Olá! Como posso ajudá-lo hoje?",
-        ja: "こんにちは！今日はどのようにお手伝いできますか？",
-        ko: "안녕하세요! 오늘 어떻게 도와드릴까요?",
-        zh: "你好！我今天可以如何帮助您？",
-        ar: "مرحبا! كيف يمكنني مساعدتك اليوم؟",
-        ru: "Привет! Как я могу помочь вам сегодня?",
-      }
+        hi: "नमस्ते! हैलो, Aitota से संपर्क करने के लिए धन्यवाद।",
+        en: "Hi! Hello, thank you for contacting Aitota.",
+        es: "¡Hola! Gracias por contactar con Aitota.",
+        fr: "Bonjour ! Merci de contacter Aitota.",
+        de: "Hallo! Danke, dass Sie Aitota kontaktiert haben.",
+        it: "Ciao! Grazie per aver contattato Aitota.",
+        pt: "Olá! Obrigado por entrar em contato com a Aitota.",
+        ja: "こんにちは！Aitota にご連絡いただきありがとうございます。",
+        ko: "안녕하세요! Aitota에 연락해 주셔서 감사합니다.",
+        zh: "你好！感谢您联系 Aitota。",
+        ar: "مرحبًا! شكرًا لتواصلك مع Aitota.",
+        ru: "Привет! Спасибо, что обратились в Aitota.",
+      };
+      
       return greetings[lang] || greetings["en"]
     }
 
