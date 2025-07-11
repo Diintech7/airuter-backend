@@ -1287,21 +1287,25 @@ const setupUnifiedVoiceServer = (wss) => {
                   }
     
                   // If Deepgram is ready, queue audio for transcription
-                  if (deepgramConnected && deepgramReady) {
-                    queueAudioData(pcmAudio)
-                  } else {
-                    // If Deepgram not ready, buffer it
-                    audioBuffer.push(pcmAudio)
-    
-                    // Limit buffer size to prevent memory issues
-                    if (audioBuffer.length > MAX_BUFFER_SIZE) {
-                      audioBuffer.shift() // Remove oldest audio chunk
-                      console.log(
-                        `⚠️ Audio buffer overflow, removed oldest chunk (before STT connected). Current size: ${audioBuffer.length}`,
-                      )
+                  if (hasVoice) {
+                    if (deepgramConnected && deepgramReady) {
+                      queueAudioData(pcmAudio)
+                    } else {
+                      audioBuffer.push(pcmAudio)
+                  
+                      if (audioBuffer.length > MAX_BUFFER_SIZE) {
+                        audioBuffer.shift()
+                        console.log(
+                          `⚠️ Audio buffer overflow, removed oldest chunk (before STT connected). Current size: ${audioBuffer.length}`
+                        )
+                      }
+                  
+                      console.log(`🎵 Audio buffered: ${audioBuffer.length} chunks stored (waiting for STT)`)
                     }
-                    console.log(`🎵 Audio buffered: ${audioBuffer.length} chunks stored (waiting for STT)`)
+                  } else {
+                    console.log("🔇 Skipping silent audio chunk for Deepgram.")
                   }
+                  
                 }
               } catch (error) {
                 console.log("❌ Error processing message:", error.message)
