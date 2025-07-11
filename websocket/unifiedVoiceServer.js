@@ -829,8 +829,8 @@ const setupUnifiedVoiceServer = (wss) => {
         if (isTextMessage && data) {
           console.log("🔄 Processing text/JSON message...")
 
+          // MODIFIED: Changed data.type to data.event for SIP 'start' event
           if (data.event === "start" && data.uuid) {
-            // Changed from data.type to data.event as per PDF
             // Handle session start - use SIP-provided session ID
             sessionId = data.uuid
             audioChunkCount = 0
@@ -852,7 +852,7 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("📤 Session started confirmation sent with SIP session ID")
             }
 
-            // Connect to Deepgram immediately after SIP start
+            // MODIFIED: Connect to Deepgram immediately after SIP start
             if (!deepgramConnected) {
               console.log("🎙️ Connecting to Deepgram for STT after SIP start...")
               try {
