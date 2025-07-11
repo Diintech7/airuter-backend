@@ -830,9 +830,10 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("🔄 Processing text/JSON message...")
 
           // MODIFIED: Changed data.type to data.event for SIP 'start' event
-          if (data.event === "start" && data.uuid) {
+          // FURTHER MODIFIED: Changed data.uuid to data.session_id as per incoming SIP data
+          if (data.event === "start" && data.session_id) {
             // Handle session start - use SIP-provided session ID
-            sessionId = data.uuid
+            sessionId = data.session_id
             audioChunkCount = 0
             currentTranscript = "" // Reset transcript for new session
             emptyAudioCount = 0
