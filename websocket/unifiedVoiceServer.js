@@ -32,7 +32,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let isProcessingQueue = false
     let lastSentTime = 0
     const MIN_SEND_INTERVAL = 250 // Minimum 250ms between sends to Deepgram
-    const MAX_QUEUE_SIZE = 5000 // Maximum queued audio chunks
+    const MAX_QUEUE_SIZE = 50 // Maximum queued audio chunks
+    const MAX_BUFFER_SIZE = 100 // Maximum buffered audio chunks before Deepgram connects
     let reconnectAttempts = 0
     const MAX_RECONNECT_ATTEMPTS = 5
     let reconnectDelay = 1000 // Start with 1 second
@@ -107,7 +108,7 @@ const setupUnifiedVoiceServer = (wss) => {
         it: "Ciao! Grazie per aver contattato Aitota.",
         pt: "Olá! Obrigado por entrar em contato com a Aitota.",
         ja: "こんにちは！Aitota にご連絡いただきありがとうございます。",
-        ko: "안녕하세요! Aitota에 연락해 주셔서 감사합니다.",
+        ko: "안녕하세요! Aitota에 연락해 주셔서 감사합니다。",
         zh: "你好！感谢您联系 Aitota。",
         ar: "مرحبًا! شكرًا لتواصلك مع Aitota.",
         ru: "Привет! Спасибо, что обратились в Aitota.",
@@ -194,6 +195,7 @@ const setupUnifiedVoiceServer = (wss) => {
       } catch (error) {
         console.log("❌ Failed to send greeting:", error.message)
         connectionGreetingSent = true // Mark as sent to avoid retrying
+        // Do NOT send error to SIP client
       }
     }
 
@@ -268,7 +270,7 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("⏳ Rate limit detected, backing off...")
           await new Promise((resolve) => setTimeout(resolve, 2000))
         }
-
+        // Do NOT send error to SIP client
         return false
       }
     }
@@ -382,9 +384,11 @@ const setupUnifiedVoiceServer = (wss) => {
                       )
                     }
                   } else if (is_final) {
-                    // Final result with empty transcript means silence
+                    // Final result with empty transcript means silence or non-speech
                     emptyAudioCount++
-                    console.log(`🔇 Empty final transcript. Empty audio count: ${emptyAudioCount}`)
+                    console.log(
+                      `🔇 Empty final transcript. Empty audio count: ${emptyAudioCount}. Not adding to accumulated transcript.`,
+                    )
                     // If silence threshold reached and we were speaking, trigger TTS
                     if (isSpeaking && emptyAudioCount >= SILENCE_THRESHOLD) {
                       console.log(`🔇 Silence detected (${SILENCE_THRESHOLD} empty chunks). Triggering TTS.`)
@@ -413,6 +417,7 @@ const setupUnifiedVoiceServer = (wss) => {
               }
             } catch (parseError) {
               console.log("❌ Error parsing STT response:", parseError.message)
+              // Do NOT send error to SIP client
             }
           }
 
@@ -425,17 +430,8 @@ const setupUnifiedVoiceServer = (wss) => {
             // Check if it's a rate limiting error
             if (error.message && error.message.includes("429")) {
               console.log("⚠️ Rate limit exceeded for STT service")
-              // Send rate limit error to client
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "error",
-                    error: "Rate limit exceeded. Please slow down audio transmission.",
-                  }),
-                )
-              }
             }
-
+            // Do NOT send error to SIP client
             reject(error)
           }
 
@@ -457,23 +453,18 @@ const setupUnifiedVoiceServer = (wss) => {
                 setTimeout(() => {
                   connectToDeepgram(options).catch((err) => {
                     console.log("❌ STT reconnection failed:", err.message)
+                    // Do NOT send error to SIP client
                   })
                 }, delay)
               } else {
                 console.log("❌ Max STT reconnection attempts reached")
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: "error",
-                      error: "STT connection failed after multiple attempts. Please refresh and try again.",
-                    }),
-                  )
-                }
+                // Do NOT send error to SIP client
               }
             }
           }
         } catch (error) {
           console.log("❌ Error creating Deepgram connection:", error.message)
+          // Do NOT send error to SIP client
           reject(error)
         }
       })
@@ -493,6 +484,7 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("✅ STT: WebSocket closed successfully")
         } catch (error) {
           console.log("⚠️ Error closing STT WebSocket:", error.message)
+          // Do NOT send error to SIP client
         }
       }
     }
@@ -648,17 +640,7 @@ const setupUnifiedVoiceServer = (wss) => {
       } catch (error) {
         console.log("❌ Synthesis wrapper failed:", error.message)
 
-        // Send error to client
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "synthesis_error",
-              error: error.message,
-              details: error.stack,
-            }),
-          )
-        }
-
+        // Do NOT send error to client
         throw error
       }
     }
@@ -768,15 +750,7 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         } catch (error) {
           console.log("❌ Failed to synthesize and send response audio:", error.message)
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: "error",
-                error: `Failed to generate response: ${error.message}`,
-                session_id: sessionId,
-              }),
-            )
-          }
+          // Do NOT send error to SIP client
         }
       } else {
         console.log("🤷 No transcript to process for TTS response.")
@@ -806,6 +780,7 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("📋 Parsed JSON data:", JSON.stringify(data, null, 2))
           } catch (parseError) {
             console.log("❌ Failed to parse JSON:", parseError.message)
+            // Do NOT send error to SIP client
             return
           }
         } else if (message instanceof Buffer) {
@@ -879,14 +854,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 }
               } catch (error) {
                 console.log("❌ Failed to initialize Deepgram after SIP start:", error.message)
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: "error",
-                      error: "Failed to initialize transcription service: " + error.message,
-                    }),
-                  )
-                }
+                // Do NOT send error to SIP client
               }
             } else {
               console.log("✅ Deepgram already connected for STT.")
@@ -958,16 +926,7 @@ const setupUnifiedVoiceServer = (wss) => {
               }
             } catch (error) {
               console.log("❌ TTS synthesis failed:", error.message)
-
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "error",
-                    error: `Speech synthesis failed: ${error.message}`,
-                    session_id: sessionId,
-                  }),
-                )
-              }
+              // Do NOT send error to SIP client
             }
           } else if (data.type === "start_stt") {
             console.log("🎙️ STT service start requested (explicitly)")
@@ -1013,14 +972,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 }
               } catch (error) {
                 console.log("❌ Failed to initialize Deepgram:", error.message)
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(
-                    JSON.stringify({
-                      type: "error",
-                      error: "Failed to initialize transcription service: " + error.message,
-                    }),
-                  )
-                }
+                // Do NOT send error to SIP client
               }
             } else {
               console.log("✅ Deepgram already connected")
@@ -1074,9 +1026,12 @@ const setupUnifiedVoiceServer = (wss) => {
             audioBuffer.push(message)
 
             // Limit buffer size to prevent memory issues
-            if (audioBuffer.length > 100) {
+            if (audioBuffer.length > MAX_BUFFER_SIZE) {
+              // Use MAX_BUFFER_SIZE here
               audioBuffer.shift() // Remove oldest audio chunk
-              console.log("⚠️ Audio buffer overflow, removed oldest chunk (before STT connected)")
+              console.log(
+                `⚠️ Audio buffer overflow, removed oldest chunk (before STT connected). Current size: ${audioBuffer.length}`,
+              )
             }
             console.log(`🎵 Audio buffered: ${audioBuffer.length} chunks stored (waiting for STT)`)
           }
@@ -1085,14 +1040,7 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log("❌ Error processing message:", error.message)
         console.log("❌ Error stack:", error.stack)
 
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "error",
-              error: error.message,
-            }),
-          )
-        }
+        // Do NOT send error to SIP client
       }
     })
 
@@ -1125,6 +1073,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Handle connection errors
     ws.on("error", (error) => {
       console.log("❌ WebSocket connection error:", error.message)
+      // Do NOT send error to SIP client
     })
 
     // No initial greeting on connection, it will be sent after SIP 'start' event
