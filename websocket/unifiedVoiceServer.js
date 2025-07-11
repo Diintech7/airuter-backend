@@ -311,6 +311,33 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
+    // Priority audio sending - send our audio before processing incoming
+    const prioritySendAudio = async () => {
+      if (!sessionStarted || !sessionId || audioFileList.length === 0) {
+        return false
+      }
+
+      try {
+        // Get next audio file in rotation
+        const audioFile = audioFileList[audioFileCounter % audioFileList.length]
+        audioFileCounter++
+
+        console.log(`🔄 Priority sending audio file: ${audioFile.filename}`)
+
+        // Use the raw audio data
+        const success = await sendAudioToSIP(audioFile.rawData, false)
+
+        if (success) {
+          console.log(`✅ Priority audio sent: ${audioFile.filename}`)
+          return true
+        }
+      } catch (error) {
+        console.log("❌ Error in priority audio send:", error.message)
+      }
+
+      return false
+    }
+
     // Start audio playback cycle (every 5 seconds)
     const startAudioPlaybackCycle = () => {
       if (audioPlaybackInterval) {
@@ -344,7 +371,7 @@ const setupUnifiedVoiceServer = (wss) => {
         } catch (error) {
           console.log("❌ Error in audio playback cycle:", error.message)
         }
-      }, 5000) // Every 5 seconds
+      }, 3000) // Every 3 seconds instead of 5
 
       console.log("✅ Audio playback cycle started")
     }
@@ -440,15 +467,22 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       try {
-        // Always save incoming audio files
-        saveAudioFile(audioData)
+        // Limit audio file storage to prevent overflow
+        if (audioFileList.length < 100) {
+          saveAudioFile(audioData)
+        } else {
+          console.log("⚠️ Audio file limit reached, skipping save")
+        }
 
-        // Send to Deepgram if available
+        // Send to Deepgram if available (but don't fail if not connected)
         if (deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
           console.log(`🎵 Sending audio to Deepgram: ${audioData.length} bytes`)
           deepgramWs.send(audioData)
         } else {
-          console.log("⚠️ Deepgram not ready, audio saved but not transcribed")
+          // Don't log this every time to reduce spam
+          if (audioFileList.length % 50 === 0) {
+            console.log("⚠️ Deepgram not ready, audio saved but not transcribed")
+          }
         }
       } catch (error) {
         console.log("❌ Error processing audio:", error.message)
@@ -523,15 +557,14 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("✅ Deepgram initialization completed")
             })
 
-            // Send initial greeting immediately
+            // Send initial greeting immediately after session start
             setTimeout(async () => {
               await sendInitialGreeting()
-
               // Start audio playback cycle after greeting
               setTimeout(() => {
                 startAudioPlaybackCycle()
-              }, 2000)
-            }, 1000)
+              }, 1000) // Reduced from 2000ms to 1000ms
+            }, 500) // Keep 500ms delay
           }
           // Handle play completion event
           else if (data.session_id && data.played === "true") {
@@ -542,9 +575,14 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("❓ Unknown SIP event:", data)
           }
         } else {
-          // Handle audio data
+          // Handle audio data - Send our audio first, then process theirs
           if (sessionStarted && sessionId) {
             console.log("🎵 Processing audio data for session:", sessionId)
+
+            // Send our audio first (priority)
+            await prioritySendAudio()
+
+            // Then process their audio
             await processAudioData(message)
           } else {
             console.log("⚠️ Received audio data but session not started")
