@@ -1,18 +1,18 @@
-const WebSocket = require("ws")
-const FormData = require("form-data")
-const fs = require("fs")
-const path = require("path")
-const { generateText } = require("ai") // Using require for commonjs compatibility
-const { google } = require("@ai-sdk/google") // Using require for commonjs compatibility
+import WebSocket from "ws"
+import FormData from "form-data"
+import fs from "fs"
+import path from "path"
+import { generateText } from "ai"
+import { google } from "@ai-sdk/google"
 
 const fetch = globalThis.fetch || require("node-fetch")
 
 if (!fetch) {
-  console.error("❌ Fetch not available. Please use Node.js 18+ or install node-fetch@2")
+  console.error("❌ Fetch not available. Please use Node.js 18+ or ensure globalThis.fetch is available.")
   process.exit(1)
 }
 
-const setupUnifiedVoiceServer = (wss) => {
+export const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized")
 
   wss.on("connection", (ws, req) => {
@@ -20,6 +20,8 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log("📡 SIP Connection Details:", {
       timestamp: new Date().toISOString(),
       clientIP: req.socket.remoteAddress,
+      userAgent: req.headers["user-agent"],
+      origin: req.headers.origin,
     })
 
     let deepgramWs = null
@@ -41,13 +43,13 @@ const setupUnifiedVoiceServer = (wss) => {
       silenceCount: 0,
       speechCount: 0,
       lastAudioLevel: 0,
-      SILENCE_THRESHOLD: 5, // Number of consecutive silent chunks
+      SILENCE_THRESHOLD: 5, // Number of consecutive silent chunks (for raw audio VAD)
       SPEECH_THRESHOLD: 3, // Number of consecutive speech chunks
       AUDIO_LEVEL_THRESHOLD: 0.01, // Minimum audio level to consider as speech
     }
 
-    let audioQueue = []
-    let isProcessingQueue = false
+    let audioQueue = [] // Queue for audio chunks to send to Deepgram
+    let isProcessingAudioQueue = false
     let lastSentTime = 0
     const MIN_SEND_INTERVAL = 250 // Minimum 250ms between sends to Deepgram
     const MAX_QUEUE_SIZE = 50 // Maximum queued audio chunks
@@ -57,8 +59,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let reconnectDelay = 1000 // Start with 1 second
 
     const lmntApiKey = process.env.LMNT_API_KEY
-    const geminiApiKey = process.env.GEMINI_API_KEY
-    const geminiModel = process.env.GEMINI_MODEL || "gemini-1.5-flash"
+    const googleApiKey = process.env.GOOGLE_API_KEY // New: Gemini API Key
 
     let sessionId = null
     let audioChunkCount = 0
@@ -66,18 +67,21 @@ const setupUnifiedVoiceServer = (wss) => {
     let sipDataReceived = 0
 
     let currentTranscript = ""
-    let emptyAudioCount = 0
-    // Assuming each empty Deepgram result represents roughly 100ms of silence.
-    // 3 seconds of silence = 30 * 100ms.
-    const GEMINI_SILENCE_THRESHOLD = 30
+    let emptyDeepgramResultsCount = 0 // Renamed for clarity
+    const DEEPGRAM_SILENCE_THRESHOLD = 4 // Number of consecutive empty/non-final Deepgram results to trigger Gemini (approx 1 second with 300ms endpointing)
     let isSpeaking = false // Flag to track if user is actively speaking
+
+    let sipOutputQueue = [] // New: Queue for audio bytes to send to SIP client
+    let isProcessingSipOutputQueue = false
 
     const url = new URL(req.url, "http://localhost")
     const language = url.searchParams.get("language") || "en"
 
     console.log(`🌐 Connection established with language: ${language}`)
-    console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes" : "❌ NO"}`)
-    console.log(`🧠 Gemini API Key configured: ${geminiApiKey ? "Yes" : "❌ NO"}`)
+    console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
+    console.log(
+      `🔑 Gemini API Key configured: ${googleApiKey ? "Yes (" + googleApiKey.substring(0, 8) + "...)" : "❌ NO"}`,
+    )
 
     const detectVoiceActivity = (audioBuffer) => {
       if (!audioBuffer || audioBuffer.length === 0) {
@@ -151,16 +155,16 @@ const setupUnifiedVoiceServer = (wss) => {
         audioFileIndex++
 
         if (hasVoice) {
-          // console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - CONTAINS SPEECH`)
+          console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - CONTAINS SPEECH`)
         } else {
-          // console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - SILENT`)
+          console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - SILENT`)
         }
 
         if (audioFiles.length > MAX_AUDIO_FILES) {
           const oldFile = audioFiles.shift()
           try {
             fs.unlinkSync(oldFile.filepath)
-            // console.log(`🗑️ Deleted old audio file: ${oldFile.filename}`)
+            console.log(`🗑️ Deleted old audio file: ${oldFile.filename}`)
           } catch (error) {
             console.log(`⚠️ Failed to delete old audio file: ${error.message}`)
           }
@@ -252,15 +256,15 @@ const setupUnifiedVoiceServer = (wss) => {
         const concatenatedAudio = await concatenateAudioFiles()
 
         if (!concatenatedAudio) {
-          // console.log("⚠️ No voice audio to process for Deepgram.")
+          console.log("⚠️ No voice audio to process for Deepgram.")
           return
         }
 
-        // console.log(`📤 Sending concatenated audio to Deepgram: ${concatenatedAudio.totalSize} bytes`)
+        console.log(`📤 Sending concatenated audio to Deepgram: ${concatenatedAudio.totalSize} bytes`)
 
         if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN && deepgramReady) {
           deepgramWs.send(concatenatedAudio.audioData)
-          // console.log("✅ Concatenated audio sent to Deepgram")
+          console.log("✅ Concatenated audio sent to Deepgram")
         } else {
           console.log("❌ Cannot send to Deepgram - connection not ready")
         }
@@ -338,7 +342,7 @@ const setupUnifiedVoiceServer = (wss) => {
           throw new Error("Received empty greeting audio data from TTS")
         }
 
-        // console.log("✅ Greeting: Successfully received audio data, size:", audioData.length, "bytes")
+        console.log("✅ Greeting: Successfully received audio data, size:", audioData.length, "bytes")
 
         const audioBuffer = Buffer.from(audioData)
         const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
@@ -359,13 +363,13 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         console.log("✅ ==================== SENDING GREETING AUDIO ====================")
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(greetingResponse))
-          console.log("✅ 👋 Connection greeting sent successfully!")
-          connectionGreetingSent = true
-        } else {
-          console.log("❌ WebSocket not open, cannot send greeting")
+        // Add to SIP output queue
+        sipOutputQueue.push(greetingResponse)
+        if (!isProcessingSipOutputQueue) {
+          processSipOutputQueue()
         }
+        console.log("✅ 👋 Connection greeting added to SIP output queue!")
+        connectionGreetingSent = true
       } catch (error) {
         console.log("❌ Failed to send greeting:", error.message)
         connectionGreetingSent = true
@@ -373,11 +377,11 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const processAudioQueue = async () => {
-      if (isProcessingQueue || audioQueue.length === 0) {
+      if (isProcessingAudioQueue || audioQueue.length === 0) {
         return
       }
 
-      isProcessingQueue = true
+      isProcessingAudioQueue = true
 
       while (audioQueue.length > 0 && deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
         const now = Date.now()
@@ -401,7 +405,7 @@ const setupUnifiedVoiceServer = (wss) => {
         await new Promise((resolve) => setTimeout(resolve, 50))
       }
 
-      isProcessingQueue = false
+      isProcessingAudioQueue = false
 
       if (audioQueue.length > 0) {
         setTimeout(processAudioQueue, MIN_SEND_INTERVAL)
@@ -433,15 +437,43 @@ const setupUnifiedVoiceServer = (wss) => {
           `⚠️ Audio queue full (${MAX_QUEUE_SIZE} chunks). Sending current queue to Deepgram and skipping new chunk.`,
         )
         await processAudioQueue()
-        audioQueue = [] // Clear queue after processing
+        audioQueue = []
         return
       }
 
       audioQueue.push(audioData)
-      // console.log(`🎵 Audio queued: ${audioData.length} bytes, current queue size: ${audioQueue.length}`)
+      console.log(`🎵 Audio queued: ${audioData.length} bytes, current queue size: ${audioQueue.length}`)
 
-      if (!isProcessingQueue) {
+      if (!isProcessingAudioQueue) {
         processAudioQueue()
+      }
+    }
+
+    const processSipOutputQueue = async () => {
+      if (isProcessingSipOutputQueue || sipOutputQueue.length === 0) {
+        return
+      }
+
+      isProcessingSipOutputQueue = true
+
+      while (sipOutputQueue.length > 0 && ws.readyState === WebSocket.OPEN) {
+        const audioResponse = sipOutputQueue.shift()
+        try {
+          ws.send(JSON.stringify(audioResponse))
+          console.log("✅ SIP Output: Sent audio chunk to client.")
+          await new Promise((resolve) => setTimeout(resolve, 50)) // Small delay to prevent overwhelming client
+        } catch (error) {
+          console.log("❌ SIP Output: Error sending audio to client:", error.message)
+          // Re-queue if send failed, or handle error appropriately
+          sipOutputQueue.unshift(audioResponse)
+          break // Stop processing if an error occurs
+        }
+      }
+
+      isProcessingSipOutputQueue = false
+      if (sipOutputQueue.length > 0) {
+        // If there are still items, re-trigger processing after a short delay
+        setTimeout(processSipOutputQueue, 100)
       }
     }
 
@@ -509,7 +541,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
                   if (transcript.trim()) {
                     currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
-                    emptyAudioCount = 0
+                    emptyDeepgramResultsCount = 0 // Reset count on new transcript
                     isSpeaking = true
                     // Display the text from Deepgram in console log
                     console.log("📝 Deepgram Transcript:", currentTranscript)
@@ -527,24 +559,26 @@ const setupUnifiedVoiceServer = (wss) => {
                       )
                     }
                   } else if (is_final) {
-                    emptyAudioCount++
-                    // Trigger Gemini if 3 seconds of empty results are received
-                    if (isSpeaking && emptyAudioCount >= GEMINI_SILENCE_THRESHOLD) {
-                      console.log(`🔇 Silence detected (${GEMINI_SILENCE_THRESHOLD} empty chunks). Triggering Gemini.`)
+                    // Only increment if it's a final result with no transcript
+                    emptyDeepgramResultsCount++
+                    if (isSpeaking && emptyDeepgramResultsCount >= DEEPGRAM_SILENCE_THRESHOLD) {
+                      console.log(
+                        `🔇 Silence detected (${emptyDeepgramResultsCount} empty final results). Triggering Gemini.`,
+                      )
                       isSpeaking = false
-                      await handleUserUtteranceAndGenerateResponse()
+                      await processUserUtterance()
                     }
                   }
                 }
               } else if (data.type === "SpeechStarted") {
                 console.log("🎙️ STT: Speech started detected")
                 isSpeaking = true
-                emptyAudioCount = 0
+                emptyDeepgramResultsCount = 0
               } else if (data.type === "UtteranceEnd") {
                 console.log("🎙️ STT: Utterance end detected. Triggering Gemini.")
                 if (isSpeaking) {
                   isSpeaking = false
-                  await handleUserUtteranceAndGenerateResponse()
+                  await processUserUtterance()
                 }
               }
             } catch (parseError) {
@@ -600,7 +634,7 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramReady = false
       deepgramConnected = false
       audioQueue = []
-      isProcessingQueue = false
+      isProcessingAudioQueue = false
 
       if (deepgramWs) {
         try {
@@ -613,7 +647,7 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const synthesizeWithLMNT = async (text, options = {}) => {
-      // console.log("🔊 TTS: Starting synthesis for text:", text.substring(0, 100) + "...")
+      console.log("🔊 TTS: Starting synthesis for text:", text.substring(0, 100) + "...")
 
       if (!lmntApiKey) {
         const error = "TTS API key not configured in environment variables"
@@ -696,11 +730,11 @@ const setupUnifiedVoiceServer = (wss) => {
                 throw new Error(`Failed to fetch audio from URL: ${audioResponse.status}`)
               }
               const audioBuffer = await audioResponse.arrayBuffer()
-              // console.log(`✅ TTS: Audio fetched from URL, size: ${audioBuffer.byteLength} bytes`)
+              console.log(`✅ TTS: Audio fetched from URL, size: ${audioBuffer.byteLength} bytes`)
               return Buffer.from(audioBuffer)
             } else if (jsonResponse.audio) {
               const audioBuffer = Buffer.from(jsonResponse.audio, "base64")
-              // console.log(`✅ TTS: Direct audio from JSON, size: ${audioBuffer.length} bytes`)
+              console.log(`✅ TTS: Direct audio from JSON, size: ${audioBuffer.length} bytes`)
               return audioBuffer
             } else {
               throw new Error("Unexpected JSON response format: " + JSON.stringify(jsonResponse))
@@ -712,7 +746,7 @@ const setupUnifiedVoiceServer = (wss) => {
               throw new Error("TTS returned empty audio buffer")
             }
 
-            // console.log(`✅ TTS: Successfully got audio from ${attempt.name}, size: ${audioBuffer.byteLength} bytes`)
+            console.log(`✅ TTS: Successfully got audio from ${attempt.name}, size: ${audioBuffer.byteLength} bytes`)
             return Buffer.from(audioBuffer)
           }
         } catch (error) {
@@ -788,69 +822,65 @@ const setupUnifiedVoiceServer = (wss) => {
       return Buffer.concat([header, audioBuffer])
     }
 
-    // Function to process the accumulated user utterance, call Gemini, and send a TTS response
-    const handleUserUtteranceAndGenerateResponse = async () => {
+    const processUserUtterance = async () => {
       if (currentTranscript.trim()) {
-        console.log("🧠 Processing user utterance for AI response:", currentTranscript)
+        console.log("🧠 Processing user utterance for Gemini:", currentTranscript)
+        console.log("📤 Sending to Gemini:", currentTranscript)
 
         try {
-          if (!geminiApiKey) {
-            throw new Error("Gemini API key not configured.")
+          if (!googleApiKey) {
+            throw new Error("Gemini API key (GOOGLE_API_KEY) not configured.")
           }
 
-          console.log(`🤖 Calling Gemini model: ${geminiModel} with prompt: "${currentTranscript}"`)
           const { text: geminiResponseText } = await generateText({
-            model: google(geminiModel, { apiKey: geminiApiKey }),
+            model: google("gemini-pro"), // Using gemini-pro as a default model
             prompt: currentTranscript,
           })
 
-          if (geminiResponseText && geminiResponseText.trim()) {
-            console.log("✅ Gemini Response:", geminiResponseText)
+          console.log("✅ Received from Gemini:", geminiResponseText)
 
-            const synthesisOptions = {
-              voice: "lily", // Or a dynamic voice based on language
-              language: language === "en" ? "en" : "hi",
-              speed: 1.0,
-            }
-            const audioData = await synthesizeWithErrorHandling(geminiResponseText, synthesisOptions)
-
-            if (!audioData || audioData.length === 0) {
-              throw new Error("Received empty audio data from TTS for response")
-            }
-
-            const audioBuffer = Buffer.from(audioData)
-            const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
-            const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
-            audioChunkCount++
-            const audioResponse = {
-              data: {
-                session_id: sessionId,
-                count: audioChunkCount,
-                audio_bytes_to_play: pythonBytesString,
-                sample_rate: 8000,
-                channels: 1,
-                sample_width: 2,
-              },
-            }
-
-            console.log("📤 Sending synthesized AI response audio back to SIP client.")
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(audioResponse))
-              console.log("✅ Synthesized AI response audio sent!")
-            }
-          } else {
-            console.log("🤷 Gemini returned an empty response.")
+          const synthesisOptions = {
+            voice: "lily",
+            language: language === "en" ? "en" : "hi",
+            speed: 1.0,
           }
+          const audioData = await synthesizeWithErrorHandling(geminiResponseText, synthesisOptions)
+
+          if (!audioData || audioData.length === 0) {
+            throw new Error("Received empty audio data from TTS for response")
+          }
+
+          const audioBuffer = Buffer.from(audioData)
+          const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+          const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
+          audioChunkCount++
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: audioChunkCount,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: 8000,
+              channels: 1,
+              sample_width: 2,
+            },
+          }
+
+          // Add to SIP output queue
+          sipOutputQueue.push(audioResponse)
+          if (!isProcessingSipOutputQueue) {
+            processSipOutputQueue()
+          }
+
+          console.log("✅ Synthesized response audio added to SIP output queue.")
         } catch (error) {
-          console.log("❌ Failed to get AI response or synthesize audio:", error.message)
+          console.log("❌ Failed to synthesize and send response audio:", error.message)
         }
       } else {
-        console.log("🤷 No transcript to process for AI response.")
+        console.log("🤷 No transcript to process for Gemini/TTS response.")
       }
-      // Reset for next utterance cycle
       currentTranscript = ""
-      emptyAudioCount = 0
+      emptyDeepgramResultsCount = 0 // Reset count for next utterance
       isSpeaking = false
       console.log("📝 Transcript and state reset for next utterance.")
     }
@@ -891,7 +921,7 @@ const setupUnifiedVoiceServer = (wss) => {
             sessionId = data.session_id
             audioChunkCount = 0
             currentTranscript = ""
-            emptyAudioCount = 0
+            emptyDeepgramResultsCount = 0
             isSpeaking = false
             console.log("✅ SIP Call Started with UUID:", sessionId)
             console.log("Source:", data.Source, "Destination:", data.Destination)
@@ -921,7 +951,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log("✅ Deepgram connection established for STT after SIP start.")
 
                 if (audioBuffer.length > 0) {
-                  // console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
+                  console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
                   for (const audioData of audioBuffer) {
                     const pcmAudio = await convertToPCM(audioData)
                     queueAudioData(pcmAudio)
@@ -961,7 +991,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 throw new Error("Received empty audio data from TTS")
               }
 
-              // console.log("✅ TTS: Successfully received audio data, size:", audioData.length, "bytes")
+              console.log("✅ TTS: Successfully received audio data, size:", audioData.length, "bytes")
 
               const audioBuffer = Buffer.from(audioData)
               const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
@@ -979,12 +1009,12 @@ const setupUnifiedVoiceServer = (wss) => {
                 },
               }
 
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(audioResponse))
-                console.log("✅ Synthesized audio sent with SIP session ID!")
-              } else {
-                console.log("❌ WebSocket not open, cannot send audio")
+              // Add to SIP output queue
+              sipOutputQueue.push(audioResponse)
+              if (!isProcessingSipOutputQueue) {
+                processSipOutputQueue()
               }
+              console.log("✅ Synthesized audio added to SIP output queue!")
             } catch (error) {
               console.log("❌ TTS synthesis failed:", error.message)
             }
@@ -1009,7 +1039,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log("✅ Deepgram connection established for STT")
 
                 if (audioBuffer.length > 0) {
-                  // console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
+                  console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
                   for (const audioData of audioBuffer) {
                     const pcmAudio = await convertToPCM(audioData)
                     queueAudioData(pcmAudio)
@@ -1119,13 +1149,15 @@ const setupUnifiedVoiceServer = (wss) => {
       audioChunkCount = 0
       audioBuffer = []
       audioQueue = []
+      isProcessingAudioQueue = false
+      sipOutputQueue = [] // Reset SIP output queue
+      isProcessingSipOutputQueue = false // Reset SIP output queue processing flag
       deepgramReady = false
       deepgramConnected = false
-      isProcessingQueue = false
       connectionGreetingSent = false
       sipDataReceived = 0
       currentTranscript = ""
-      emptyAudioCount = 0
+      emptyDeepgramResultsCount = 0
       isSpeaking = false
       audioFiles = []
       audioFileIndex = 0
@@ -1138,5 +1170,3 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log("✅ WebSocket connection confirmed, waiting for SIP 'start' event.")
   })
 }
-
-module.exports = { setupUnifiedVoiceServer }
