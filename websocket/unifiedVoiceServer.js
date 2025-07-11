@@ -32,7 +32,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let isProcessingQueue = false
     let lastSentTime = 0
     const MIN_SEND_INTERVAL = 250 // Minimum 250ms between sends to Deepgram
-    const MAX_QUEUE_SIZE = 50 // Maximum queued audio chunks
+    const MAX_QUEUE_SIZE = 5000 // Maximum queued audio chunks
     let reconnectAttempts = 0
     const MAX_RECONNECT_ATTEMPTS = 5
     let reconnectDelay = 1000 // Start with 1 second
