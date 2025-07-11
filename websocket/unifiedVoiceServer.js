@@ -257,7 +257,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
-        console.log(`🎵 Sending ${buffer.length} bytes to Deepgram`)
+        console.log(`🎵 Sending ${buffer.length} bytes to Deepgram for transcription.`) // Added log
         deepgramWs.send(buffer)
         return true
       } catch (error) {
@@ -305,7 +305,8 @@ const setupUnifiedVoiceServer = (wss) => {
 
           // Build Deepgram WebSocket URL
           const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-          deepgramUrl.searchParams.append("sample_rate", "16000")
+          // MODIFIED: Changed sample_rate to 8000Hz, common for telephony
+          deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("language", options.language || "en")
@@ -313,6 +314,8 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("punctuate", "true")
           deepgramUrl.searchParams.append("diarize", "false")
+
+          console.log(`🎙️ Deepgram URL: ${deepgramUrl.toString()}`) // Added log for Deepgram URL
 
           deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", process.env.DEEPGRAM_API_KEY])
 
@@ -348,6 +351,7 @@ const setupUnifiedVoiceServer = (wss) => {
               const rawData = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString()
 
               const data = JSON.parse(rawData)
+              console.log("🎙️ Deepgram Raw Message:", JSON.stringify(data, null, 2)) // Detailed log for all Deepgram messages
 
               // Check for different types of Deepgram responses
               if (data.type === "Results") {
@@ -363,7 +367,7 @@ const setupUnifiedVoiceServer = (wss) => {
                     currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
                     emptyAudioCount = 0 // Reset empty count on valid speech
                     isSpeaking = true
-                    console.log("📝 Accumulated Transcript:", currentTranscript)
+                    console.log("📝 Accumulated Transcript:", currentTranscript) // Log accumulated transcript
 
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(
@@ -781,6 +785,7 @@ const setupUnifiedVoiceServer = (wss) => {
       currentTranscript = ""
       emptyAudioCount = 0
       isSpeaking = false
+      console.log("📝 Transcript and state reset for next utterance.") // Log transcript reset
     }
 
     // Handle incoming messages
@@ -829,8 +834,6 @@ const setupUnifiedVoiceServer = (wss) => {
         if (isTextMessage && data) {
           console.log("🔄 Processing text/JSON message...")
 
-          // MODIFIED: Changed data.type to data.event for SIP 'start' event
-          // FURTHER MODIFIED: Changed data.uuid to data.session_id as per incoming SIP data
           if (data.event === "start" && data.session_id) {
             // Handle session start - use SIP-provided session ID
             sessionId = data.session_id
@@ -853,7 +856,6 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("📤 Session started confirmation sent with SIP session ID")
             }
 
-            // MODIFIED: Connect to Deepgram immediately after SIP start
             if (!deepgramConnected) {
               console.log("🎙️ Connecting to Deepgram for STT after SIP start...")
               try {
