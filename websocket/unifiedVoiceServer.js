@@ -5,6 +5,14 @@ import path from "path"
 import { generateText } from "ai"
 import { google } from "@ai-sdk/google"
 
+// Add these imports at the top of the file, after existing imports
+import { fileURLToPath } from "url"
+import { dirname } from "path"
+
+// Add this line immediately after the imports to define __dirname
+const __filename = fileURLToPath(import.meta.url)
+const __dirname = dirname(__filename)
+
 const fetch = globalThis.fetch || require("node-fetch")
 
 if (!fetch) {
