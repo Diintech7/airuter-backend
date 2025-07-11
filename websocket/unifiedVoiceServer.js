@@ -32,15 +32,10 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramWs = null
     let deepgramReady = false
     let deepgramConnected = false
-    let accumulatedText = ""
+    let accumulatedTranscripts = [] // Array to store all transcripts
     let emptyAudioCount = 0
-    let isProcessingAudio = false
-
-    // Audio Processing Queue
-    const audioQueue = []
-    const isProcessingQueue = false
-    const MAX_QUEUE_SIZE = 50
-    const MIN_SEND_INTERVAL = 100
+    let isProcessingResponse = false
+    let audioBuffer = [] // Buffer for incoming audio
 
     // TTS Configuration
     const lmntApiKey = process.env.LMNT_API_KEY
@@ -276,8 +271,9 @@ const setupUnifiedVoiceServer = (wss) => {
 
                 if (transcript && is_final) {
                   console.log("🗣️ TRANSCRIPT:", transcript)
-                  accumulatedText += (accumulatedText ? " " : "") + transcript
-                  console.log("📝 ACCUMULATED TEXT:", accumulatedText)
+                  accumulatedTranscripts.push(transcript)
+                  console.log("📝 ACCUMULATED TRANSCRIPTS:", accumulatedTranscripts)
+                  console.log("📊 Total transcripts:", accumulatedTranscripts.length)
 
                   // Reset empty audio count when we get text
                   emptyAudioCount = 0
@@ -308,49 +304,77 @@ const setupUnifiedVoiceServer = (wss) => {
       })
     }
 
+    // Check if audio is empty/silent
+    const isAudioEmpty = (audioData) => {
+      const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
+
+      // Check if buffer is too small
+      if (buffer.length < 100) return true
+
+      // Calculate RMS (Root Mean Square) to detect silence
+      let sum = 0
+      for (let i = 0; i < buffer.length; i++) {
+        const sample = buffer[i] - 128 // Convert to signed
+        sum += sample * sample
+      }
+      const rms = Math.sqrt(sum / buffer.length)
+
+      // Consider audio empty if RMS is below threshold
+      const silenceThreshold = 5
+      return rms < silenceThreshold
+    }
+
     // Process audio data
     const processAudioData = async (audioData) => {
-      if (!deepgramReady || !deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
-        console.log("⚠️ Deepgram not ready for audio processing")
+      if (!sessionStarted) {
+        console.log("⚠️ Session not started, ignoring audio data")
         return
       }
 
       try {
-        // Check if audio is empty/silent (basic check)
-        const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
-        const isEmptyAudio = buffer.length < 100 || buffer.every((byte) => Math.abs(byte) < 10)
+        const isEmpty = isAudioEmpty(audioData)
 
-        if (isEmptyAudio) {
+        if (isEmpty) {
           emptyAudioCount++
-          console.log(`🔇 Empty audio detected (${emptyAudioCount}/10)`)
+          console.log(`🔇 Empty audio detected (${emptyAudioCount}/20)`)
 
-          // After 10 empty audio chunks, process accumulated text
-          if (emptyAudioCount >= 10 && accumulatedText.trim()) {
-            console.log("🔄 Processing accumulated text after 10 empty audio chunks")
-            await processAccumulatedText()
+          // After 20 empty audio chunks, process accumulated transcripts
+          if (emptyAudioCount >= 20 && accumulatedTranscripts.length > 0 && !isProcessingResponse) {
+            console.log("🔄 Processing accumulated transcripts after 20 empty audio chunks")
+            await processAccumulatedTranscripts()
           }
         } else {
-          // Send audio to Deepgram for transcription
-          console.log(`🎵 Sending audio to Deepgram: ${buffer.length} bytes`)
-          deepgramWs.send(buffer)
+          // Send audio to Deepgram for transcription if connected
+          if (deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+            console.log(`🎵 Sending audio to Deepgram: ${audioData.length} bytes`)
+            deepgramWs.send(audioData)
+          } else {
+            console.log("⚠️ Deepgram not ready, buffering audio")
+            audioBuffer.push(audioData)
+
+            // Limit buffer size
+            if (audioBuffer.length > 100) {
+              audioBuffer.shift()
+            }
+          }
         }
       } catch (error) {
         console.log("❌ Error processing audio:", error.message)
       }
     }
 
-    // Process accumulated text and convert to speech
-    const processAccumulatedText = async () => {
-      if (!accumulatedText.trim() || isProcessingAudio) return
+    // Process accumulated transcripts and convert to speech
+    const processAccumulatedTranscripts = async () => {
+      if (accumulatedTranscripts.length === 0 || isProcessingResponse) return
 
-      isProcessingAudio = true
-      const textToProcess = accumulatedText.trim()
+      isProcessingResponse = true
+      const allTranscripts = accumulatedTranscripts.join(" ")
 
-      console.log("🔄 Converting accumulated text to speech:", textToProcess)
+      console.log("🔄 Converting accumulated transcripts to speech:", allTranscripts)
 
       try {
-        // Generate response (you can add AI processing here)
-        const responseText = `I heard you say: ${textToProcess}. How can I help you with that?`
+        // Generate AI response (you can integrate with OpenAI/Claude here)
+        const responseText = `I heard you say: ${allTranscripts}. Thank you for sharing that with me. How can I help you further?`
 
         // Convert to audio
         const audioData = await synthesizeWithLMNT(responseText, { voice: "lily", speed: 1.0 })
@@ -359,14 +383,15 @@ const setupUnifiedVoiceServer = (wss) => {
         await sendAudioToSIP(audioData, false)
 
         // Reset state
-        accumulatedText = ""
+        accumulatedTranscripts = []
         emptyAudioCount = 0
 
-        console.log("✅ Text processed and audio response sent")
+        console.log("✅ Transcripts processed and audio response sent")
+        console.log("🔄 Ready for next conversation cycle")
       } catch (error) {
-        console.log("❌ Failed to process accumulated text:", error.message)
+        console.log("❌ Failed to process accumulated transcripts:", error.message)
       } finally {
-        isProcessingAudio = false
+        isProcessingResponse = false
       }
     }
 
@@ -404,14 +429,14 @@ const setupUnifiedVoiceServer = (wss) => {
         if (isJsonMessage && data) {
           console.log("📋 Processing SIP JSON message:", JSON.stringify(data, null, 2))
 
-          // Handle SIP start event
-          if (data.event === "start" && data.uuid) {
-            sessionId = data.uuid
+          // Handle SIP start event - FIXED: Check for both uuid and session_id
+          if (data.event === "start" && (data.uuid || data.session_id)) {
+            sessionId = data.uuid || data.session_id // Use either uuid or session_id
             source = data.Source
             destination = data.Destination
             sessionStarted = true
             audioChunkCount = 0
-            accumulatedText = ""
+            accumulatedTranscripts = []
             emptyAudioCount = 0
 
             console.log("✅ SIP SESSION STARTED:")
@@ -423,6 +448,17 @@ const setupUnifiedVoiceServer = (wss) => {
             try {
               await connectToDeepgram()
               console.log("✅ Deepgram initialized for session")
+
+              // Process any buffered audio
+              if (audioBuffer.length > 0) {
+                console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
+                for (const bufferedAudio of audioBuffer) {
+                  if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+                    deepgramWs.send(bufferedAudio)
+                  }
+                }
+                audioBuffer = []
+              }
             } catch (error) {
               console.log("❌ Failed to initialize Deepgram:", error.message)
             }
@@ -452,12 +488,18 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("❓ Unknown SIP event:", data)
           }
         } else {
-          // Handle audio data
+          // Handle audio data - Process immediately if session is started
           if (sessionStarted && sessionId) {
             console.log("🎵 Processing audio data for session:", sessionId)
             await processAudioData(message)
           } else {
-            console.log("⚠️ Received audio data but session not started")
+            console.log("⚠️ Received audio data but session not started - buffering")
+            audioBuffer.push(message)
+
+            // Limit buffer size
+            if (audioBuffer.length > 50) {
+              audioBuffer.shift()
+            }
           }
         }
       } catch (error) {
@@ -472,7 +514,8 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("📊 Session statistics:")
       console.log(`   Session ID: ${sessionId || "Not set"}`)
       console.log(`   Audio chunks sent: ${audioChunkCount}`)
-      console.log(`   Accumulated text: "${accumulatedText}"`)
+      console.log(`   Accumulated transcripts: ${accumulatedTranscripts.length}`)
+      console.log(`   Final transcripts: ${accumulatedTranscripts.join(" ")}`)
 
       // Clean up Deepgram connection
       if (deepgramWs) {
@@ -484,11 +527,12 @@ const setupUnifiedVoiceServer = (wss) => {
       sessionId = null
       sessionStarted = false
       audioChunkCount = 0
-      accumulatedText = ""
+      accumulatedTranscripts = []
       emptyAudioCount = 0
       deepgramReady = false
       deepgramConnected = false
-      isProcessingAudio = false
+      isProcessingResponse = false
+      audioBuffer = []
     })
 
     // Handle connection errors
