@@ -464,7 +464,7 @@ const setupUnifiedVoiceServer = (wss) => {
           const finalFilename = `concatenated_audio_${Date.now()}.wav`
           const finalFilepath = path.join(AUDIO_FILES_DIR, finalFilename)
 
-          fs.writeFileSync(finalFilepath, finalAudioWithHeader)
+          fs.writeFileSync(finalFilepath, finalFilepath, finalAudioWithHeader)
 
           console.log(`✅ Audio concatenated: ${finalFilename} (${finalAudioWithHeader.length} bytes)`)
 
@@ -647,24 +647,52 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const sendAudioToDeepgramThrottled = async (audioData) => {
       if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
+        console.log("❌ Deepgram not ready - WS state:", deepgramWs?.readyState, "Ready:", deepgramReady)
+        return false
+      }
+
+      if (!audioData) {
+        console.log("❌ sendAudioToDeepgramThrottled: Received null/undefined audio data")
         return false
       }
 
       try {
-        const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
+        let buffer
+        if (audioData instanceof Buffer) {
+          buffer = audioData
+        } else if (audioData instanceof ArrayBuffer) {
+          buffer = Buffer.from(audioData)
+        } else if (Array.isArray(audioData) || audioData instanceof Uint8Array) {
+          buffer = Buffer.from(audioData)
+        } else {
+          console.log("❌ Invalid audio data type for Deepgram:", typeof audioData)
+          return false
+        }
+
+        if (buffer.length === 0) {
+          console.log("⚠️ Empty audio buffer, skipping Deepgram send")
+          return false
+        }
+
         deepgramWs.send(buffer)
+        console.log(`✅ Audio sent to Deepgram: ${buffer.length} bytes`)
         return true
       } catch (error) {
         console.log("❌ Error sending audio to Deepgram:", error.message)
         if (error.message.includes("429") || error.message.includes("rate limit")) {
           console.log("⏳ Rate limit detected, backing off...")
-          await new Promise((resolve) => setTimeout(resolve, 1000)) // Reduced backoff time
+          await new Promise((resolve) => setTimeout(resolve, 1000))
         }
         return false
       }
     }
 
     const queueAudioData = async (audioData) => {
+      if (!audioData) {
+        console.log("⚠️ queueAudioData: Received null/undefined audio data, skipping")
+        return
+      }
+
       if (audioQueue.length >= MAX_QUEUE_SIZE) {
         console.log(`⚠️ Audio queue full (${MAX_QUEUE_SIZE} chunks). Processing current queue.`)
         await processAudioQueue()
@@ -672,8 +700,26 @@ const setupUnifiedVoiceServer = (wss) => {
         return
       }
 
-      audioQueue.push(audioData)
-      console.log(`🎵 Audio queued: ${audioData.length} bytes, queue size: ${audioQueue.length}`)
+      // Validate audio data before queuing
+      let validAudioData
+      if (audioData instanceof Buffer) {
+        validAudioData = audioData
+      } else if (audioData instanceof ArrayBuffer) {
+        validAudioData = Buffer.from(audioData)
+      } else if (Array.isArray(audioData) || audioData instanceof Uint8Array) {
+        validAudioData = Buffer.from(audioData)
+      } else {
+        console.log("❌ Invalid audio data type for queue:", typeof audioData)
+        return
+      }
+
+      if (validAudioData.length === 0) {
+        console.log("⚠️ Empty audio data, skipping queue")
+        return
+      }
+
+      audioQueue.push(validAudioData)
+      console.log(`🎵 Audio queued: ${validAudioData.length} bytes, queue size: ${audioQueue.length}`)
 
       if (!isProcessingQueue) {
         processAudioQueue()
@@ -1000,11 +1046,24 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const convertToPCM = async (audioBuffer) => {
       try {
-        const result = audioBuffer instanceof Buffer ? audioBuffer : Buffer.from(audioBuffer)
-        return result
+        if (!audioBuffer) {
+          console.log("⚠️ convertToPCM: Received null/undefined audio buffer")
+          return null
+        }
+
+        if (audioBuffer instanceof Buffer) {
+          return audioBuffer
+        } else if (audioBuffer instanceof ArrayBuffer) {
+          return Buffer.from(audioBuffer)
+        } else if (Array.isArray(audioBuffer) || audioBuffer instanceof Uint8Array) {
+          return Buffer.from(audioBuffer)
+        } else {
+          console.log("⚠️ convertToPCM: Unknown audio buffer type:", typeof audioBuffer)
+          return Buffer.from(audioBuffer)
+        }
       } catch (error) {
-        console.log("⚠️ PCM conversion warning:", error.message)
-        return audioBuffer
+        console.log("❌ PCM conversion error:", error.message)
+        return null
       }
     }
 
@@ -1269,27 +1328,50 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("❓ Unknown message type or missing required fields:", data.type || data.event, data)
           }
         } else {
-          const pcmAudio = await convertToPCM(message)
-
-          const hasVoice = detectVoiceActivity(pcmAudio)
-
-          saveAudioChunk(pcmAudio, hasVoice)
-
-          if (audioFiles.length >= MAX_AUDIO_FILES) {
-            await processAccumulatedAudio()
-          }
-
-          if (hasVoice) {
-            if (deepgramConnected && deepgramReady) {
-              queueAudioData(pcmAudio)
-            } else {
-              audioBuffer.push(pcmAudio)
-
-              if (audioBuffer.length > MAX_BUFFER_SIZE) {
-                audioBuffer.shift()
-                console.log(`⚠️ Audio buffer overflow, removed oldest chunk. Current size: ${audioBuffer.length}`)
-              }
+          // Handle binary audio data
+          try {
+            if (!message || message.length === 0) {
+              console.log("⚠️ Received empty audio message, skipping")
+              return
             }
+
+            const pcmAudio = await convertToPCM(message)
+
+            if (!pcmAudio) {
+              console.log("⚠️ PCM conversion failed, skipping audio chunk")
+              return
+            }
+
+            const hasVoice = detectVoiceActivity(pcmAudio)
+
+            // Save audio chunk for debugging/analysis
+            saveAudioChunk(pcmAudio, hasVoice)
+
+            // Process accumulated audio files if we have enough
+            if (audioFiles.length >= MAX_AUDIO_FILES) {
+              await processAccumulatedAudio()
+            }
+
+            // Only send audio with voice activity to Deepgram
+            if (hasVoice) {
+              if (deepgramConnected && deepgramReady) {
+                await queueAudioData(pcmAudio)
+              } else {
+                // Buffer audio until Deepgram is ready
+                if (audioBuffer.length < MAX_BUFFER_SIZE) {
+                  audioBuffer.push(pcmAudio)
+                  console.log(`🎵 Buffered audio chunk: ${pcmAudio.length} bytes (buffer size: ${audioBuffer.length})`)
+                } else {
+                  audioBuffer.shift() // Remove oldest
+                  audioBuffer.push(pcmAudio)
+                  console.log(`⚠️ Audio buffer full, replaced oldest chunk. Buffer size: ${audioBuffer.length}`)
+                }
+              }
+            } else {
+              console.log(`🔇 Silent audio chunk detected: ${pcmAudio.length} bytes, skipping Deepgram`)
+            }
+          } catch (audioError) {
+            console.log("❌ Error processing binary audio:", audioError.message)
           }
         }
       } catch (error) {
@@ -1356,6 +1438,21 @@ const setupUnifiedVoiceServer = (wss) => {
 
     console.log("✅ WebSocket connection confirmed, waiting for SIP 'start' event.")
   })
+}
+
+const debugAudioData = (audioData, label = "Audio") => {
+  if (!audioData) {
+    console.log(`🐛 ${label}: null/undefined`)
+    return
+  }
+
+  console.log(
+    `🐛 ${label}: Type=${typeof audioData}, Constructor=${audioData.constructor.name}, Length=${audioData.length || "N/A"}`,
+  )
+
+  if (audioData instanceof Buffer) {
+    console.log(`🐛 ${label}: Buffer - First 10 bytes: [${Array.from(audioData.slice(0, 10)).join(", ")}]`)
+  }
 }
 
 module.exports = { setupUnifiedVoiceServer }
