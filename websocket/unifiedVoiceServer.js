@@ -343,29 +343,29 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     // Silence Detection and Gemini Trigger
-    // const handleSilenceDetection = () => {
-    //   if (silenceTimer) {
-    //     clearTimeout(silenceTimer)
-    //   }
+    const handleSilenceDetection = () => {
+      if (silenceTimer) {
+        clearTimeout(silenceTimer)
+      }
 
-    //   silenceTimer = setTimeout(() => {
-    //     if (currentTranscript.trim() && !isSpeaking) {
-    //       console.log("🔇 Silence detected for 1 second, sending to Gemini")
+      silenceTimer = setTimeout(() => {
+        if (currentTranscript.trim() && !isSpeaking) {
+          console.log("🔇 Silence detected for 1 second, sending to Gemini")
 
-    //       // Add to Gemini queue
-    //       geminiQueue.push(currentTranscript.trim())
+          // Add to Gemini queue
+          geminiQueue.push(currentTranscript.trim())
 
-    //       // Process Gemini queue
-    //       if (!isProcessingGemini) {
-    //         processGeminiQueue()
-    //       }
+          // Process Gemini queue
+          if (!isProcessingGemini) {
+            processGeminiQueue()
+          }
 
-    //       // Reset transcript
-    //       currentTranscript = ""
-    //       emptyAudioCount = 0
-    //     }
-    //   }, 1000) // 1 second timeout
-    // }
+          // Reset transcript
+          currentTranscript = ""
+          emptyAudioCount = 0
+        }
+      }, 1000) // 1 second timeout
+    }
 
     // Utility functions
     const getGreetingMessage = (lang) => {
@@ -558,11 +558,15 @@ const setupUnifiedVoiceServer = (wss) => {
                       console.log("📝 Final Transcript:", currentTranscript)
                       isSpeaking = false
                       emptyAudioCount = 0 // Reset empty audio count on speech
-                      // No need to call handleSilenceDetection here, the emptyAudioCount will manage it.
+                      handleSilenceDetection() // Restart silence timer on final speech
                     } else {
                       console.log("📝 Interim Transcript:", transcript)
                       isSpeaking = true
                       emptyAudioCount = 0 // Reset empty audio count on speech
+                      if (silenceTimer) {
+                        clearTimeout(silenceTimer) // Clear timer on interim speech
+                        silenceTimer = null
+                      }
                     }
 
                     if (ws.readyState === WebSocket.OPEN) {
@@ -581,23 +585,7 @@ const setupUnifiedVoiceServer = (wss) => {
                     // This block handles empty final transcripts, indicating silence
                     emptyAudioCount++
                     console.log(`🔇 Empty final result (${emptyAudioCount}/${SILENCE_THRESHOLD_FOR_GEMINI})`)
-
-                    if (emptyAudioCount >= SILENCE_THRESHOLD_FOR_GEMINI && currentTranscript.trim()) {
-                      console.log("🔇 Silence threshold reached, triggering Gemini")
-
-                      // Add to Gemini queue
-                      geminiQueue.push(currentTranscript.trim())
-
-                      // Process Gemini queue
-                      if (!isProcessingGemini) {
-                        processGeminiQueue()
-                      }
-
-                      // Reset state
-                      currentTranscript = ""
-                      emptyAudioCount = 0
-                      isSpeaking = false // Ensure isSpeaking is false after silence
-                    }
+                    // The handleSilenceDetection will manage the Gemini trigger based on overall silence
                   }
                 } else if (data.is_final) {
                   // This handles cases where there's no alternative/transcript but it's a final result
@@ -605,30 +593,12 @@ const setupUnifiedVoiceServer = (wss) => {
                   console.log(
                     `🔇 Empty final result (no transcript) (${emptyAudioCount}/${SILENCE_THRESHOLD_FOR_GEMINI})`,
                   )
-
-                  if (emptyAudioCount >= SILENCE_THRESHOLD_FOR_GEMINI && currentTranscript.trim()) {
-                    console.log("🔇 Silence threshold reached, triggering Gemini")
-
-                    // Add to Gemini queue
-                    geminiQueue.push(currentTranscript.trim())
-
-                    // Process Gemini queue
-                    if (!isProcessingGemini) {
-                      processGeminiQueue()
-                    }
-
-                    // Reset state
-                    currentTranscript = ""
-                    emptyAudioCount = 0
-                    isSpeaking = false
-                  }
+                  // The handleSilenceDetection will manage the Gemini trigger based on overall silence
                 }
               } else if (data.type === "SpeechStarted") {
                 console.log("🎙️ STT: Speech started detected")
                 isSpeaking = true
                 emptyAudioCount = 0
-
-                // Clear silence timer when speech starts
                 if (silenceTimer) {
                   clearTimeout(silenceTimer)
                   silenceTimer = null
@@ -636,9 +606,7 @@ const setupUnifiedVoiceServer = (wss) => {
               } else if (data.type === "UtteranceEnd") {
                 console.log("🎙️ STT: Utterance end detected")
                 isSpeaking = false
-
-                // Start silence detection
-                // handleSilenceDetection()
+                handleSilenceDetection() // Start silence detection after utterance ends
               }
             } catch (parseError) {
               console.log("❌ Error parsing STT response:", parseError.message)
@@ -990,17 +958,12 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         } else {
           const pcmAudio = await convertToPCM(message)
-          // const hasVoice = detectVoiceActivity(pcmAudio)
+          // const hasVoice = detectVoiceActivity(pcmAudio) // Keep for potential future use if needed for local VAD
 
-          saveAudioChunk(pcmAudio, false)
+          saveAudioChunk(pcmAudio, false) // Save all chunks, voice or not
 
-          // if (hasVoice) {
-          //   if (deepgramConnected && deepgramReady) {
-          //     queueAudioData(pcmAudio)
-          //   }
-          // }
           if (deepgramConnected && deepgramReady) {
-            queueAudioData(pcmAudio)
+            queueAudioData(pcmAudio) // Always send audio to Deepgram to keep connection alive
           }
         }
       } catch (error) {
