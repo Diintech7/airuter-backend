@@ -38,6 +38,10 @@ const setupUnifiedVoiceServer = (wss) => {
     const MAX_RECONNECT_ATTEMPTS = 5
     let reconnectDelay = 1000
 
+    // Abort controllers for Gemini and TTS
+    let geminiAbortController = null
+    let ttsAbortController = null
+
     // Session management
     let sessionId = null
     let audioChunkCount = 0
@@ -105,6 +109,28 @@ const setupUnifiedVoiceServer = (wss) => {
       if (!isProcessingQueue) {
         processTextQueue()
       }
+    }
+
+    // Interrupt and flush logic
+    const interruptAndFlush = () => {
+      // Abort Gemini fetch if in progress
+      if (geminiAbortController) {
+        try { geminiAbortController.abort(); } catch (e) {}
+        geminiAbortController = null
+        console.log("⏹️ [INTERRUPT] Gemini processing aborted.")
+      }
+      // Abort TTS fetch if in progress
+      if (ttsAbortController) {
+        try { ttsAbortController.abort(); } catch (e) {}
+        ttsAbortController = null
+        console.log("⏹️ [INTERRUPT] TTS processing aborted.")
+      }
+      // Clear queue and transcript
+      textProcessingQueue = []
+      isProcessingQueue = false
+      currentTranscript = ""
+      isProcessingGemini = false
+      console.log("⏹️ [INTERRUPT] Queue and transcript cleared.")
     }
 
     const processTextQueue = async () => {
@@ -328,6 +354,9 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - Channel: ${data.channel}`)
         console.log(`   - Session ID: ${sessionId}`)
 
+        // INTERRUPT and FLUSH on new speech
+        interruptAndFlush()
+
         // Reset silence timer immediately when speech starts
         resetSilenceTimer()
         isSpeaking = true
@@ -464,6 +493,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       isProcessingGemini = true
+      geminiAbortController = new AbortController()
       console.log(`🤖 [GEMINI] Sending request:`)
       console.log(`   - Message: "${userMessage}"`)
       console.log(`   - Session ID: ${sessionId}`)
@@ -504,6 +534,7 @@ const setupUnifiedVoiceServer = (wss) => {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody),
+          signal: geminiAbortController.signal,
         })
 
         if (!response.ok) {
@@ -533,10 +564,15 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`❌ [GEMINI] No valid response in API data`)
         return null
       } catch (error) {
-        console.log(`❌ [GEMINI] API error: ${error.message}`)
+        if (error.name === "AbortError") {
+          console.log("⏹️ [GEMINI] Request aborted due to interrupt.")
+        } else {
+          console.log(`❌ [GEMINI] API error: ${error.message}`)
+        }
         return null
       } finally {
         isProcessingGemini = false
+        geminiAbortController = null
         console.log(`🤖 [GEMINI] Request processing completed`)
       }
     }
@@ -548,6 +584,7 @@ const setupUnifiedVoiceServer = (wss) => {
         return
       }
 
+      ttsAbortController = new AbortController()
       try {
         console.log(`🔊 [LMNT] Starting synthesis:`)
         console.log(`   - Text: "${text}"`)
@@ -563,7 +600,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         console.log(`🔊 [LMNT] Synthesis options:`, synthesisOptions)
-        const audioData = await synthesizeWithLMNT(text, synthesisOptions)
+        const audioData = await synthesizeWithLMNT(text, synthesisOptions, ttsAbortController)
 
         if (audioData && audioData.length > 0) {
           console.log(`✅ [LMNT] Audio synthesized successfully: ${audioData.length} bytes`)
@@ -597,12 +634,18 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log(`❌ [LMNT] No audio data received from synthesis`)
         }
       } catch (error) {
-        console.log(`❌ [LMNT] Synthesis failed: ${error.message}`)
+        if (error.name === "AbortError") {
+          console.log("⏹️ [LMNT] Synthesis aborted due to interrupt.")
+        } else {
+          console.log(`❌ [LMNT] Synthesis failed: ${error.message}`)
+        }
+      } finally {
+        ttsAbortController = null
       }
     }
 
     // TTS Synthesis with LMNT (unchanged but with enhanced logging)
-    const synthesizeWithLMNT = async (text, options = {}) => {
+    const synthesizeWithLMNT = async (text, options = {}, abortController = null) => {
       if (!lmntApiKey) {
         throw new Error("LMNT API key not configured")
       }
@@ -623,6 +666,7 @@ const setupUnifiedVoiceServer = (wss) => {
           sample_rate: options.sample_rate || 8000,
           speed: options.speed || 1.0,
         }),
+        signal: abortController ? abortController.signal : undefined,
       }
 
       const response = await fetch("https://api.lmnt.com/v1/ai/speech", requestOptions)
@@ -640,7 +684,7 @@ const setupUnifiedVoiceServer = (wss) => {
         const jsonResponse = await response.json()
         if (jsonResponse.audio_url) {
           console.log(`🔊 [LMNT] Fetching audio from URL...`)
-          const audioResponse = await fetch(jsonResponse.audio_url)
+          const audioResponse = await fetch(jsonResponse.audio_url, { signal: abortController ? abortController.signal : undefined })
           const audioBuffer = await audioResponse.arrayBuffer()
           return Buffer.from(audioBuffer)
         } else if (jsonResponse.audio) {
