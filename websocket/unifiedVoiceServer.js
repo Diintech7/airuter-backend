@@ -68,186 +68,11 @@ const setupUnifiedVoiceServer = (wss) => {
     const SILENCE_THRESHOLD = 1500 // Number of consecutive empty/non-final Deepgram results to trigger TTS
     let isSpeaking = false // Flag to track if user is actively speaking
 
-    // Gemini Integration Variables
-    let silenceTimeout = null
-    const SILENCE_DURATION = 2000 // 2 seconds of silence
-    let isProcessingGemini = false
-    let fullConversationHistory = []
-
     const url = new URL(req.url, "http://localhost")
     const language = url.searchParams.get("language") || "en"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
-    console.log(`🤖 Gemini API Key configured: ${process.env.GEMINI_API_KEY ? "Yes (" + process.env.GEMINI_API_KEY.substring(0, 8) + "...)" : "❌ NO"}`)
-
-    // Gemini API Integration
-    const sendToGemini = async (userMessage) => {
-      if (isProcessingGemini) {
-        console.log("🤖 Gemini is already processing a request, skipping...")
-        return null
-      }
-
-      if (!process.env.GEMINI_API_KEY) {
-        console.log("❌ Gemini API key not configured")
-        return null
-      }
-
-      if (!userMessage.trim()) {
-        console.log("🤖 Empty message, skipping Gemini request")
-        return null
-      }
-
-      isProcessingGemini = true
-      console.log("🤖 Sending to Gemini:", userMessage)
-
-      try {
-        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`
-        
-        // Add user message to conversation history
-        fullConversationHistory.push({
-          role: "user",
-          parts: [{ text: userMessage }]
-        })
-
-        const requestBody = {
-          contents: fullConversationHistory,
-          generationConfig: {
-            temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 1024,
-          },
-          safetySettings: [
-            {
-              category: "HARM_CATEGORY_HARASSMENT",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-              category: "HARM_CATEGORY_HATE_SPEECH",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-              category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
-            },
-            {
-              category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
-            }
-          ]
-        }
-
-        const response = await fetch(apiUrl, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify(requestBody)
-        })
-
-        if (!response.ok) {
-          const errorText = await response.text()
-          console.log("❌ Gemini API error:", response.status, errorText)
-          return null
-        }
-
-        const data = await response.json()
-        
-        if (data.candidates && data.candidates[0] && data.candidates[0].content) {
-          const geminiResponse = data.candidates[0].content.parts[0].text
-          console.log("🤖 Gemini Response:", geminiResponse)
-          
-          // Add Gemini response to conversation history
-          fullConversationHistory.push({
-            role: "model",
-            parts: [{ text: geminiResponse }]
-          })
-
-          return geminiResponse
-        } else {
-          console.log("❌ Unexpected Gemini response format:", data)
-          return null
-        }
-      } catch (error) {
-        console.log("❌ Error calling Gemini API:", error.message)
-        return null
-      } finally {
-        isProcessingGemini = false
-      }
-    }
-
-    const handleSilenceDetected = async () => {
-      if (currentTranscript.trim() && !isProcessingGemini) {
-        console.log("🔕 2 seconds of silence detected, sending to Gemini...")
-        console.log("📝 Final transcript:", currentTranscript)
-        
-        const geminiResponse = await sendToGemini(currentTranscript.trim())
-        
-        if (geminiResponse) {
-          console.log("🎯 Gemini Response received:", geminiResponse)
-          
-          // Send response back as TTS
-          try {
-            const synthesisOptions = {
-              voice: "lily",
-              language: language === "en" ? "en" : "hi",
-              speed: 1.0,
-            }
-            
-            const audioData = await synthesizeWithErrorHandling(geminiResponse, synthesisOptions)
-
-            if (audioData && audioData.length > 0) {
-              const audioBuffer = Buffer.from(audioData)
-              const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
-              const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
-              audioChunkCount++
-              const audioResponse = {
-                data: {
-                  session_id: sessionId,
-                  count: audioChunkCount,
-                  audio_bytes_to_play: pythonBytesString,
-                  sample_rate: 8000,
-                  channels: 1,
-                  sample_width: 2,
-                },
-                type: "gemini_response"
-              }
-
-              console.log("📤 Sending Gemini response as audio...")
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(audioResponse))
-                console.log("✅ Gemini response audio sent!")
-              }
-            }
-          } catch (error) {
-            console.log("❌ Failed to synthesize Gemini response:", error.message)
-          }
-        }
-        
-        // Reset transcript after processing
-        currentTranscript = ""
-        emptyAudioCount = 0
-      }
-    }
-
-    const startSilenceTimer = () => {
-      if (silenceTimeout) {
-        clearTimeout(silenceTimeout)
-      }
-      
-      silenceTimeout = setTimeout(() => {
-        handleSilenceDetected()
-      }, SILENCE_DURATION)
-    }
-
-    const resetSilenceTimer = () => {
-      if (silenceTimeout) {
-        clearTimeout(silenceTimeout)
-        silenceTimeout = null
-      }
-    }
 
     const detectVoiceActivity = (audioBuffer) => {
       if (!audioBuffer || audioBuffer.length === 0) {
@@ -678,27 +503,11 @@ const setupUnifiedVoiceServer = (wss) => {
                   const is_final = data.is_final
 
                   if (transcript.trim()) {
-                    // Reset silence timer when we get new speech
-                    resetSilenceTimer()
-                    
-                    // Update current transcript
-                    if (is_final) {
-                      currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
-                    } else {
-                      // For interim results, update the display but don't append to final transcript
-                      const displayTranscript = currentTranscript + (currentTranscript ? " " : "") + transcript.trim()
-                      console.log("📝 Deepgram Transcript (interim):", displayTranscript)
-                    }
-                    
+                    currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
                     emptyAudioCount = 0
                     isSpeaking = true
-                    
-                    // Display the final transcript
-                    if (is_final) {
-                      console.log("📝 Deepgram Transcript (final):", currentTranscript)
-                      // Start silence timer after final transcript
-                      startSilenceTimer()
-                    }
+                    // Display the text from Deepgram in console log
+                    console.log("📝 Deepgram Transcript:", currentTranscript)
 
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(
@@ -715,22 +524,21 @@ const setupUnifiedVoiceServer = (wss) => {
                   } else if (is_final) {
                     emptyAudioCount++
                     if (isSpeaking && emptyAudioCount >= SILENCE_THRESHOLD) {
-                      console.log(`🔇 Silence detected (${SILENCE_THRESHOLD} empty chunks). Starting silence timer.`)
+                      console.log(`🔇 Silence detected (${SILENCE_THRESHOLD} empty chunks). Triggering TTS.`)
                       isSpeaking = false
-                      startSilenceTimer()
+                      await processUserUtterance()
                     }
                   }
                 }
               } else if (data.type === "SpeechStarted") {
                 console.log("🎙️ STT: Speech started detected")
-                resetSilenceTimer()
                 isSpeaking = true
                 emptyAudioCount = 0
               } else if (data.type === "UtteranceEnd") {
-                console.log("🎙️ STT: Utterance end detected. Starting silence timer.")
+                console.log("🎙️ STT: Utterance end detected. Triggering TTS.")
                 if (isSpeaking) {
                   isSpeaking = false
-                  startSilenceTimer()
+                  await processUserUtterance()
                 }
               }
             } catch (parseError) {
@@ -787,9 +595,6 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramConnected = false
       audioQueue = []
       isProcessingQueue = false
-      
-      // Clear silence timer
-      resetSilenceTimer()
 
       if (deepgramWs) {
         try {
@@ -980,17 +785,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const processUserUtterance = async () => {
       if (currentTranscript.trim()) {
         console.log("🧠 Processing user utterance:", currentTranscript)
-        
-        // Send to Gemini for processing
-        const geminiResponse = await sendToGemini(currentTranscript.trim())
-        
-        let responseText = `You said: "${currentTranscript}". How can I help you further?`
-        
-        if (geminiResponse) {
-          responseText = geminiResponse
-          console.log("🤖 Gemini Response:", geminiResponse)
-        }
-
+        const responseText = `You said: "${currentTranscript}". How can I help you further?`
         try {
           const synthesisOptions = {
             voice: "lily",
@@ -1017,7 +812,6 @@ const setupUnifiedVoiceServer = (wss) => {
               channels: 1,
               sample_width: 2,
             },
-            type: "gemini_response"
           }
 
           console.log("📤 Sending synthesized response audio back to SIP client.")
@@ -1075,7 +869,6 @@ const setupUnifiedVoiceServer = (wss) => {
             currentTranscript = ""
             emptyAudioCount = 0
             isSpeaking = false
-            fullConversationHistory = [] // Reset conversation history for new session
             console.log("✅ SIP Call Started with UUID:", sessionId)
             console.log("Source:", data.Source, "Destination:", data.Destination)
 
@@ -1285,7 +1078,6 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log(`   SIP data received: ${sipDataReceived} messages`)
       console.log(`   Audio chunks processed: ${audioChunkCount}`)
       console.log(`   Session ID: ${sessionId || "Not set"}`)
-      console.log(`   Conversation history length: ${fullConversationHistory.length}`)
 
       try {
         const files = fs.readdirSync(AUDIO_FILES_DIR)
@@ -1298,9 +1090,6 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       closeDeepgram()
-
-      // Clear any pending silence timer
-      resetSilenceTimer()
 
       sessionId = null
       audioChunkCount = 0
@@ -1316,7 +1105,6 @@ const setupUnifiedVoiceServer = (wss) => {
       isSpeaking = false
       audioFiles = []
       audioFileIndex = 0
-      fullConversationHistory = []
     })
 
     ws.on("error", (error) => {
