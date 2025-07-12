@@ -10,6 +10,19 @@ if (!fetch) {
   process.exit(1)
 }
 
+// Performance timing utilities
+const createTimer = (label) => {
+  const start = process.hrtime.bigint()
+  return {
+    end: () => {
+      const end = process.hrtime.bigint()
+      const duration = Number(end - start) / 1000000 // Convert to milliseconds
+      console.log(`⏱️ ${label}: ${duration.toFixed(2)}ms`)
+      return duration
+    },
+  }
+}
+
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized")
 
@@ -24,12 +37,13 @@ const setupUnifiedVoiceServer = (wss) => {
 
     let deepgramWs = null
     let deepgramReady = false
-    let audioBuffer = [] // Buffer for audio before Deepgram is connected
+    let audioBuffer = []
     let deepgramConnected = false
 
+    // Reduced audio processing for faster response
     let audioFiles = []
     let audioFileIndex = 0
-    const MAX_AUDIO_FILES = 60 // Number of audio chunks to accumulate before sending to Deepgram
+    const MAX_AUDIO_FILES = 20 // Reduced from 60 for faster processing
     const AUDIO_FILES_DIR = path.join(__dirname, "audio_chunks")
 
     if (!fs.existsSync(AUDIO_FILES_DIR)) {
@@ -41,20 +55,20 @@ const setupUnifiedVoiceServer = (wss) => {
       silenceCount: 0,
       speechCount: 0,
       lastAudioLevel: 0,
-      SILENCE_THRESHOLD: 5, // Number of consecutive silent chunks
-      SPEECH_THRESHOLD: 3, // Number of consecutive speech chunks
-      AUDIO_LEVEL_THRESHOLD: 0.01, // Minimum audio level to consider as speech
+      SILENCE_THRESHOLD: 3, // Reduced from 5 for faster detection
+      SPEECH_THRESHOLD: 2, // Reduced from 3 for faster detection
+      AUDIO_LEVEL_THRESHOLD: 0.008, // Slightly lower threshold
     }
 
     let audioQueue = []
     let isProcessingQueue = false
     let lastSentTime = 0
-    const MIN_SEND_INTERVAL = 250 // Minimum 250ms between sends to Deepgram
-    const MAX_QUEUE_SIZE = 50 // Maximum queued audio chunks
-    const MAX_BUFFER_SIZE = 100 // Maximum buffered audio chunks before Deepgram connects
+    const MIN_SEND_INTERVAL = 100 // Reduced from 250ms for faster processing
+    const MAX_QUEUE_SIZE = 20 // Reduced from 50
+    const MAX_BUFFER_SIZE = 30 // Reduced from 100
     let reconnectAttempts = 0
     const MAX_RECONNECT_ATTEMPTS = 5
-    let reconnectDelay = 1000 // Start with 1 second
+    let reconnectDelay = 1000
 
     const lmntApiKey = process.env.LMNT_API_KEY
 
@@ -65,23 +79,38 @@ const setupUnifiedVoiceServer = (wss) => {
 
     let currentTranscript = ""
     let emptyAudioCount = 0
-    const SILENCE_THRESHOLD = 1500 // Number of consecutive empty/non-final Deepgram results to trigger TTS
-    let isSpeaking = false // Flag to track if user is actively speaking
+    const SILENCE_THRESHOLD = 500 // Reduced from 1500 for faster response
+    let isSpeaking = false
 
-    // Gemini Integration Variables
+    // Optimized Gemini Integration Variables
     let silenceTimeout = null
-    const SILENCE_DURATION = 2000 // 2 seconds of silence
+    const SILENCE_DURATION = 800 // Reduced from 2000ms to 800ms for faster response
     let isProcessingGemini = false
     let fullConversationHistory = []
+
+    // Performance tracking
+    let performanceMetrics = {
+      deepgramProcessingTimes: [],
+      geminiProcessingTimes: [],
+      lmntProcessingTimes: [],
+      totalResponseTimes: [],
+      transferTimes: {
+        deepgramToGemini: [],
+        geminiToLmnt: [],
+        lmntToClient: [],
+      },
+    }
 
     const url = new URL(req.url, "http://localhost")
     const language = url.searchParams.get("language") || "en"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
-    console.log(`🤖 Gemini API Key configured: ${process.env.GEMINI_API_KEY ? "Yes (" + process.env.GEMINI_API_KEY.substring(0, 8) + "...)" : "❌ NO"}`)
+    console.log(
+      `🤖 Gemini API Key configured: ${process.env.GEMINI_API_KEY ? "Yes (" + process.env.GEMINI_API_KEY.substring(0, 8) + "...)" : "❌ NO"}`,
+    )
 
-    // Gemini API Integration
+    // Optimized Gemini API Integration with timing
     const sendToGemini = async (userMessage) => {
       if (isProcessingGemini) {
         console.log("🤖 Gemini is already processing a request, skipping...")
@@ -99,51 +128,53 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       isProcessingGemini = true
+      const geminiTimer = createTimer("Gemini API Processing")
       console.log("🤖 Sending to Gemini:", userMessage)
 
       try {
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${process.env.GEMINI_API_KEY}`
-        
+
         // Add user message to conversation history
         fullConversationHistory.push({
           role: "user",
-          parts: [{ text: userMessage }]
+          parts: [{ text: userMessage }],
         })
 
+        // Optimized request body for faster response
         const requestBody = {
-          contents: fullConversationHistory,
+          contents: fullConversationHistory.slice(-6), // Keep only last 6 messages for faster processing
           generationConfig: {
             temperature: 0.7,
-            topK: 40,
-            topP: 0.95,
-            maxOutputTokens: 1024,
+            topK: 20, // Reduced from 40 for faster generation
+            topP: 0.9, // Slightly reduced
+            maxOutputTokens: 150, // Significantly reduced from 1024 for shorter responses
           },
           safetySettings: [
             {
               category: "HARM_CATEGORY_HARASSMENT",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
             },
             {
               category: "HARM_CATEGORY_HATE_SPEECH",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
             },
             {
               category: "HARM_CATEGORY_SEXUALLY_EXPLICIT",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
             },
             {
               category: "HARM_CATEGORY_DANGEROUS_CONTENT",
-              threshold: "BLOCK_MEDIUM_AND_ABOVE"
-            }
-          ]
+              threshold: "BLOCK_MEDIUM_AND_ABOVE",
+            },
+          ],
         }
 
         const response = await fetch(apiUrl, {
-          method: 'POST',
+          method: "POST",
           headers: {
-            'Content-Type': 'application/json',
+            "Content-Type": "application/json",
           },
-          body: JSON.stringify(requestBody)
+          body: JSON.stringify(requestBody),
         })
 
         if (!response.ok) {
@@ -153,23 +184,31 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         const data = await response.json()
-        
+        const geminiDuration = geminiTimer.end()
+        performanceMetrics.geminiProcessingTimes.push(geminiDuration)
+
         if (data.candidates && data.candidates[0] && data.candidates[0].content) {
           const geminiResponse = data.candidates[0].content.parts[0].text
-          console.log("🤖 Gemini Response:", geminiResponse)
-          
+
+          // Truncate response for faster TTS processing
+          const truncatedResponse =
+            geminiResponse.length > 200 ? geminiResponse.substring(0, 200) + "..." : geminiResponse
+
+          console.log("🤖 Gemini Response:", truncatedResponse)
+
           // Add Gemini response to conversation history
           fullConversationHistory.push({
             role: "model",
-            parts: [{ text: geminiResponse }]
+            parts: [{ text: truncatedResponse }],
           })
 
-          return geminiResponse
+          return truncatedResponse
         } else {
           console.log("❌ Unexpected Gemini response format:", data)
           return null
         }
       } catch (error) {
+        geminiTimer.end()
         console.log("❌ Error calling Gemini API:", error.message)
         return null
       } finally {
@@ -179,25 +218,35 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const handleSilenceDetected = async () => {
       if (currentTranscript.trim() && !isProcessingGemini) {
-        console.log("🔕 2 seconds of silence detected, sending to Gemini...")
+        const totalResponseTimer = createTimer("Total Response Time")
+        console.log("🔕 Silence detected, processing response...")
         console.log("📝 Final transcript:", currentTranscript)
-        
+
+        const transferTimer1 = createTimer("Transfer: Deepgram → Gemini")
+        transferTimer1.end()
+        performanceMetrics.transferTimes.deepgramToGemini.push(0) // Minimal transfer time
+
         const geminiResponse = await sendToGemini(currentTranscript.trim())
-        
+
         if (geminiResponse) {
+          const transferTimer2 = createTimer("Transfer: Gemini → LMNT")
           console.log("🎯 Gemini Response received:", geminiResponse)
-          
-          // Send response back as TTS
+
           try {
             const synthesisOptions = {
               voice: "lily",
               language: language === "en" ? "en" : "hi",
-              speed: 1.0,
+              speed: 1.2, // Slightly faster speech for quicker delivery
             }
-            
+
+            const transferDuration2 = transferTimer2.end()
+            performanceMetrics.transferTimes.geminiToLmnt.push(transferDuration2)
+
             const audioData = await synthesizeWithErrorHandling(geminiResponse, synthesisOptions)
 
             if (audioData && audioData.length > 0) {
+              const transferTimer3 = createTimer("Transfer: LMNT → Client")
+
               const audioBuffer = Buffer.from(audioData)
               const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
               const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
@@ -212,12 +261,14 @@ const setupUnifiedVoiceServer = (wss) => {
                   channels: 1,
                   sample_width: 2,
                 },
-                type: "gemini_response"
+                type: "gemini_response",
               }
 
               console.log("📤 Sending Gemini response as audio...")
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify(audioResponse))
+                const transferDuration3 = transferTimer3.end()
+                performanceMetrics.transferTimes.lmntToClient.push(transferDuration3)
                 console.log("✅ Gemini response audio sent!")
               }
             }
@@ -225,18 +276,38 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log("❌ Failed to synthesize Gemini response:", error.message)
           }
         }
-        
+
+        const totalDuration = totalResponseTimer.end()
+        performanceMetrics.totalResponseTimes.push(totalDuration)
+
+        // Log performance summary
+        logPerformanceMetrics()
+
         // Reset transcript after processing
         currentTranscript = ""
         emptyAudioCount = 0
       }
     }
 
+    const logPerformanceMetrics = () => {
+      const avg = (arr) => (arr.length > 0 ? (arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(2) : 0)
+
+      console.log("📊 PERFORMANCE METRICS:")
+      console.log(`   🎙️ Deepgram avg: ${avg(performanceMetrics.deepgramProcessingTimes)}ms`)
+      console.log(`   🤖 Gemini avg: ${avg(performanceMetrics.geminiProcessingTimes)}ms`)
+      console.log(`   🔊 LMNT avg: ${avg(performanceMetrics.lmntProcessingTimes)}ms`)
+      console.log(`   ⚡ Total Response avg: ${avg(performanceMetrics.totalResponseTimes)}ms`)
+      console.log(`   🔄 Transfer Times:`)
+      console.log(`      Deepgram→Gemini: ${avg(performanceMetrics.transferTimes.deepgramToGemini)}ms`)
+      console.log(`      Gemini→LMNT: ${avg(performanceMetrics.transferTimes.geminiToLmnt)}ms`)
+      console.log(`      LMNT→Client: ${avg(performanceMetrics.transferTimes.lmntToClient)}ms`)
+    }
+
     const startSilenceTimer = () => {
       if (silenceTimeout) {
         clearTimeout(silenceTimeout)
       }
-      
+
       silenceTimeout = setTimeout(() => {
         handleSilenceDetected()
       }, SILENCE_DURATION)
@@ -271,7 +342,7 @@ const setupUnifiedVoiceServer = (wss) => {
         sum += sample * sample
       }
       const rms = Math.sqrt(sum / samples.length)
-      const audioLevel = rms / 32768.0 // Normalize to 0-1 range
+      const audioLevel = rms / 32768.0
 
       vadState.lastAudioLevel = audioLevel
 
@@ -322,15 +393,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (hasVoice) {
           console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - CONTAINS SPEECH`)
-        } else {
-          console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - SILENT`)
         }
 
         if (audioFiles.length > MAX_AUDIO_FILES) {
           const oldFile = audioFiles.shift()
           try {
             fs.unlinkSync(oldFile.filepath)
-            console.log(`🗑️ Deleted old audio file: ${oldFile.filename}`)
           } catch (error) {
             console.log(`⚠️ Failed to delete old audio file: ${error.message}`)
           }
@@ -352,7 +420,6 @@ const setupUnifiedVoiceServer = (wss) => {
             removedFiles.push(fileInfo.filename)
             return false
           } catch (error) {
-            console.log(`⚠️ Failed to remove empty audio file: ${fileInfo.filename}, error: ${error.message}`)
             return true
           }
         }
@@ -386,7 +453,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
           for (const fileInfo of voiceFiles) {
             const fileBuffer = fs.readFileSync(fileInfo.filepath)
-            const audioData = fileBuffer.slice(44) // Skip WAV header (44 bytes)
+            const audioData = fileBuffer.slice(44)
             audioChunks.push(audioData)
             totalSize += audioData.length
           }
@@ -435,7 +502,7 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log("❌ Cannot send to Deepgram - connection not ready")
         }
 
-        audioFiles = [] // Clear processed files
+        audioFiles = []
         audioFileIndex = 0
       } catch (error) {
         console.log(`❌ Failed to process accumulated audio: ${error.message}`)
@@ -456,18 +523,18 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const getGreetingMessage = (lang) => {
       const greetings = {
-        hi: "नमस्ते! हैलो, Aitota से संपर्क करने के लिए धन्यवाद।",
-        en: "Hi! Hello, thank you for contacting Aitota.",
-        es: "¡Hola! Gracias por contactar con Aitota.",
-        fr: "Bonjour ! Merci de contacter Aitota.",
-        de: "Hallo! Danke, dass Sie Aitota kontaktiert haben.",
-        it: "Ciao! Grazie per aver contattato Aitota.",
-        pt: "Olá! Obrigado por entrar em contato com a Aitota.",
-        ja: "こんにちは！Aitota にご連絡いただきありがとうございます。",
-        ko: "안녕하세요! Aitota에 연락해 주셔서 감사합니다。",
-        zh: "你好！感谢您联系 Aitota。",
-        ar: "مرحبًا! شكرًا لتواصلك مع Aitota.",
-        ru: "Привет! Спасибо, что обратились в Aitota.",
+        hi: "नमस्ते! Aitota में आपका स्वागत है।",
+        en: "Hi! Welcome to Aitota.",
+        es: "¡Hola! Bienvenido a Aitota.",
+        fr: "Bonjour ! Bienvenue chez Aitota.",
+        de: "Hallo! Willkommen bei Aitota.",
+        it: "Ciao! Benvenuto in Aitota.",
+        pt: "Olá! Bem-vindo à Aitota.",
+        ja: "こんにちは！Aitota へようこそ。",
+        ko: "안녕하세요! Aitota에 오신 것을 환영합니다。",
+        zh: "你好！欢迎来到 Aitota。",
+        ar: "مرحبًا! أهلاً بك في Aitota.",
+        ru: "Привет! Добро пожаловать в Aitota.",
       }
 
       return greetings[lang] || greetings["en"]
@@ -499,7 +566,7 @@ const setupUnifiedVoiceServer = (wss) => {
         const synthesisOptions = {
           voice: "lily",
           language: language === "en" ? "en" : "hi",
-          speed: 1.0,
+          speed: 1.1,
         }
 
         const audioData = await synthesizeWithErrorHandling(greetingText, synthesisOptions)
@@ -568,7 +635,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         lastSentTime = Date.now()
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        await new Promise((resolve) => setTimeout(resolve, 25)) // Reduced delay
       }
 
       isProcessingQueue = false
@@ -591,7 +658,7 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log("❌ Error sending audio to Deepgram:", error.message)
         if (error.message.includes("429") || error.message.includes("rate limit")) {
           console.log("⏳ Rate limit detected, backing off...")
-          await new Promise((resolve) => setTimeout(resolve, 2000))
+          await new Promise((resolve) => setTimeout(resolve, 1000)) // Reduced backoff time
         }
         return false
       }
@@ -599,16 +666,14 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const queueAudioData = async (audioData) => {
       if (audioQueue.length >= MAX_QUEUE_SIZE) {
-        console.log(
-          `⚠️ Audio queue full (${MAX_QUEUE_SIZE} chunks). Sending current queue to Deepgram and skipping new chunk.`,
-        )
+        console.log(`⚠️ Audio queue full (${MAX_QUEUE_SIZE} chunks). Processing current queue.`)
         await processAudioQueue()
         audioQueue = []
         return
       }
 
       audioQueue.push(audioData)
-      console.log(`🎵 Audio queued: ${audioData.length} bytes, current queue size: ${audioQueue.length}`)
+      console.log(`🎵 Audio queued: ${audioData.length} bytes, queue size: ${audioQueue.length}`)
 
       if (!isProcessingQueue) {
         processAudioQueue()
@@ -637,7 +702,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("punctuate", "true")
           deepgramUrl.searchParams.append("diarize", "false")
           deepgramUrl.searchParams.append("encoding", "linear16")
-          deepgramUrl.searchParams.append("endpointing", "300")
+          deepgramUrl.searchParams.append("endpointing", "150") // Reduced from 300 for faster detection
 
           deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", process.env.DEEPGRAM_API_KEY])
 
@@ -648,7 +713,7 @@ const setupUnifiedVoiceServer = (wss) => {
               deepgramWs.close()
             }
             reject(new Error("STT connection timeout"))
-          }, 15000)
+          }, 10000) // Reduced timeout
 
           deepgramWs.onopen = () => {
             clearTimeout(connectionTimeout)
@@ -667,6 +732,8 @@ const setupUnifiedVoiceServer = (wss) => {
           }
 
           deepgramWs.onmessage = async (event) => {
+            const deepgramTimer = createTimer("Deepgram Processing")
+
             try {
               const rawData = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString()
               const data = JSON.parse(rawData)
@@ -678,27 +745,19 @@ const setupUnifiedVoiceServer = (wss) => {
                   const is_final = data.is_final
 
                   if (transcript.trim()) {
-                    // Reset silence timer when we get new speech
                     resetSilenceTimer()
-                    
-                    // Update current transcript
+
                     if (is_final) {
                       currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
+                      console.log("📝 Deepgram Transcript (final):", currentTranscript)
+                      startSilenceTimer()
                     } else {
-                      // For interim results, update the display but don't append to final transcript
                       const displayTranscript = currentTranscript + (currentTranscript ? " " : "") + transcript.trim()
                       console.log("📝 Deepgram Transcript (interim):", displayTranscript)
                     }
-                    
+
                     emptyAudioCount = 0
                     isSpeaking = true
-                    
-                    // Display the final transcript
-                    if (is_final) {
-                      console.log("📝 Deepgram Transcript (final):", currentTranscript)
-                      // Start silence timer after final transcript
-                      startSilenceTimer()
-                    }
 
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(
@@ -733,7 +792,11 @@ const setupUnifiedVoiceServer = (wss) => {
                   startSilenceTimer()
                 }
               }
+
+              const deepgramDuration = deepgramTimer.end()
+              performanceMetrics.deepgramProcessingTimes.push(deepgramDuration)
             } catch (parseError) {
+              deepgramTimer.end()
               console.log("❌ Error parsing STT response:", parseError.message)
             }
           }
@@ -761,7 +824,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
               if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
                 reconnectAttempts++
-                const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
+                const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 15000) // Reduced max delay
                 console.log(`⏳ Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
 
                 setTimeout(() => {
@@ -787,8 +850,7 @@ const setupUnifiedVoiceServer = (wss) => {
       deepgramConnected = false
       audioQueue = []
       isProcessingQueue = false
-      
-      // Clear silence timer
+
       resetSilenceTimer()
 
       if (deepgramWs) {
@@ -802,7 +864,8 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const synthesizeWithLMNT = async (text, options = {}) => {
-      console.log("🔊 TTS: Starting synthesis for text:", text.substring(0, 100) + "...")
+      const lmntTimer = createTimer("LMNT TTS Processing")
+      console.log("🔊 TTS: Starting synthesis for text:", text.substring(0, 50) + "...")
 
       if (!lmntApiKey) {
         const error = "TTS API key not configured in environment variables"
@@ -885,10 +948,14 @@ const setupUnifiedVoiceServer = (wss) => {
                 throw new Error(`Failed to fetch audio from URL: ${audioResponse.status}`)
               }
               const audioBuffer = await audioResponse.arrayBuffer()
+              const lmntDuration = lmntTimer.end()
+              performanceMetrics.lmntProcessingTimes.push(lmntDuration)
               console.log(`✅ TTS: Audio fetched from URL, size: ${audioBuffer.byteLength} bytes`)
               return Buffer.from(audioBuffer)
             } else if (jsonResponse.audio) {
               const audioBuffer = Buffer.from(jsonResponse.audio, "base64")
+              const lmntDuration = lmntTimer.end()
+              performanceMetrics.lmntProcessingTimes.push(lmntDuration)
               console.log(`✅ TTS: Direct audio from JSON, size: ${audioBuffer.length} bytes`)
               return audioBuffer
             } else {
@@ -901,6 +968,8 @@ const setupUnifiedVoiceServer = (wss) => {
               throw new Error("TTS returned empty audio buffer")
             }
 
+            const lmntDuration = lmntTimer.end()
+            performanceMetrics.lmntProcessingTimes.push(lmntDuration)
             console.log(`✅ TTS: Successfully got audio from ${attempt.name}, size: ${audioBuffer.byteLength} bytes`)
             return Buffer.from(audioBuffer)
           }
@@ -908,12 +977,14 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log(`❌ TTS: ${attempt.name} failed:`, error.message)
 
           if (attempt === apiAttempts[apiAttempts.length - 1]) {
+            lmntTimer.end()
             throw error
           }
           continue
         }
       }
 
+      lmntTimer.end()
       throw new Error("All TTS API attempts failed")
     }
 
@@ -977,66 +1048,6 @@ const setupUnifiedVoiceServer = (wss) => {
       return Buffer.concat([header, audioBuffer])
     }
 
-    const processUserUtterance = async () => {
-      if (currentTranscript.trim()) {
-        console.log("🧠 Processing user utterance:", currentTranscript)
-        
-        // Send to Gemini for processing
-        const geminiResponse = await sendToGemini(currentTranscript.trim())
-        
-        let responseText = `You said: "${currentTranscript}". How can I help you further?`
-        
-        if (geminiResponse) {
-          responseText = geminiResponse
-          console.log("🤖 Gemini Response:", geminiResponse)
-        }
-
-        try {
-          const synthesisOptions = {
-            voice: "lily",
-            language: language === "en" ? "en" : "hi",
-            speed: 1.0,
-          }
-          const audioData = await synthesizeWithErrorHandling(responseText, synthesisOptions)
-
-          if (!audioData || audioData.length === 0) {
-            throw new Error("Received empty audio data from TTS for response")
-          }
-
-          const audioBuffer = Buffer.from(audioData)
-          const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
-          const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
-          audioChunkCount++
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: audioChunkCount,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: 8000,
-              channels: 1,
-              sample_width: 2,
-            },
-            type: "gemini_response"
-          }
-
-          console.log("📤 Sending synthesized response audio back to SIP client.")
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            console.log("✅ Synthesized response audio sent!")
-          }
-        } catch (error) {
-          console.log("❌ Failed to synthesize and send response audio:", error.message)
-        }
-      } else {
-        console.log("🤷 No transcript to process for TTS response.")
-      }
-      currentTranscript = ""
-      emptyAudioCount = 0
-      isSpeaking = false
-      console.log("📝 Transcript and state reset for next utterance.")
-    }
-
     ws.on("message", async (message) => {
       try {
         let isTextMessage = false
@@ -1075,7 +1086,18 @@ const setupUnifiedVoiceServer = (wss) => {
             currentTranscript = ""
             emptyAudioCount = 0
             isSpeaking = false
-            fullConversationHistory = [] // Reset conversation history for new session
+            fullConversationHistory = []
+            performanceMetrics = {
+              deepgramProcessingTimes: [],
+              geminiProcessingTimes: [],
+              lmntProcessingTimes: [],
+              totalResponseTimes: [],
+              transferTimes: {
+                deepgramToGemini: [],
+                geminiToLmnt: [],
+                lmntToClient: [],
+              },
+            }
             console.log("✅ SIP Call Started with UUID:", sessionId)
             console.log("Source:", data.Source, "Destination:", data.Destination)
 
@@ -1121,7 +1143,7 @@ const setupUnifiedVoiceServer = (wss) => {
             setTimeout(() => {
               console.log("👋 Sending initial greeting after SIP start...")
               sendGreeting()
-            }, 500)
+            }, 300) // Reduced delay
           } else if (data.type === "synthesize") {
             console.log("🔊 TTS synthesis request received")
             console.log("📝 Text to synthesize:", data.text)
@@ -1135,7 +1157,7 @@ const setupUnifiedVoiceServer = (wss) => {
               const synthesisOptions = {
                 voice: data.voice || "lily",
                 language: data.language || language,
-                speed: data.speed || 1.0,
+                speed: data.speed || 1.1, // Slightly faster default
               }
 
               const audioData = await synthesizeWithErrorHandling(data.text, synthesisOptions)
@@ -1265,13 +1287,9 @@ const setupUnifiedVoiceServer = (wss) => {
 
               if (audioBuffer.length > MAX_BUFFER_SIZE) {
                 audioBuffer.shift()
-                console.log(
-                  `⚠️ Audio buffer overflow, removed oldest chunk (before STT connected). Current size: ${audioBuffer.length}`,
-                )
+                console.log(`⚠️ Audio buffer overflow, removed oldest chunk. Current size: ${audioBuffer.length}`)
               }
             }
-          } else {
-            console.log("🔇 Skipping silent audio chunk for Deepgram.")
           }
         }
       } catch (error) {
@@ -1281,11 +1299,14 @@ const setupUnifiedVoiceServer = (wss) => {
 
     ws.on("close", () => {
       console.log("🔗 Unified voice connection closed")
-      console.log("📊 Session statistics:")
+      console.log("📊 Final Session Statistics:")
       console.log(`   SIP data received: ${sipDataReceived} messages`)
       console.log(`   Audio chunks processed: ${audioChunkCount}`)
       console.log(`   Session ID: ${sessionId || "Not set"}`)
       console.log(`   Conversation history length: ${fullConversationHistory.length}`)
+
+      // Final performance summary
+      logPerformanceMetrics()
 
       try {
         const files = fs.readdirSync(AUDIO_FILES_DIR)
@@ -1298,10 +1319,9 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       closeDeepgram()
-
-      // Clear any pending silence timer
       resetSilenceTimer()
 
+      // Reset all variables
       sessionId = null
       audioChunkCount = 0
       audioBuffer = []
@@ -1317,6 +1337,17 @@ const setupUnifiedVoiceServer = (wss) => {
       audioFiles = []
       audioFileIndex = 0
       fullConversationHistory = []
+      performanceMetrics = {
+        deepgramProcessingTimes: [],
+        geminiProcessingTimes: [],
+        lmntProcessingTimes: [],
+        totalResponseTimes: [],
+        transferTimes: {
+          deepgramToGemini: [],
+          geminiToLmnt: [],
+          lmntToClient: [],
+        },
+      }
     })
 
     ws.on("error", (error) => {
