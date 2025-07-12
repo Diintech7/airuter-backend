@@ -18,7 +18,7 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log("📡 SIP Connection Details:", {
       timestamp: new Date().toISOString(),
       clientIP: req.socket.remoteAddress,
-      userAgt: req.headers["user-agt"],
+      userAgent: req.headers["user-agent"],
       origin: req.headers.origin,
     })
 
@@ -64,7 +64,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const geminiApiKey = process.env.GEMINI_API_KEY
 
     const url = new URL(req.url, "http://localhost")
-    const language = url.searchParams.get("language") || "en-In"
+    const language = url.searchParams.get("language") || "en"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 API Keys configured:`)
@@ -169,15 +169,11 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
-          deepgramUrl.searchParams.append("model", "nova-3")
-          deepgramUrl.searchParams.append("language", language === "en-In" ? "en-In" : "hi")
+          deepgramUrl.searchParams.append("model", "nova-2")
+          deepgramUrl.searchParams.append("language", "en-In")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
-          deepgramUrl.searchParams.append("punctuate", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
-          deepgramUrl.searchParams.append("vad_turnoff", "700")
-          deepgramUrl.searchParams.append("utterance_end_ms", "1000")
-          deepgramUrl.searchParams.append("vad_events", "true")
 
           deepgramWs = new WebSocket(deepgramUrl.toString(), { headers: { Authorization: `Token ${deepgramApiKey}` } })
           deepgramWs.binaryType = "arraybuffer"
@@ -548,7 +544,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         const synthesisOptions = {
           voice: "lily",
-          language: language === "en-In" ? "en-In" : "hi",
+          language: language === "en" ? "en" : "hi",
           speed: 1.0,
           format: "wav",
           sample_rate: 8000,
@@ -611,7 +607,7 @@ const setupUnifiedVoiceServer = (wss) => {
           text: text,
           voice: options.voice || "lily",
           format: options.format || "wav",
-          language: options.language || "en-In",
+          language: options.language || "en",
           sample_rate: options.sample_rate || 8000,
           speed: options.speed || 1.0,
         }),
@@ -711,7 +707,7 @@ const setupUnifiedVoiceServer = (wss) => {
         en: "Hi! Hello, thank you for contacting Aitota.",
       }
 
-      const greetingText = greetings[language] || greetings["en-In"]
+      const greetingText = greetings[language] || greetings["en"]
       console.log(`👋 [GREETING] Sending greeting: "${greetingText}"`)
 
       try {
