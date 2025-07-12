@@ -54,8 +54,9 @@ const setupUnifiedVoiceServer = (wss) => {
     let isSpeaking = false
 
     // Audio processing
-    let lastAudioSent = 0
     const MIN_CHUNK_SIZE = 320
+    // const SEND_INTERVAL = 50
+    // let lastAudioSent = 0
     const SEND_INTERVAL = 50
 
     // API Keys
@@ -389,7 +390,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (buffer.length >= MIN_CHUNK_SIZE) {
           deepgramWs.send(buffer)
-          lastAudioSent = Date.now()
+          // lastAudioSent = Date.now()
           console.log(`🎵 [DEEPGRAM] Audio sent: ${buffer.length} bytes`)
           return true
         }
@@ -811,10 +812,10 @@ const setupUnifiedVoiceServer = (wss) => {
           // Handle audio data - send to persistent Deepgram connection
           console.log(`Received audio buffer size: ${message.length} bytes`)
           if (deepgramConnected && deepgramReady) {
-            const now = Date.now()
-            if (now - lastAudioSent >= SEND_INTERVAL) {
-              await sendAudioToDeepgram(message)
-            }
+            // const now = Date.now()
+            // if (now - lastAudioSent >= SEND_INTERVAL) {
+            await sendAudioToDeepgram(message)
+            // }
           } else {
             console.log(`⚠️ [AUDIO] Audio received but Deepgram not connected`)
           }
