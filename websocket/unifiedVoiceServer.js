@@ -169,7 +169,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
-          deepgramUrl.searchParams.append("model", "nova-2")
+          deepgramUrl.searchParams.append("model", "nova-3")
           deepgramUrl.searchParams.append("language", language === "hi" ? "hi" : "en")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
