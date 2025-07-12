@@ -69,7 +69,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const geminiApiKey = process.env.GEMINI_API_KEY
 
     const url = new URL(req.url, "http://localhost")
-    const language = url.searchParams.get("language") || "hi"
+    const language = url.searchParams.get("language") || "en"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 API Keys configured:`)
@@ -200,7 +200,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("model", "nova-2")
-          deepgramUrl.searchParams.append("language", "hi-In")
+          deepgramUrl.searchParams.append("language", "en-In")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
@@ -506,7 +506,7 @@ const setupUnifiedVoiceServer = (wss) => {
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiApiKey}`
 
         // Remove any system role messages from history (if present)
-        let filteredHistory = fullConversationHistory.filter(msg => msg.role !== "system")
+        const filteredHistory = fullConversationHistory.filter(msg => msg.role !== "system")
 
         // Add system prompt as the first message ONCE per session
         const aitotaSystemPrompt = `You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English and Hindi. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. End each message with a friendly follow-up question to keep the conversation going. When speaking Hindi, use Devanagari script (e.g., नमस्ते, कैसे मदद कर सकता हूँ?). Your goal is to make customers feel heard, supported, and valued.\n\n---\n\n💬 Example Conversations (2 English + 2 Hindi)\n\n---\n\n🗨 English Example 1\n\n👤: I forgot my password.\n🤖: No worries, I can help reset it. Should I send the reset link to your email now?\n\n---\n\n🗨 English Example 2\n\n👤: How can I track my order?\n🤖: I’ll check it for you—could you share your order ID please?\n\n---\n\n🗨 Hindi Example 1\n\n👤: मेरा रिचार्ज नहीं हुआ है।\n🤖: क्षमा कीजिए, मैं तुरंत जाँच करता हूँ। क्या आप अपना मोबाइल नंबर बता सकते हैं?\n\n---\n\n🗨 Hindi Example 2\n\n👤: मुझे नया पता जोड़ना है।\n🤖: बिल्कुल, कृपया नया पता बताइए। क्या आप इसे डिलीवरी एड्रेस भी बनाना चाहेंगे?`;
@@ -520,7 +520,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Add to conversation history, prepending instruction to user message
         filteredHistory.push({
           role: "user",
-          parts: [{ text: "You are Aitota's assistant. Reply in Hindi, in 10-15 words. Be clear, concise, and conversational.\n" + userMessage }],
+          parts: [{ text: "Answer briefly and concisely, in 1-2 sentences.\n" + userMessage }],
         })
 
         const requestBody = {
@@ -597,7 +597,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         const synthesisOptions = {
           voice: "lily",
-          language: "hi",
+          language: language === "en" ? "en" : "hi",
           speed: 1.0,
           format: "wav",
           sample_rate: 8000,
@@ -763,9 +763,11 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       const greetings = {
-        hi: "नमस्कार! एआई तोता में संपर्क करने के लिए धन्यवाद। बताइए, मैं आपकी किस प्रकार मदद कर सकती हूँ?",
+        hi: "नमस्ते! हैलो, Aitota से संपर्क करने के लिए धन्यवाद।",
+        en: "Hello, thank you for contacting Aitota. How can I help you?",
       }
-      const greetingText = greetings["hi"]
+
+      const greetingText = greetings[language] || greetings["en"]
       console.log(`👋 [GREETING] Sending greeting: "${greetingText}"`)
 
       try {
