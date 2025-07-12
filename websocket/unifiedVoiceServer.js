@@ -200,7 +200,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("model", "nova-2")
-          deepgramUrl.searchParams.append("language", "en-In")
+          deepgramUrl.searchParams.append("language", "hi-In")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
@@ -508,10 +508,10 @@ const setupUnifiedVoiceServer = (wss) => {
         // Remove any system role messages from history (if present)
         const filteredHistory = fullConversationHistory.filter(msg => msg.role !== "system")
 
-        // Add to conversation history, prepending instruction to user message
+        // Add to conversation history, prepending improved instruction to user message
         filteredHistory.push({
           role: "user",
-          parts: [{ text: "Answer briefly and concisely, in 1-2 sentences.\n" + userMessage }],
+          parts: [{ text: "Reply in 10-15 words. Be clear, concise, and conversational.\n" + userMessage }],
         })
 
         const requestBody = {
@@ -572,70 +572,83 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced TTS Synthesis with logging
+    // Enhanced TTS Synthesis with chunking and interrupt support
     const synthesizeAndSendResponse = async (text) => {
       if (!lmntApiKey || !text.trim()) {
         console.log(`⚠️ [LMNT] Skipping synthesis - API Key: ${!!lmntApiKey}, Text: "${text}"`)
         return
       }
 
-      ttsAbortController = new AbortController()
-      try {
-        console.log(`🔊 [LMNT] Starting synthesis:`)
-        console.log(`   - Text: "${text}"`)
-        console.log(`   - Language: ${language}`)
-        console.log(`   - Session ID: ${sessionId}`)
+      // Split text into 10-15 word chunks
+      const words = text.trim().split(/\s+/)
+      const chunks = []
+      let i = 0
+      while (i < words.length) {
+        const chunk = words.slice(i, i + 15).join(" ")
+        if (chunk) chunks.push(chunk)
+        i += 15
+      }
 
-        const synthesisOptions = {
-          voice: "lily",
-          language: language === "en" ? "en" : "hi",
-          speed: 1.0,
-          format: "wav",
-          sample_rate: 8000,
+      for (let idx = 0; idx < chunks.length; idx++) {
+        // If interrupted, stop sending further chunks
+        if (ttsAbortController && ttsAbortController.signal.aborted) {
+          console.log("⏹️ [LMNT] Synthesis interrupted, stopping further chunks.")
+          break
         }
-
-        console.log(`🔊 [LMNT] Synthesis options:`, synthesisOptions)
-        const audioData = await synthesizeWithLMNT(text, synthesisOptions, ttsAbortController)
-
-        if (audioData && audioData.length > 0) {
-          console.log(`✅ [LMNT] Audio synthesized successfully: ${audioData.length} bytes`)
-
-          const audioBuffer = Buffer.from(audioData)
-          const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
-          const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
-          audioChunkCount++
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: audioChunkCount,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: 8000,
-              channels: 1,
-              sample_width: 2,
-            },
-            type: "ai_response",
+        const chunkText = chunks[idx]
+        ttsAbortController = new AbortController()
+        try {
+          console.log(`🔊 [LMNT] Starting synthesis for chunk ${idx + 1}/${chunks.length}: "${chunkText}"`)
+          const synthesisOptions = {
+            voice: "lily",
+            language: language === "en" ? "en" : "hi",
+            speed: 1.0,
+            format: "wav",
+            sample_rate: 8000,
           }
+          const audioData = await synthesizeWithLMNT(chunkText, synthesisOptions, ttsAbortController)
 
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            console.log(`✅ [LMNT] Audio response sent to client`)
-            console.log(`   - Chunk Count: ${audioChunkCount}`)
-            console.log(`   - Audio Size: ${audioWithHeader.length} bytes`)
+          if (audioData && audioData.length > 0) {
+            console.log(`✅ [LMNT] Audio synthesized successfully: ${audioData.length} bytes`)
+
+            const audioBuffer = Buffer.from(audioData)
+            const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+            const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
+            audioChunkCount++
+            const audioResponse = {
+              data: {
+                session_id: sessionId,
+                count: audioChunkCount,
+                audio_bytes_to_play: pythonBytesString,
+                sample_rate: 8000,
+                channels: 1,
+                sample_width: 2,
+              },
+              type: "ai_response",
+            }
+
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(audioResponse))
+              console.log(`✅ [LMNT] Audio response sent to client (chunk ${idx + 1})`)
+              console.log(`   - Chunk Count: ${audioChunkCount}`)
+              console.log(`   - Audio Size: ${audioWithHeader.length} bytes`)
+            } else {
+              console.log(`❌ [LMNT] WebSocket not open, cannot send audio`)
+            }
           } else {
-            console.log(`❌ [LMNT] WebSocket not open, cannot send audio`)
+            console.log(`❌ [LMNT] No audio data received from synthesis (chunk ${idx + 1})`)
           }
-        } else {
-          console.log(`❌ [LMNT] No audio data received from synthesis`)
+        } catch (error) {
+          if (error.name === "AbortError") {
+            console.log("⏹️ [LMNT] Synthesis aborted due to interrupt (chunk)")
+            break
+          } else {
+            console.log(`❌ [LMNT] Synthesis failed (chunk ${idx + 1}): ${error.message}`)
+          }
+        } finally {
+          ttsAbortController = null
         }
-      } catch (error) {
-        if (error.name === "AbortError") {
-          console.log("⏹️ [LMNT] Synthesis aborted due to interrupt.")
-        } else {
-          console.log(`❌ [LMNT] Synthesis failed: ${error.message}`)
-        }
-      } finally {
-        ttsAbortController = null
       }
     }
 
@@ -755,10 +768,10 @@ const setupUnifiedVoiceServer = (wss) => {
 
       const greetings = {
         hi: "नमस्ते! हैलो, Aitota से संपर्क करने के लिए धन्यवाद।",
-        en: "Hi! Hello, thank you for contacting Aitota.",
+        en: "Hello, thank you for contacting Aitota. How can I help you?",
       }
 
-      const greetingText = greetings[language] || greetings["en"]
+      const greetingText = greetings[language] || greetings["hi"]
       console.log(`👋 [GREETING] Sending greeting: "${greetingText}"`)
 
       try {
