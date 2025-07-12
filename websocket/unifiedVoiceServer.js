@@ -85,7 +85,9 @@ const setupUnifiedVoiceServer = (wss) => {
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
-    console.log(`🤖 Gemini API Key configured: ${geminiApiKey ? "Yes (" + geminiApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
+    console.log(
+      `🤖 Gemini API Key configured: ${geminiApiKey ? "Yes (" + geminiApiKey.substring(0, 8) + "...)" : "❌ NO"}`,
+    )
 
     // Voice Activity Detection
     const detectVoiceActivity = (audioBuffer) => {
@@ -192,7 +194,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Add user message to conversation history
         conversationHistory.push({
           role: "user",
-          content: userMessage
+          content: userMessage,
         })
 
         // Keep only last 10 exchanges to manage context
@@ -200,30 +202,30 @@ const setupUnifiedVoiceServer = (wss) => {
           conversationHistory = conversationHistory.slice(-20)
         }
 
-        const systemPrompt = `You are a helpful voice assistant. Keep your responses concise and conversational, as they will be converted to speech. Respond in ${language === 'hi' ? 'Hindi' : 'English'}.`
+        const systemPrompt = `You are a helpful voice assistant. Keep your responses concise and conversational, as they will be converted to speech. Respond in ${language === "hi" ? "Hindi" : "English"}.`
 
-        const messages = [
-          { role: "system", content: systemPrompt },
-          ...conversationHistory
-        ]
+        const messages = [{ role: "system", content: systemPrompt }, ...conversationHistory]
 
-        const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              contents: messages.map((msg) => ({
+                role: msg.role === "system" ? "user" : msg.role,
+                parts: [{ text: msg.content }],
+              })),
+              generationConfig: {
+                temperature: 0.7,
+                maxOutputTokens: 150,
+                topP: 0.9,
+              },
+            }),
           },
-          body: JSON.stringify({
-            contents: messages.map(msg => ({
-              role: msg.role === 'system' ? 'user' : msg.role,
-              parts: [{ text: msg.content }]
-            })),
-            generationConfig: {
-              temperature: 0.7,
-              maxOutputTokens: 150,
-              topP: 0.9,
-            }
-          })
-        })
+        )
 
         if (!response.ok) {
           const errorText = await response.text()
@@ -239,7 +241,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Add AI response to conversation history
         conversationHistory.push({
           role: "assistant",
-          content: aiResponse
+          content: aiResponse,
         })
 
         return aiResponse
@@ -259,27 +261,26 @@ const setupUnifiedVoiceServer = (wss) => {
 
       while (geminiQueue.length > 0) {
         const userMessage = geminiQueue.shift()
-        
+
         try {
           const aiResponse = await sendToGemini(userMessage)
-          
+
           // Add to SIP audio queue for speech synthesis
           sipAudioQueue.push({
             text: aiResponse,
-            type: 'response'
+            type: "response",
           })
 
           // Process SIP audio queue
           if (!isProcessingSipAudio) {
             processSipAudioQueue()
           }
-
         } catch (error) {
           console.log("❌ Error processing Gemini queue:", error.message)
         }
 
         // Small delay between requests
-        await new Promise(resolve => setTimeout(resolve, 100))
+        await new Promise((resolve) => setTimeout(resolve, 100))
       }
 
       isProcessingGemini = false
@@ -295,10 +296,10 @@ const setupUnifiedVoiceServer = (wss) => {
 
       while (sipAudioQueue.length > 0) {
         const audioItem = sipAudioQueue.shift()
-        
+
         try {
           console.log("🔊 Processing SIP audio for:", audioItem.text)
-          
+
           const synthesisOptions = {
             voice: "lily",
             language: language === "en" ? "en" : "hi",
@@ -322,7 +323,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 channels: 1,
                 sample_width: 2,
               },
-              type: audioItem.type || 'response'
+              type: audioItem.type || "response",
             }
 
             if (ws.readyState === WebSocket.OPEN) {
@@ -330,42 +331,41 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log("✅ Audio response sent to SIP")
             }
           }
-
         } catch (error) {
           console.log("❌ Error processing SIP audio:", error.message)
         }
 
         // Small delay between audio sends
-        await new Promise(resolve => setTimeout(resolve, 200))
+        await new Promise((resolve) => setTimeout(resolve, 200))
       }
 
       isProcessingSipAudio = false
     }
 
     // Silence Detection and Gemini Trigger
-    const handleSilenceDetection = () => {
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-      }
+    // const handleSilenceDetection = () => {
+    //   if (silenceTimer) {
+    //     clearTimeout(silenceTimer)
+    //   }
 
-      silenceTimer = setTimeout(() => {
-        if (currentTranscript.trim() && !isSpeaking) {
-          console.log("🔇 Silence detected for 1 second, sending to Gemini")
-          
-          // Add to Gemini queue
-          geminiQueue.push(currentTranscript.trim())
-          
-          // Process Gemini queue
-          if (!isProcessingGemini) {
-            processGeminiQueue()
-          }
+    //   silenceTimer = setTimeout(() => {
+    //     if (currentTranscript.trim() && !isSpeaking) {
+    //       console.log("🔇 Silence detected for 1 second, sending to Gemini")
 
-          // Reset transcript
-          currentTranscript = ""
-          emptyAudioCount = 0
-        }
-      }, 1000) // 1 second timeout
-    }
+    //       // Add to Gemini queue
+    //       geminiQueue.push(currentTranscript.trim())
+
+    //       // Process Gemini queue
+    //       if (!isProcessingGemini) {
+    //         processGeminiQueue()
+    //       }
+
+    //       // Reset transcript
+    //       currentTranscript = ""
+    //       emptyAudioCount = 0
+    //     }
+    //   }, 1000) // 1 second timeout
+    // }
 
     // Utility functions
     const getGreetingMessage = (lang) => {
@@ -411,7 +411,7 @@ const setupUnifiedVoiceServer = (wss) => {
       // Add greeting to SIP audio queue
       sipAudioQueue.push({
         text: greetingText,
-        type: 'greeting'
+        type: "greeting",
       })
 
       if (!isProcessingSipAudio) {
@@ -557,14 +557,12 @@ const setupUnifiedVoiceServer = (wss) => {
                       currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
                       console.log("📝 Final Transcript:", currentTranscript)
                       isSpeaking = false
-                      emptyAudioCount = 0
-                      
-                      // Reset silence timer when we get actual speech
-                      handleSilenceDetection()
+                      emptyAudioCount = 0 // Reset empty audio count on speech
+                      // No need to call handleSilenceDetection here, the emptyAudioCount will manage it.
                     } else {
                       console.log("📝 Interim Transcript:", transcript)
                       isSpeaking = true
-                      emptyAudioCount = 0
+                      emptyAudioCount = 0 // Reset empty audio count on speech
                     }
 
                     if (ws.readyState === WebSocket.OPEN) {
@@ -580,15 +578,16 @@ const setupUnifiedVoiceServer = (wss) => {
                       )
                     }
                   } else if (is_final) {
+                    // This block handles empty final transcripts, indicating silence
                     emptyAudioCount++
                     console.log(`🔇 Empty final result (${emptyAudioCount}/${SILENCE_THRESHOLD_FOR_GEMINI})`)
-                    
+
                     if (emptyAudioCount >= SILENCE_THRESHOLD_FOR_GEMINI && currentTranscript.trim()) {
                       console.log("🔇 Silence threshold reached, triggering Gemini")
-                      
+
                       // Add to Gemini queue
                       geminiQueue.push(currentTranscript.trim())
-                      
+
                       // Process Gemini queue
                       if (!isProcessingGemini) {
                         processGeminiQueue()
@@ -597,18 +596,38 @@ const setupUnifiedVoiceServer = (wss) => {
                       // Reset state
                       currentTranscript = ""
                       emptyAudioCount = 0
-                      isSpeaking = false
+                      isSpeaking = false // Ensure isSpeaking is false after silence
                     }
                   }
                 } else if (data.is_final) {
+                  // This handles cases where there's no alternative/transcript but it's a final result
                   emptyAudioCount++
-                  console.log(`🔇 Empty final result (${emptyAudioCount}/${SILENCE_THRESHOLD_FOR_GEMINI})`)
+                  console.log(
+                    `🔇 Empty final result (no transcript) (${emptyAudioCount}/${SILENCE_THRESHOLD_FOR_GEMINI})`,
+                  )
+
+                  if (emptyAudioCount >= SILENCE_THRESHOLD_FOR_GEMINI && currentTranscript.trim()) {
+                    console.log("🔇 Silence threshold reached, triggering Gemini")
+
+                    // Add to Gemini queue
+                    geminiQueue.push(currentTranscript.trim())
+
+                    // Process Gemini queue
+                    if (!isProcessingGemini) {
+                      processGeminiQueue()
+                    }
+
+                    // Reset state
+                    currentTranscript = ""
+                    emptyAudioCount = 0
+                    isSpeaking = false
+                  }
                 }
               } else if (data.type === "SpeechStarted") {
                 console.log("🎙️ STT: Speech started detected")
                 isSpeaking = true
                 emptyAudioCount = 0
-                
+
                 // Clear silence timer when speech starts
                 if (silenceTimer) {
                   clearTimeout(silenceTimer)
@@ -617,9 +636,9 @@ const setupUnifiedVoiceServer = (wss) => {
               } else if (data.type === "UtteranceEnd") {
                 console.log("🎙️ STT: Utterance end detected")
                 isSpeaking = false
-                
+
                 // Start silence detection
-                handleSilenceDetection()
+                // handleSilenceDetection()
               }
             } catch (parseError) {
               console.log("❌ Error parsing STT response:", parseError.message)
@@ -931,13 +950,13 @@ const setupUnifiedVoiceServer = (wss) => {
             }, 500)
           } else if (data.type === "synthesize") {
             console.log("🔊 TTS synthesis request received")
-            
+
             sipAudioQueue.push({
               text: data.text,
-              type: 'response',
+              type: "response",
               voice: data.voice,
               language: data.language,
-              speed: data.speed
+              speed: data.speed,
             })
 
             if (!isProcessingSipAudio) {
@@ -945,7 +964,7 @@ const setupUnifiedVoiceServer = (wss) => {
             }
           } else if (data.type === "start_stt") {
             console.log("🎙️ STT service start requested")
-            
+
             if (!deepgramConnected) {
               try {
                 await connectToDeepgram({
@@ -971,14 +990,17 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         } else {
           const pcmAudio = await convertToPCM(message)
-          const hasVoice = detectVoiceActivity(pcmAudio)
+          // const hasVoice = detectVoiceActivity(pcmAudio)
 
-          saveAudioChunk(pcmAudio, hasVoice)
+          saveAudioChunk(pcmAudio, false)
 
-          if (hasVoice) {
-            if (deepgramConnected && deepgramReady) {
-              queueAudioData(pcmAudio)
-            }
+          // if (hasVoice) {
+          //   if (deepgramConnected && deepgramReady) {
+          //     queueAudioData(pcmAudio)
+          //   }
+          // }
+          if (deepgramConnected && deepgramReady) {
+            queueAudioData(pcmAudio)
           }
         }
       } catch (error) {
@@ -1023,7 +1045,7 @@ const setupUnifiedVoiceServer = (wss) => {
       sipAudioQueue = []
       isProcessingSipAudio = false
       conversationHistory = []
-      
+
       if (silenceTimer) {
         clearTimeout(silenceTimer)
         silenceTimer = null
