@@ -69,7 +69,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const geminiApiKey = process.env.GEMINI_API_KEY
 
     const url = new URL(req.url, "http://localhost")
-    const language = url.searchParams.get("language") || "en"
+    const language = url.searchParams.get("language") || "hi"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 API Keys configured:`)
@@ -506,12 +506,21 @@ const setupUnifiedVoiceServer = (wss) => {
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiApiKey}`
 
         // Remove any system role messages from history (if present)
-        const filteredHistory = fullConversationHistory.filter(msg => msg.role !== "system")
+        let filteredHistory = fullConversationHistory.filter(msg => msg.role !== "system")
 
-        // Add to conversation history, prepending improved instruction to user message
+        // Add system prompt as the first message ONCE per session
+        const aitotaSystemPrompt = `You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English and Hindi. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. End each message with a friendly follow-up question to keep the conversation going. When speaking Hindi, use Devanagari script (e.g., नमस्ते, कैसे मदद कर सकता हूँ?). Your goal is to make customers feel heard, supported, and valued.\n\n---\n\n💬 Example Conversations (2 English + 2 Hindi)\n\n---\n\n🗨 English Example 1\n\n👤: I forgot my password.\n🤖: No worries, I can help reset it. Should I send the reset link to your email now?\n\n---\n\n🗨 English Example 2\n\n👤: How can I track my order?\n🤖: I’ll check it for you—could you share your order ID please?\n\n---\n\n🗨 Hindi Example 1\n\n👤: मेरा रिचार्ज नहीं हुआ है।\n🤖: क्षमा कीजिए, मैं तुरंत जाँच करता हूँ। क्या आप अपना मोबाइल नंबर बता सकते हैं?\n\n---\n\n🗨 Hindi Example 2\n\n👤: मुझे नया पता जोड़ना है।\n🤖: बिल्कुल, कृपया नया पता बताइए। क्या आप इसे डिलीवरी एड्रेस भी बनाना चाहेंगे?`;
+        if (!filteredHistory.length || (filteredHistory.length && filteredHistory[0].parts[0].text !== aitotaSystemPrompt)) {
+          filteredHistory.unshift({
+            role: "user",
+            parts: [{ text: aitotaSystemPrompt }],
+          })
+        }
+
+        // Add to conversation history, prepending instruction to user message
         filteredHistory.push({
           role: "user",
-          parts: [{ text: "Reply in 10-15 words. Be clear, concise, and conversational.\n" + userMessage }],
+          parts: [{ text: "You are Aitota's assistant. Reply in Hindi, in 10-15 words. Be clear, concise, and conversational.\n" + userMessage }],
         })
 
         const requestBody = {
@@ -572,83 +581,70 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced TTS Synthesis with chunking and interrupt support
+    // Enhanced TTS Synthesis with logging
     const synthesizeAndSendResponse = async (text) => {
       if (!lmntApiKey || !text.trim()) {
         console.log(`⚠️ [LMNT] Skipping synthesis - API Key: ${!!lmntApiKey}, Text: "${text}"`)
         return
       }
 
-      // Split text into 10-15 word chunks
-      const words = text.trim().split(/\s+/)
-      const chunks = []
-      let i = 0
-      while (i < words.length) {
-        const chunk = words.slice(i, i + 15).join(" ")
-        if (chunk) chunks.push(chunk)
-        i += 15
-      }
+      ttsAbortController = new AbortController()
+      try {
+        console.log(`🔊 [LMNT] Starting synthesis:`)
+        console.log(`   - Text: "${text}"`)
+        console.log(`   - Language: ${language}`)
+        console.log(`   - Session ID: ${sessionId}`)
 
-      for (let idx = 0; idx < chunks.length; idx++) {
-        // If interrupted, stop sending further chunks
-        if (ttsAbortController && ttsAbortController.signal.aborted) {
-          console.log("⏹️ [LMNT] Synthesis interrupted, stopping further chunks.")
-          break
+        const synthesisOptions = {
+          voice: "lily",
+          language: "hi",
+          speed: 1.0,
+          format: "wav",
+          sample_rate: 8000,
         }
-        const chunkText = chunks[idx]
-        ttsAbortController = new AbortController()
-        try {
-          console.log(`🔊 [LMNT] Starting synthesis for chunk ${idx + 1}/${chunks.length}: "${chunkText}"`)
-          const synthesisOptions = {
-            voice: "lily",
-            language: language === "en" ? "en" : "hi",
-            speed: 1.0,
-            format: "wav",
-            sample_rate: 8000,
+
+        console.log(`🔊 [LMNT] Synthesis options:`, synthesisOptions)
+        const audioData = await synthesizeWithLMNT(text, synthesisOptions, ttsAbortController)
+
+        if (audioData && audioData.length > 0) {
+          console.log(`✅ [LMNT] Audio synthesized successfully: ${audioData.length} bytes`)
+
+          const audioBuffer = Buffer.from(audioData)
+          const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+          const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
+          audioChunkCount++
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: audioChunkCount,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: 8000,
+              channels: 1,
+              sample_width: 2,
+            },
+            type: "ai_response",
           }
-          const audioData = await synthesizeWithLMNT(chunkText, synthesisOptions, ttsAbortController)
 
-          if (audioData && audioData.length > 0) {
-            console.log(`✅ [LMNT] Audio synthesized successfully: ${audioData.length} bytes`)
-
-            const audioBuffer = Buffer.from(audioData)
-            const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
-            const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
-            audioChunkCount++
-            const audioResponse = {
-              data: {
-                session_id: sessionId,
-                count: audioChunkCount,
-                audio_bytes_to_play: pythonBytesString,
-                sample_rate: 8000,
-                channels: 1,
-                sample_width: 2,
-              },
-              type: "ai_response",
-            }
-
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(audioResponse))
-              console.log(`✅ [LMNT] Audio response sent to client (chunk ${idx + 1})`)
-              console.log(`   - Chunk Count: ${audioChunkCount}`)
-              console.log(`   - Audio Size: ${audioWithHeader.length} bytes`)
-            } else {
-              console.log(`❌ [LMNT] WebSocket not open, cannot send audio`)
-            }
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(audioResponse))
+            console.log(`✅ [LMNT] Audio response sent to client`)
+            console.log(`   - Chunk Count: ${audioChunkCount}`)
+            console.log(`   - Audio Size: ${audioWithHeader.length} bytes`)
           } else {
-            console.log(`❌ [LMNT] No audio data received from synthesis (chunk ${idx + 1})`)
+            console.log(`❌ [LMNT] WebSocket not open, cannot send audio`)
           }
-        } catch (error) {
-          if (error.name === "AbortError") {
-            console.log("⏹️ [LMNT] Synthesis aborted due to interrupt (chunk)")
-            break
-          } else {
-            console.log(`❌ [LMNT] Synthesis failed (chunk ${idx + 1}): ${error.message}`)
-          }
-        } finally {
-          ttsAbortController = null
+        } else {
+          console.log(`❌ [LMNT] No audio data received from synthesis`)
         }
+      } catch (error) {
+        if (error.name === "AbortError") {
+          console.log("⏹️ [LMNT] Synthesis aborted due to interrupt.")
+        } else {
+          console.log(`❌ [LMNT] Synthesis failed: ${error.message}`)
+        }
+      } finally {
+        ttsAbortController = null
       }
     }
 
@@ -767,11 +763,9 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       const greetings = {
-        hi: "नमस्ते! हैलो, Aitota से संपर्क करने के लिए धन्यवाद।",
-        en: "Hello, thank you for contacting Aitota. How can I help you?",
+        hi: "नमस्कार! एआई तोता में संपर्क करने के लिए धन्यवाद। बताइए, मैं आपकी किस प्रकार मदद कर सकता हूँ?",
       }
-
-      const greetingText = greetings[language] || greetings["hi"]
+      const greetingText = greetings["hi"]
       console.log(`👋 [GREETING] Sending greeting: "${greetingText}"`)
 
       try {
