@@ -472,6 +472,17 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiApiKey}`
 
+        // Add system instruction if not present
+        if (
+          !fullConversationHistory.length ||
+          fullConversationHistory[0].role !== "system"
+        ) {
+          fullConversationHistory.unshift({
+            role: "system",
+            parts: [{ text: "Answer briefly and concisely, in 1-2 sentences." }],
+          })
+        }
+
         // Add to conversation history
         fullConversationHistory.push({
           role: "user",
@@ -484,7 +495,7 @@ const setupUnifiedVoiceServer = (wss) => {
             temperature: 0.7,
             topK: 40,
             topP: 0.95,
-            maxOutputTokens: 1024,
+            maxOutputTokens: 60, // Make response short
           },
         }
 
