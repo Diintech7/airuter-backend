@@ -505,25 +505,17 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiApiKey}`
 
-        // Add system instruction if not present
-        if (
-          !fullConversationHistory.length ||
-          fullConversationHistory[0].role !== "system"
-        ) {
-          fullConversationHistory.unshift({
-            role: "system",
-            parts: [{ text: "Answer briefly and concisely, in 1-2 sentences." }],
-          })
-        }
+        // Remove any system role messages from history (if present)
+        const filteredHistory = fullConversationHistory.filter(msg => msg.role !== "system")
 
-        // Add to conversation history
-        fullConversationHistory.push({
+        // Add to conversation history, prepending instruction to user message
+        filteredHistory.push({
           role: "user",
-          parts: [{ text: userMessage }],
+          parts: [{ text: "Answer briefly and concisely, in 1-2 sentences.\n" + userMessage }],
         })
 
         const requestBody = {
-          contents: fullConversationHistory,
+          contents: filteredHistory,
           generationConfig: {
             temperature: 0.7,
             topK: 40,
