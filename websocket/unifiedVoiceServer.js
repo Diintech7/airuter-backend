@@ -22,74 +22,58 @@ const setupUnifiedVoiceServer = (wss) => {
       origin: req.headers.origin,
     })
 
-    // Core connection variables
     let deepgramWs = null
     let deepgramReady = false
+    let audioBuffer = [] // Buffer for audio before Deepgram is connected
     let deepgramConnected = false
-    let sessionId = null
-    let audioChunkCount = 0
-    let connectionGreetingSent = false
-    let sipDataReceived = 0
 
-    // Audio processing variables
     let audioFiles = []
     let audioFileIndex = 0
-    const MAX_AUDIO_FILES = 60
+    const MAX_AUDIO_FILES = 60 // Number of audio chunks to accumulate before sending to Deepgram
     const AUDIO_FILES_DIR = path.join(__dirname, "audio_chunks")
 
     if (!fs.existsSync(AUDIO_FILES_DIR)) {
       fs.mkdirSync(AUDIO_FILES_DIR, { recursive: true })
     }
 
-    // Voice Activity Detection
     const vadState = {
       isSpeaking: false,
       silenceCount: 0,
       speechCount: 0,
       lastAudioLevel: 0,
-      SILENCE_THRESHOLD: 5,
-      SPEECH_THRESHOLD: 3,
-      AUDIO_LEVEL_THRESHOLD: 0.01,
+      SILENCE_THRESHOLD: 5, // Number of consecutive silent chunks
+      SPEECH_THRESHOLD: 3, // Number of consecutive speech chunks
+      AUDIO_LEVEL_THRESHOLD: 0.01, // Minimum audio level to consider as speech
     }
 
-    // Deepgram connection variables
     let audioQueue = []
     let isProcessingQueue = false
     let lastSentTime = 0
-    const MIN_SEND_INTERVAL = 250
-    const MAX_QUEUE_SIZE = 5000
-    const MAX_BUFFER_SIZE = 100
+    const MIN_SEND_INTERVAL = 250 // Minimum 250ms between sends to Deepgram
+    const MAX_QUEUE_SIZE = 50 // Maximum queued audio chunks
+    const MAX_BUFFER_SIZE = 100 // Maximum buffered audio chunks before Deepgram connects
     let reconnectAttempts = 0
     const MAX_RECONNECT_ATTEMPTS = 5
-    let reconnectDelay = 1000
-
-    // Gemini Integration Variables
-    let geminiQueue = []
-    let isProcessingGemini = false
-    let currentTranscript = ""
-    let emptyAudioCount = 0
-    const SILENCE_THRESHOLD_FOR_GEMINI = 3 // 1 second of silence (8 chunks at 125ms each)
-    let isSpeaking = false
-    let silenceTimer = null
-    let conversationHistory = []
-
-    // SIP Audio Queue
-    let sipAudioQueue = []
-    let isProcessingSipAudio = false
+    let reconnectDelay = 1000 // Start with 1 second
 
     const lmntApiKey = process.env.LMNT_API_KEY
-    const geminiApiKey = process.env.GEMINI_API_KEY
+
+    let sessionId = null
+    let audioChunkCount = 0
+    let connectionGreetingSent = false
+    let sipDataReceived = 0
+
+    let currentTranscript = ""
+    let emptyAudioCount = 0
+    const SILENCE_THRESHOLD = 1500 // Number of consecutive empty/non-final Deepgram results to trigger TTS
+    let isSpeaking = false // Flag to track if user is actively speaking
 
     const url = new URL(req.url, "http://localhost")
     const language = url.searchParams.get("language") || "en"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 TTS API Key configured: ${lmntApiKey ? "Yes (" + lmntApiKey.substring(0, 8) + "...)" : "❌ NO"}`)
-    console.log(
-      `🤖 Gemini API Key configured: ${geminiApiKey ? "Yes (" + geminiApiKey.substring(0, 8) + "...)" : "❌ NO"}`,
-    )
 
-    // Voice Activity Detection
     const detectVoiceActivity = (audioBuffer) => {
       if (!audioBuffer || audioBuffer.length === 0) {
         return false
@@ -112,9 +96,10 @@ const setupUnifiedVoiceServer = (wss) => {
         sum += sample * sample
       }
       const rms = Math.sqrt(sum / samples.length)
-      const audioLevel = rms / 32768.0
+      const audioLevel = rms / 32768.0 // Normalize to 0-1 range
 
       vadState.lastAudioLevel = audioLevel
+
       const hasSpeech = audioLevel > vadState.AUDIO_LEVEL_THRESHOLD
 
       if (hasSpeech) {
@@ -138,7 +123,6 @@ const setupUnifiedVoiceServer = (wss) => {
       return hasSpeech
     }
 
-    // Audio file management
     const saveAudioChunk = (audioData, hasVoice = false) => {
       try {
         const filename = `audio_chunk_${audioFileIndex.toString().padStart(3, "0")}.wav`
@@ -163,12 +147,15 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (hasVoice) {
           console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - CONTAINS SPEECH`)
+        } else {
+          console.log(`💾 Audio saved: ${filename} (${audioWithHeader.length} bytes) - SILENT`)
         }
 
         if (audioFiles.length > MAX_AUDIO_FILES) {
           const oldFile = audioFiles.shift()
           try {
             fs.unlinkSync(oldFile.filepath)
+            console.log(`🗑️ Deleted old audio file: ${oldFile.filename}`)
           } catch (error) {
             console.log(`⚠️ Failed to delete old audio file: ${error.message}`)
           }
@@ -181,219 +168,117 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Gemini API Integration
-    const sendToGemini = async (userMessage) => {
-      if (!geminiApiKey) {
-        console.log("❌ Gemini API key not configured")
-        return "I'm sorry, I'm not properly configured to respond right now."
-      }
-    
-      try {
-        console.log("🤖 Sending to Gemini API:", userMessage)
-    
-        // Add user message to conversation history
-        conversationHistory.push({
-          role: "user",
-          content: userMessage,
-        })
-    
-        // Keep only last 10 exchanges to manage context
-        if (conversationHistory.length > 20) {
-          conversationHistory = conversationHistory.slice(-20)
+    const removeEmptyAudioFiles = () => {
+      const removedFiles = []
+      audioFiles = audioFiles.filter((fileInfo) => {
+        if (!fileInfo.hasVoice) {
+          try {
+            fs.unlinkSync(fileInfo.filepath)
+            removedFiles.push(fileInfo.filename)
+            return false
+          } catch (error) {
+            console.log(`⚠️ Failed to remove empty audio file: ${fileInfo.filename}, error: ${error.message}`)
+            return true
+          }
         }
-    
-        const systemPrompt = `You are a helpful voice assistant for Aitota. Keep your responses concise and conversational (1-2 sentences max), as they will be converted to speech. Respond in ${language === "hi" ? "Hindi" : "English"}.`
-    
-        const messages = [{ role: "system", content: systemPrompt }, ...conversationHistory]
-        
-        console.log("🤖 Sending request to Gemini with messages:", messages.length)
-    
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              contents: messages.map((msg) => ({
-                role: msg.role === "system" ? "user" : msg.role,
-                parts: [{ text: msg.content }],
-              })),
-              generationConfig: {
-                temperature: 0.7,
-                maxOutputTokens: 150,
-                topP: 0.9,
-              },
-            }),
-          },
-        )
-    
-        console.log("🤖 Gemini API response status:", response.status)
-    
-        if (!response.ok) {
-          const errorText = await response.text()
-          console.log("❌ Gemini API error:", errorText)
-          return "I'm sorry, I'm having trouble processing your request right now."
-        }
-    
-        const data = await response.json()
-        console.log("🤖 Gemini API response data:", JSON.stringify(data, null, 2))
-        
-        const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm sorry, I didn't understand that."
-    
-        console.log("🤖 Extracted Gemini response:", aiResponse)
-    
-        // Add AI response to conversation history
-        conversationHistory.push({
-          role: "assistant",
-          content: aiResponse,
-        })
-    
-        return aiResponse
-      } catch (error) {
-        console.log("❌ Error communicating with Gemini:", error.message)
-        console.log("❌ Error stack:", error.stack)
-        return "I'm sorry, I'm having trouble processing your request right now."
-      }
-    }
-
-    // Gemini Queue Processing
-    const processGeminiQueue = async () => {
-      console.log("🤖 processGeminiQueue called:", {
-        isProcessingGemini,
-        queueLength: geminiQueue.length,
-        queue: geminiQueue
+        return true
       })
-      
-      if (isProcessingGemini || geminiQueue.length === 0) {
-        console.log("🤖 Skipping Gemini processing:", {
-          isProcessingGemini,
-          queueLength: geminiQueue.length
-        })
-        return
+
+      if (removedFiles.length > 0) {
+        console.log(`🧹 Removed ${removedFiles.length} silent audio files`)
       }
-    
-      isProcessingGemini = true
-      console.log("🤖 Starting Gemini processing...")
-    
-      while (geminiQueue.length > 0) {
-        const userMessage = geminiQueue.shift()
-        console.log("🤖 Processing message from queue:", userMessage)
-    
+    }
+
+    const concatenateAudioFiles = () => {
+      return new Promise((resolve, reject) => {
         try {
-          const aiResponse = await sendToGemini(userMessage)
-          console.log("🤖 Got response from Gemini:", aiResponse)
-    
-          // Add to SIP audio queue for speech synthesis
-          sipAudioQueue.push({
-            text: aiResponse,
-            type: "response",
+          if (audioFiles.length === 0) {
+            resolve(null)
+            return
+          }
+
+          const voiceFiles = audioFiles.filter((file) => file.hasVoice)
+
+          if (voiceFiles.length === 0) {
+            resolve(null)
+            return
+          }
+
+          console.log(`🔗 Concatenating ${voiceFiles.length} voice files...`)
+
+          const audioChunks = []
+          let totalSize = 0
+
+          for (const fileInfo of voiceFiles) {
+            const fileBuffer = fs.readFileSync(fileInfo.filepath)
+            const audioData = fileBuffer.slice(44) // Skip WAV header (44 bytes)
+            audioChunks.push(audioData)
+            totalSize += audioData.length
+          }
+
+          const combinedAudio = Buffer.concat(audioChunks)
+          const finalAudioWithHeader = createWAVHeader(combinedAudio, 8000, 1, 16)
+
+          const finalFilename = `concatenated_audio_${Date.now()}.wav`
+          const finalFilepath = path.join(AUDIO_FILES_DIR, finalFilename)
+
+          fs.writeFileSync(finalFilepath, finalAudioWithHeader)
+
+          console.log(`✅ Audio concatenated: ${finalFilename} (${finalAudioWithHeader.length} bytes)`)
+
+          resolve({
+            filepath: finalFilepath,
+            filename: finalFilename,
+            audioData: combinedAudio,
+            totalFiles: voiceFiles.length,
+            totalSize: finalAudioWithHeader.length,
           })
-          
-          console.log("🤖 Added to SIP audio queue, queue length:", sipAudioQueue.length)
-    
-          // Process SIP audio queue
-          if (!isProcessingSipAudio) {
-            console.log("🤖 Starting SIP audio processing...")
-            processSipAudioQueue()
-          } else {
-            console.log("🤖 SIP audio processing already in progress")
-          }
         } catch (error) {
-          console.log("❌ Error processing Gemini queue:", error.message)
+          console.log(`❌ Failed to concatenate audio files: ${error.message}`)
+          reject(error)
         }
-    
-        // Small delay between requests
-        await new Promise((resolve) => setTimeout(resolve, 100))
-      }
-    
-      isProcessingGemini = false
-      console.log("🤖 Finished Gemini processing")
+      })
     }
 
-    // SIP Audio Queue Processing
-    const processSipAudioQueue = async () => {
-      if (isProcessingSipAudio || sipAudioQueue.length === 0) {
-        return
-      }
+    const processAccumulatedAudio = async () => {
+      try {
+        removeEmptyAudioFiles()
 
-      isProcessingSipAudio = true
+        const concatenatedAudio = await concatenateAudioFiles()
 
-      while (sipAudioQueue.length > 0) {
-        const audioItem = sipAudioQueue.shift()
-
-        try {
-          console.log("🔊 Processing SIP audio for:", audioItem.text)
-
-          const synthesisOptions = {
-            voice: "lily",
-            language: language === "en" ? "en" : "hi",
-            speed: 1.0,
-          }
-
-          const audioData = await synthesizeWithErrorHandling(audioItem.text, synthesisOptions)
-
-          if (audioData && audioData.length > 0) {
-            const audioBuffer = Buffer.from(audioData)
-            const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
-            const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
-            audioChunkCount++
-            const audioResponse = {
-              data: {
-                session_id: sessionId,
-                count: audioChunkCount,
-                audio_bytes_to_play: pythonBytesString,
-                sample_rate: 8000,
-                channels: 1,
-                sample_width: 2,
-              },
-              type: audioItem.type || "response",
-            }
-
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(audioResponse))
-              console.log("✅ Audio response sent to SIP")
-            }
-          }
-        } catch (error) {
-          console.log("❌ Error processing SIP audio:", error.message)
+        if (!concatenatedAudio) {
+          console.log("⚠️ No voice audio to process for Deepgram.")
+          return
         }
 
-        // Small delay between audio sends
-        await new Promise((resolve) => setTimeout(resolve, 200))
-      }
+        console.log(`📤 Sending concatenated audio to Deepgram: ${concatenatedAudio.totalSize} bytes`)
 
-      isProcessingSipAudio = false
+        if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN && deepgramReady) {
+          deepgramWs.send(concatenatedAudio.audioData)
+          console.log("✅ Concatenated audio sent to Deepgram")
+        } else {
+          console.log("❌ Cannot send to Deepgram - connection not ready")
+        }
+
+        audioFiles = [] // Clear processed files
+        audioFileIndex = 0
+      } catch (error) {
+        console.log(`❌ Failed to process accumulated audio: ${error.message}`)
+      }
     }
 
-    // Silence Detection and Gemini Trigger
-    // const handleSilenceDetection = () => {
-    //   if (silenceTimer) {
-    //     clearTimeout(silenceTimer)
-    //   }
+    const logSipData = (data, type = "UNKNOWN") => {
+      const timestamp = new Date().toISOString()
+      sipDataReceived++
 
-    //   silenceTimer = setTimeout(() => {
-    //     if (currentTranscript.trim() && !isSpeaking) {
-    //       console.log("🔇 Silence detected for 1 second, sending to Gemini")
+      console.log(`📞 SIP Data Received [${sipDataReceived}] - ${type} - ${timestamp}`)
+      if (typeof data === "string") {
+        console.log(`📝 Text Content: ${data.substring(0, 100)}${data.length > 100 ? "..." : ""}`)
+      } else if (data instanceof Buffer) {
+        console.log(`🎵 Audio Buffer: ${data.length} bytes`)
+      }
+    }
 
-    //       // Add to Gemini queue
-    //       geminiQueue.push(currentTranscript.trim())
-
-    //       // Process Gemini queue
-    //       if (!isProcessingGemini) {
-    //         processGeminiQueue()
-    //       }
-
-    //       // Reset transcript
-    //       currentTranscript = ""
-    //       emptyAudioCount = 0
-    //     }
-    //   }, 1000) // 1 second timeout
-    // }
-
-    // Utility functions
     const getGreetingMessage = (lang) => {
       const greetings = {
         hi: "नमस्ते! हैलो, Aitota से संपर्क करने के लिए धन्यवाद।",
@@ -409,6 +294,7 @@ const setupUnifiedVoiceServer = (wss) => {
         ar: "مرحبًا! شكرًا لتواصلك مع Aitota.",
         ru: "Привет! Спасибо, что обратились в Aitota.",
       }
+
       return greetings[lang] || greetings["en"]
     }
 
@@ -434,137 +320,138 @@ const setupUnifiedVoiceServer = (wss) => {
       const greetingText = getGreetingMessage(language)
       console.log("👋 Greeting text:", greetingText)
 
-      // Add greeting to SIP audio queue
-      sipAudioQueue.push({
-        text: greetingText,
-        type: "greeting",
-      })
+      try {
+        const synthesisOptions = {
+          voice: "lily",
+          language: language === "en" ? "en" : "hi",
+          speed: 1.0,
+        }
 
-      if (!isProcessingSipAudio) {
-        processSipAudioQueue()
+        const audioData = await synthesizeWithErrorHandling(greetingText, synthesisOptions)
+
+        if (!audioData || audioData.length === 0) {
+          throw new Error("Received empty greeting audio data from TTS")
+        }
+
+        console.log("✅ Greeting: Successfully received audio data, size:", audioData.length, "bytes")
+
+        const audioBuffer = Buffer.from(audioData)
+        const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+        const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
+        audioChunkCount++
+
+        const greetingResponse = {
+          data: {
+            session_id: sessionId,
+            count: audioChunkCount,
+            audio_bytes_to_play: pythonBytesString,
+            sample_rate: 8000,
+            channels: 1,
+            sample_width: 2,
+          },
+          type: "greeting",
+        }
+
+        console.log("✅ ==================== SENDING GREETING AUDIO ====================")
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(greetingResponse))
+          console.log("✅ 👋 Connection greeting sent successfully!")
+          connectionGreetingSent = true
+        } else {
+          console.log("❌ WebSocket not open, cannot send greeting")
+        }
+      } catch (error) {
+        console.log("❌ Failed to send greeting:", error.message)
+        connectionGreetingSent = true
       }
-
-      connectionGreetingSent = true
     }
 
-    // Audio processing
     const processAudioQueue = async () => {
       if (isProcessingQueue || audioQueue.length === 0) {
         return
       }
-    
+
       isProcessingQueue = true
-      console.log(`🎵 Processing audio queue: ${audioQueue.length} items`)
-    
-      while (audioQueue.length > 0) {
-        // Check if Deepgram connection is still valid
-        if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
-          console.log("⚠️ Deepgram not ready, pausing queue processing")
-          break
-        }
-    
+
+      while (audioQueue.length > 0 && deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
         const now = Date.now()
         const timeSinceLastSend = now - lastSentTime
-    
+
         if (timeSinceLastSend < MIN_SEND_INTERVAL) {
           const waitTime = MIN_SEND_INTERVAL - timeSinceLastSend
           await new Promise((resolve) => setTimeout(resolve, waitTime))
         }
-    
+
         const audioData = audioQueue.shift()
         const success = await sendAudioToDeepgramThrottled(audioData)
-    
+
         if (!success) {
-          // Put the audio back at the front of the queue
           audioQueue.unshift(audioData)
-          console.log("⚠️ Failed to send audio to Deepgram, re-queueing")
+          console.log("⚠️ Failed to send audio to Deepgram, re-queueing and pausing processing.")
           break
         }
-    
+
         lastSentTime = Date.now()
-        
-        // Small delay to prevent overwhelming the service
-        await new Promise((resolve) => setTimeout(resolve, 25))
+        await new Promise((resolve) => setTimeout(resolve, 50))
       }
-    
+
       isProcessingQueue = false
-    
-      // If there are still items in the queue and we're connected, try again
-      if (audioQueue.length > 0 && deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+
+      if (audioQueue.length > 0) {
         setTimeout(processAudioQueue, MIN_SEND_INTERVAL)
       }
     }
 
     const sendAudioToDeepgramThrottled = async (audioData) => {
-      if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
-        console.log("❌ Deepgram not ready:", {
-          exists: !!deepgramWs,
-          readyState: deepgramWs?.readyState,
-          deepgramReady,
-          deepgramConnected
-        })
+      if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
         return false
       }
-    
+
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
-        
-        // Add size check
-        if (buffer.length === 0) {
-          console.log("⚠️ Empty audio buffer, skipping")
-          return true // Don't treat as error
-        }
-    
         deepgramWs.send(buffer)
-        console.log(`✅ Audio sent to Deepgram: ${buffer.length} bytes`)
         return true
       } catch (error) {
         console.log("❌ Error sending audio to Deepgram:", error.message)
-        
-        // Check if connection is still valid
-        if (deepgramWs && deepgramWs.readyState !== WebSocket.OPEN) {
-          console.log("🔄 Deepgram connection lost, attempting reconnect...")
-          deepgramReady = false
-          deepgramConnected = false
-          
-          // Attempt reconnection
-          setTimeout(() => {
-            connectToDeepgram({ language, model: "nova-2" }).catch(err => {
-              console.log("❌ Reconnection failed:", err.message)
-            })
-          }, 1000)
+        if (error.message.includes("429") || error.message.includes("rate limit")) {
+          console.log("⏳ Rate limit detected, backing off...")
+          await new Promise((resolve) => setTimeout(resolve, 2000))
         }
-        
         return false
       }
     }
 
     const queueAudioData = async (audioData) => {
       if (audioQueue.length >= MAX_QUEUE_SIZE) {
-        console.log(`⚠️ Audio queue full (${MAX_QUEUE_SIZE} chunks). Dropping oldest chunks.`)
-        audioQueue = audioQueue.slice(-MAX_QUEUE_SIZE / 2)
+        console.log(
+          `⚠️ Audio queue full (${MAX_QUEUE_SIZE} chunks). Sending current queue to Deepgram and skipping new chunk.`,
+        )
+        await processAudioQueue()
+        audioQueue = []
+        return
       }
 
       audioQueue.push(audioData)
+      console.log(`🎵 Audio queued: ${audioData.length} bytes, current queue size: ${audioQueue.length}`)
 
       if (!isProcessingQueue) {
         processAudioQueue()
       }
     }
 
-    // Deepgram connection
     const connectToDeepgram = async (options = {}) => {
       return new Promise((resolve, reject) => {
         try {
           console.log("🎙️ Connecting to Deepgram STT service...")
-    
+
           if (!process.env.DEEPGRAM_API_KEY) {
             const error = "STT API key not configured"
             console.log("❌", error)
             reject(new Error(error))
             return
           }
-    
+
           const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
           deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
@@ -576,18 +463,18 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("diarize", "false")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("endpointing", "300")
-          deepgramUrl.searchParams.append("vad_events", "true") // Enable voice activity detection events
-    
+
           deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", process.env.DEEPGRAM_API_KEY])
+
           deepgramWs.binaryType = "arraybuffer"
-    
+
           const connectionTimeout = setTimeout(() => {
             if (deepgramWs) {
               deepgramWs.close()
             }
             reject(new Error("STT connection timeout"))
           }, 15000)
-    
+
           deepgramWs.onopen = () => {
             clearTimeout(connectionTimeout)
             deepgramReady = true
@@ -595,83 +482,33 @@ const setupUnifiedVoiceServer = (wss) => {
             reconnectAttempts = 0
             reconnectDelay = 1000
             console.log("✅ Deepgram STT connection established")
-    
-            // Send a keepalive message
-            const keepAliveInterval = setInterval(() => {
-              if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-                try {
-                  deepgramWs.send(JSON.stringify({ type: "KeepAlive" }))
-                } catch (error) {
-                  console.log("⚠️ Failed to send keepalive:", error.message)
-                  clearInterval(keepAliveInterval)
-                }
-              } else {
-                clearInterval(keepAliveInterval)
-              }
-            }, 30000) // Send keepalive every 30 seconds
-    
-            // Store the interval reference to clear it later
-            deepgramWs.keepAliveInterval = keepAliveInterval
-    
+
             if (audioQueue.length > 0) {
               console.log(`🎵 Processing ${audioQueue.length} queued audio chunks`)
               processAudioQueue()
             }
-    
+
             resolve()
           }
-    
-          // Your existing onmessage handler here...
+
           deepgramWs.onmessage = async (event) => {
             try {
               const rawData = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString()
               const data = JSON.parse(rawData)
-    
+
               if (data.type === "Results") {
                 if (data.channel?.alternatives?.[0]?.transcript) {
                   const transcript = data.channel.alternatives[0].transcript
                   const confidence = data.channel.alternatives[0].confidence
                   const is_final = data.is_final
-    
+
                   if (transcript.trim()) {
-                    if (is_final) {
-                      currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
-                      console.log("📝 Final Transcript:", currentTranscript)
-                      
-                      emptyAudioCount = 0
-                      isSpeaking = false
-                      
-                      // Start silence detection timer
-                      if (silenceTimer) {
-                        clearTimeout(silenceTimer)
-                      }
-                      
-                      silenceTimer = setTimeout(() => {
-                        if (currentTranscript.trim()) {
-                          console.log("🔇 Silence timeout reached, sending to Gemini:", currentTranscript)
-                          
-                          geminiQueue.push(currentTranscript.trim())
-                          
-                          if (!isProcessingGemini) {
-                            processGeminiQueue()
-                          }
-                          
-                          currentTranscript = ""
-                          emptyAudioCount = 0
-                        }
-                      }, 2000)
-                      
-                    } else {
-                      console.log("📝 Interim Transcript:", transcript)
-                      isSpeaking = true
-                      emptyAudioCount = 0
-                      
-                      if (silenceTimer) {
-                        clearTimeout(silenceTimer)
-                        silenceTimer = null
-                      }
-                    }
-    
+                    currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
+                    emptyAudioCount = 0
+                    isSpeaking = true
+                    // Display the text from Deepgram in console log
+                    console.log("📝 Deepgram Transcript:", currentTranscript)
+
                     if (ws.readyState === WebSocket.OPEN) {
                       ws.send(
                         JSON.stringify({
@@ -686,20 +523,10 @@ const setupUnifiedVoiceServer = (wss) => {
                     }
                   } else if (is_final) {
                     emptyAudioCount++
-                    console.log(`🔇 Empty final result (${emptyAudioCount}/3)`)
-                    
-                    if (emptyAudioCount >= 3 && currentTranscript.trim()) {
-                      console.log("🔇 Empty result threshold reached, triggering Gemini")
-                      
-                      geminiQueue.push(currentTranscript.trim())
-                      
-                      if (!isProcessingGemini) {
-                        processGeminiQueue()
-                      }
-                      
-                      currentTranscript = ""
-                      emptyAudioCount = 0
+                    if (isSpeaking && emptyAudioCount >= SILENCE_THRESHOLD) {
+                      console.log(`🔇 Silence detected (${SILENCE_THRESHOLD} empty chunks). Triggering TTS.`)
                       isSpeaking = false
+                      await processUserUtterance()
                     }
                   }
                 }
@@ -707,73 +534,52 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log("🎙️ STT: Speech started detected")
                 isSpeaking = true
                 emptyAudioCount = 0
-                
-                if (silenceTimer) {
-                  clearTimeout(silenceTimer)
-                  silenceTimer = null
-                }
               } else if (data.type === "UtteranceEnd") {
-                console.log("🎙️ STT: Utterance end detected")
-                isSpeaking = false
-                
-                if (silenceTimer) {
-                  clearTimeout(silenceTimer)
+                console.log("🎙️ STT: Utterance end detected. Triggering TTS.")
+                if (isSpeaking) {
+                  isSpeaking = false
+                  await processUserUtterance()
                 }
-                
-                silenceTimer = setTimeout(() => {
-                  if (currentTranscript.trim()) {
-                    console.log("🔇 Utterance end timeout, sending to Gemini:", currentTranscript)
-                    
-                    geminiQueue.push(currentTranscript.trim())
-                    
-                    if (!isProcessingGemini) {
-                      processGeminiQueue()
-                    }
-                    
-                    currentTranscript = ""
-                    emptyAudioCount = 0
-                  }
-                }, 1500)
               }
             } catch (parseError) {
               console.log("❌ Error parsing STT response:", parseError.message)
             }
           }
-    
+
           deepgramWs.onerror = (error) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
             console.log("❌ Deepgram STT error:", error.message)
+
+            if (error.message && error.message.includes("429")) {
+              console.log("⚠️ Rate limit exceeded for STT service")
+            }
             reject(error)
           }
-    
+
           deepgramWs.onclose = (event) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
-            
-            // Clear keepalive interval
-            if (deepgramWs.keepAliveInterval) {
-              clearInterval(deepgramWs.keepAliveInterval)
-            }
-            
             console.log(`🎙️ STT connection closed: ${event.code} - ${event.reason}`)
-    
-            // Only attempt reconnection for certain close codes
-            if ([1006, 1011, 1013].includes(event.code) && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+
+            if (event.code === 1006 || event.code === 1011 || event.reason.includes("429")) {
               console.log("🔄 Attempting to reconnect to STT service...")
-              reconnectAttempts++
-              const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
-              console.log(`⏳ Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
-    
-              setTimeout(() => {
-                connectToDeepgram(options).catch((err) => {
-                  console.log("❌ STT reconnection failed:", err.message)
-                })
-              }, delay)
-            } else {
-              console.log("❌ STT connection closed permanently")
+
+              if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+                reconnectAttempts++
+                const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
+                console.log(`⏳ Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
+
+                setTimeout(() => {
+                  connectToDeepgram(options).catch((err) => {
+                    console.log("❌ STT reconnection failed:", err.message)
+                  })
+                }, delay)
+              } else {
+                console.log("❌ Max STT reconnection attempts reached")
+              }
             }
           }
         } catch (error) {
@@ -790,11 +596,6 @@ const setupUnifiedVoiceServer = (wss) => {
       audioQueue = []
       isProcessingQueue = false
 
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-        silenceTimer = null
-      }
-
       if (deepgramWs) {
         try {
           deepgramWs.close(1000, "Client closing")
@@ -805,7 +606,6 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // TTS with LMNT
     const synthesizeWithLMNT = async (text, options = {}) => {
       console.log("🔊 TTS: Starting synthesis for text:", text.substring(0, 100) + "...")
 
@@ -982,90 +782,198 @@ const setupUnifiedVoiceServer = (wss) => {
       return Buffer.concat([header, audioBuffer])
     }
 
-    // WebSocket message handling
-    ws.on("message", async (message) => {
-  try {
-    let isTextMessage = false
-    let data = null
+    const processUserUtterance = async () => {
+      if (currentTranscript.trim()) {
+        console.log("🧠 Processing user utterance:", currentTranscript)
+        const responseText = `You said: "${currentTranscript}". How can I help you further?`
+        try {
+          const synthesisOptions = {
+            voice: "lily",
+            language: language === "en" ? "en" : "hi",
+            speed: 1.0,
+          }
+          const audioData = await synthesizeWithErrorHandling(responseText, synthesisOptions)
 
-    if (typeof message === "string") {
-      isTextMessage = true
-      try {
-        data = JSON.parse(message)
-      } catch (parseError) {
-        console.log("❌ Failed to parse JSON:", parseError.message)
-        return
-      }
-    } else if (message instanceof Buffer) {
-      try {
-        const messageStr = message.toString("utf8")
-        if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
-          data = JSON.parse(messageStr)
-          isTextMessage = true
-        } else {
-          isTextMessage = false
+          if (!audioData || audioData.length === 0) {
+            throw new Error("Received empty audio data from TTS for response")
+          }
+
+          const audioBuffer = Buffer.from(audioData)
+          const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+          const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
+          audioChunkCount++
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: audioChunkCount,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: 8000,
+              channels: 1,
+              sample_width: 2,
+            },
+          }
+
+          console.log("📤 Sending synthesized response audio back to SIP client.")
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(audioResponse))
+            console.log("✅ Synthesized response audio sent!")
+          }
+        } catch (error) {
+          console.log("❌ Failed to synthesize and send response audio:", error.message)
         }
-      } catch (parseError) {
-        isTextMessage = false
+      } else {
+        console.log("🤷 No transcript to process for TTS response.")
       }
+      currentTranscript = ""
+      emptyAudioCount = 0
+      isSpeaking = false
+      console.log("📝 Transcript and state reset for next utterance.")
     }
 
-    if (isTextMessage && data) {
-      // Handle text messages (existing code)
-      if (data.event === "start" && data.session_id) {
-        sessionId = data.session_id
-        audioChunkCount = 0
-        currentTranscript = ""
-        emptyAudioCount = 0
-        isSpeaking = false
-        console.log("✅ SIP Call Started with UUID:", sessionId)
+    ws.on("message", async (message) => {
+      try {
+        let isTextMessage = false
+        let data = null
 
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "session_started",
-              session_id: sessionId,
-              language: language,
-              message: "SIP call started, connecting to STT and sending greeting.",
-            }),
-          )
-        }
-
-        if (!deepgramConnected) {
+        if (typeof message === "string") {
+          isTextMessage = true
+          logSipData(message, "TEXT_MESSAGE")
           try {
-            await connectToDeepgram({
-              language: language,
-              model: "nova-2",
-              punctuate: true,
-              diarize: false,
-              tier: "enhanced",
-            })
-          } catch (error) {
-            console.log("❌ Failed to initialize Deepgram:", error.message)
+            data = JSON.parse(message)
+          } catch (parseError) {
+            console.log("❌ Failed to parse JSON:", parseError.message)
+            return
+          }
+        } else if (message instanceof Buffer) {
+          try {
+            const messageStr = message.toString("utf8")
+            if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
+              data = JSON.parse(messageStr)
+              isTextMessage = true
+              logSipData(messageStr, "JSON_BUFFER")
+            } else {
+              isTextMessage = false
+              logSipData(message, "BINARY_AUDIO")
+            }
+          } catch (parseError) {
+            isTextMessage = false
+            logSipData(message, "BINARY_AUDIO")
           }
         }
 
-        setTimeout(() => {
-          sendGreeting()
-        }, 500)
-      } else if (data.type === "synthesize") {
-            console.log("🔊 TTS synthesis request received")
+        if (isTextMessage && data) {
+          if (data.event === "start" && data.session_id) {
+            sessionId = data.session_id
+            audioChunkCount = 0
+            currentTranscript = ""
+            emptyAudioCount = 0
+            isSpeaking = false
+            console.log("✅ SIP Call Started with UUID:", sessionId)
+            console.log("Source:", data.Source, "Destination:", data.Destination)
 
-            sipAudioQueue.push({
-              text: data.text,
-              type: "response",
-              voice: data.voice,
-              language: data.language,
-              speed: data.speed,
-            })
-
-            if (!isProcessingSipAudio) {
-              processSipAudioQueue()
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  type: "session_started",
+                  session_id: sessionId,
+                  language: language,
+                  message: "SIP call started, connecting to STT and sending greeting.",
+                }),
+              )
+              console.log("📤 Session started confirmation sent with SIP session ID")
             }
-          } else if (data.type === "start_stt") {
-            console.log("🎙️ STT service start requested")
 
             if (!deepgramConnected) {
+              console.log("🎙️ Connecting to Deepgram for STT after SIP start...")
+              try {
+                await connectToDeepgram({
+                  language: language,
+                  model: "nova-2",
+                  punctuate: true,
+                  diarize: false,
+                  tier: "enhanced",
+                })
+                console.log("✅ Deepgram connection established for STT after SIP start.")
+
+                if (audioBuffer.length > 0) {
+                  console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
+                  for (const audioData of audioBuffer) {
+                    const pcmAudio = await convertToPCM(audioData)
+                    queueAudioData(pcmAudio)
+                  }
+                  audioBuffer = []
+                }
+              } catch (error) {
+                console.log("❌ Failed to initialize Deepgram after SIP start:", error.message)
+              }
+            } else {
+              console.log("✅ Deepgram already connected for STT.")
+            }
+
+            setTimeout(() => {
+              console.log("👋 Sending initial greeting after SIP start...")
+              sendGreeting()
+            }, 500)
+          } else if (data.type === "synthesize") {
+            console.log("🔊 TTS synthesis request received")
+            console.log("📝 Text to synthesize:", data.text)
+
+            if (data.session_id) {
+              sessionId = data.session_id
+              console.log("🆔 Using SIP-provided session ID for TTS:", sessionId)
+            }
+
+            try {
+              const synthesisOptions = {
+                voice: data.voice || "lily",
+                language: data.language || language,
+                speed: data.speed || 1.0,
+              }
+
+              const audioData = await synthesizeWithErrorHandling(data.text, synthesisOptions)
+
+              if (!audioData || audioData.length === 0) {
+                throw new Error("Received empty audio data from TTS")
+              }
+
+              console.log("✅ TTS: Successfully received audio data, size:", audioData.length, "bytes")
+
+              const audioBuffer = Buffer.from(audioData)
+              const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+              const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
+              audioChunkCount++
+              const audioResponse = {
+                data: {
+                  session_id: sessionId,
+                  count: audioChunkCount,
+                  audio_bytes_to_play: pythonBytesString,
+                  sample_rate: 8000,
+                  channels: 1,
+                  sample_width: 2,
+                },
+              }
+
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(audioResponse))
+                console.log("✅ Synthesized audio sent with SIP session ID!")
+              } else {
+                console.log("❌ WebSocket not open, cannot send audio")
+              }
+            } catch (error) {
+              console.log("❌ TTS synthesis failed:", error.message)
+            }
+          } else if (data.type === "start_stt") {
+            console.log("🎙️ STT service start requested (explicitly)")
+
+            if (data.session_id) {
+              sessionId = data.session_id
+              console.log("🆔 Using SIP-provided session ID:", sessionId)
+            }
+
+            if (!deepgramConnected) {
+              console.log("🎙️ Connecting to Deepgram for STT...")
               try {
                 await connectToDeepgram({
                   language: data.language || language,
@@ -1074,40 +982,95 @@ const setupUnifiedVoiceServer = (wss) => {
                   diarize: false,
                   tier: "enhanced",
                 })
+                console.log("✅ Deepgram connection established for STT")
+
+                if (audioBuffer.length > 0) {
+                  console.log(`🎵 Processing ${audioBuffer.length} buffered audio chunks`)
+                  for (const audioData of audioBuffer) {
+                    const pcmAudio = await convertToPCM(audioData)
+                    queueAudioData(pcmAudio)
+                  }
+                  audioBuffer = []
+                }
+
+                if (ws.readyState === WebSocket.OPEN) {
+                  ws.send(
+                    JSON.stringify({
+                      type: "stt_started",
+                      session_id: sessionId,
+                      message: "Speech-to-text service activated",
+                    }),
+                  )
+                }
               } catch (error) {
                 console.log("❌ Failed to initialize Deepgram:", error.message)
+              }
+            } else {
+              console.log("✅ Deepgram already connected")
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(
+                  JSON.stringify({
+                    type: "stt_ready",
+                    session_id: sessionId,
+                    message: "Speech-to-text service already active",
+                  }),
+                )
               }
             }
           } else if (data.type === "stop_stt") {
             console.log("🎙️ STT service stop requested")
             closeDeepgram()
+
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  type: "stt_stopped",
+                  session_id: sessionId,
+                  message: "Speech-to-text service deactivated",
+                }),
+              )
+            }
           } else if (data.data && data.data.hangup === "true") {
             console.log(`📞 Hangup request received for session_id: ${data.data.session_id}`)
             ws.close(1000, "Hangup requested by Voicebot")
           } else if (data.data && data.data.stream_stop === "true") {
             console.log(`🛑 Stream stop request received for session_id: ${data.data.session_id}`)
             closeDeepgram()
+          } else {
+            console.log("❓ Unknown message type or missing required fields:", data.type || data.event, data)
           }
         } else {
-      // Handle binary audio data
-      sipDataReceived++
-      console.log(`🎵 Received audio data: ${message.length} bytes (total: ${sipDataReceived})`)
-      
-      const pcmAudio = await convertToPCM(message)
-      const hasVoice = detectVoiceActivity(pcmAudio)
+          const pcmAudio = await convertToPCM(message)
 
-      saveAudioChunk(pcmAudio, hasVoice)
+          const hasVoice = detectVoiceActivity(pcmAudio)
 
-      if (deepgramConnected && deepgramReady) {
-        queueAudioData(pcmAudio)
-      } else {
-        console.log("⚠️ Deepgram not ready, audio queued:", audioQueue.length)
+          saveAudioChunk(pcmAudio, hasVoice)
+
+          if (audioFiles.length >= MAX_AUDIO_FILES) {
+            await processAccumulatedAudio()
+          }
+
+          if (hasVoice) {
+            if (deepgramConnected && deepgramReady) {
+              queueAudioData(pcmAudio)
+            } else {
+              audioBuffer.push(pcmAudio)
+
+              if (audioBuffer.length > MAX_BUFFER_SIZE) {
+                audioBuffer.shift()
+                console.log(
+                  `⚠️ Audio buffer overflow, removed oldest chunk (before STT connected). Current size: ${audioBuffer.length}`,
+                )
+              }
+            }
+          } else {
+            console.log("🔇 Skipping silent audio chunk for Deepgram.")
+          }
+        }
+      } catch (error) {
+        console.log("❌ Error processing message:", error.message)
       }
-    }
-  } catch (error) {
-    console.log("❌ Error processing message:", error.message)
-  }
-})
+    })
 
     ws.on("close", () => {
       console.log("🔗 Unified voice connection closed")
@@ -1121,15 +1084,16 @@ const setupUnifiedVoiceServer = (wss) => {
         for (const file of files) {
           fs.unlinkSync(path.join(AUDIO_FILES_DIR, file))
         }
+        console.log(`🧹 Cleaned up ${files.length} audio files`)
       } catch (error) {
         console.log("⚠️ Failed to clean up audio files:", error.message)
       }
 
       closeDeepgram()
 
-      // Reset all state
       sessionId = null
       audioChunkCount = 0
+      audioBuffer = []
       audioQueue = []
       deepgramReady = false
       deepgramConnected = false
@@ -1141,21 +1105,13 @@ const setupUnifiedVoiceServer = (wss) => {
       isSpeaking = false
       audioFiles = []
       audioFileIndex = 0
-      geminiQueue = []
-      isProcessingGemini = false
-      sipAudioQueue = []
-      isProcessingSipAudio = false
-      conversationHistory = []
-
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-        silenceTimer = null
-      }
     })
 
     ws.on("error", (error) => {
       console.log("❌ WebSocket connection error:", error.message)
     })
+
+    console.log("✅ WebSocket connection confirmed, waiting for SIP 'start' event.")
   })
 }
 
