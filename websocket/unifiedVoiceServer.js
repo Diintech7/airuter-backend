@@ -213,7 +213,17 @@ const setupUnifiedVoiceServer = (wss) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
-            console.log("❌ Deepgram connection error:", error.message)
+            console.log("❌ Deepgram connection error:")
+            console.log(`   - Message: ${error.message}`)
+            if (error.code) console.log(`   - Error Code: ${error.code}`)
+            if (error.reason) console.log(`   - Reason: ${error.reason}`)
+            if (error.target && error.target.readyState === WebSocket.CLOSED) {
+              console.log(`   - WebSocket State: CLOSED`)
+            }
+            // Attempt to log more specific error details if available (e.g., from a server response)
+            if (error.target && error.target.response) {
+              console.log(`   - Server Response: ${error.target.response}`)
+            }
             reject(error)
           }
 
@@ -803,6 +813,7 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         } else {
           // Handle audio data - send to persistent Deepgram connection
+          console.log(`Received audio buffer size: ${message.length} bytes`)
           if (deepgramConnected && deepgramReady) {
             const now = Date.now()
             if (now - lastAudioSent >= SEND_INTERVAL) {
