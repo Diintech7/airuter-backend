@@ -452,53 +452,89 @@ const setupUnifiedVoiceServer = (wss) => {
       if (isProcessingQueue || audioQueue.length === 0) {
         return
       }
-
+    
       isProcessingQueue = true
-
-      while (audioQueue.length > 0 && deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+      console.log(`🎵 Processing audio queue: ${audioQueue.length} items`)
+    
+      while (audioQueue.length > 0) {
+        // Check if Deepgram connection is still valid
+        if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
+          console.log("⚠️ Deepgram not ready, pausing queue processing")
+          break
+        }
+    
         const now = Date.now()
         const timeSinceLastSend = now - lastSentTime
-
+    
         if (timeSinceLastSend < MIN_SEND_INTERVAL) {
           const waitTime = MIN_SEND_INTERVAL - timeSinceLastSend
           await new Promise((resolve) => setTimeout(resolve, waitTime))
         }
-
+    
         const audioData = audioQueue.shift()
         const success = await sendAudioToDeepgramThrottled(audioData)
-
+    
         if (!success) {
+          // Put the audio back at the front of the queue
           audioQueue.unshift(audioData)
-          console.log("⚠️ Failed to send audio to Deepgram, re-queueing and pausing processing.")
+          console.log("⚠️ Failed to send audio to Deepgram, re-queueing")
           break
         }
-
+    
         lastSentTime = Date.now()
-        await new Promise((resolve) => setTimeout(resolve, 50))
+        
+        // Small delay to prevent overwhelming the service
+        await new Promise((resolve) => setTimeout(resolve, 25))
       }
-
+    
       isProcessingQueue = false
-
-      if (audioQueue.length > 0) {
+    
+      // If there are still items in the queue and we're connected, try again
+      if (audioQueue.length > 0 && deepgramReady && deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
         setTimeout(processAudioQueue, MIN_SEND_INTERVAL)
       }
     }
 
     const sendAudioToDeepgramThrottled = async (audioData) => {
-      if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
+      if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN) {
+        console.log("❌ Deepgram not ready:", {
+          exists: !!deepgramWs,
+          readyState: deepgramWs?.readyState,
+          deepgramReady,
+          deepgramConnected
+        })
         return false
       }
-
+    
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
+        
+        // Add size check
+        if (buffer.length === 0) {
+          console.log("⚠️ Empty audio buffer, skipping")
+          return true // Don't treat as error
+        }
+    
         deepgramWs.send(buffer)
+        console.log(`✅ Audio sent to Deepgram: ${buffer.length} bytes`)
         return true
       } catch (error) {
         console.log("❌ Error sending audio to Deepgram:", error.message)
-        if (error.message.includes("429") || error.message.includes("rate limit")) {
-          console.log("⏳ Rate limit detected, backing off...")
-          await new Promise((resolve) => setTimeout(resolve, 2000))
+        
+        // Check if connection is still valid
+        if (deepgramWs && deepgramWs.readyState !== WebSocket.OPEN) {
+          console.log("🔄 Deepgram connection lost, attempting reconnect...")
+          deepgramReady = false
+          deepgramConnected = false
+          
+          // Attempt reconnection
+          setTimeout(() => {
+            connectToDeepgram({ language, model: "nova-2" }).catch(err => {
+              console.log("❌ Reconnection failed:", err.message)
+            })
+          }, 1000)
         }
+        
         return false
       }
     }
@@ -521,14 +557,14 @@ const setupUnifiedVoiceServer = (wss) => {
       return new Promise((resolve, reject) => {
         try {
           console.log("🎙️ Connecting to Deepgram STT service...")
-
+    
           if (!process.env.DEEPGRAM_API_KEY) {
             const error = "STT API key not configured"
             console.log("❌", error)
             reject(new Error(error))
             return
           }
-
+    
           const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
           deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
@@ -540,17 +576,18 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("diarize", "false")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("endpointing", "300")
-
+          deepgramUrl.searchParams.append("vad_events", "true") // Enable voice activity detection events
+    
           deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", process.env.DEEPGRAM_API_KEY])
           deepgramWs.binaryType = "arraybuffer"
-
+    
           const connectionTimeout = setTimeout(() => {
             if (deepgramWs) {
               deepgramWs.close()
             }
             reject(new Error("STT connection timeout"))
           }, 15000)
-
+    
           deepgramWs.onopen = () => {
             clearTimeout(connectionTimeout)
             deepgramReady = true
@@ -558,176 +595,151 @@ const setupUnifiedVoiceServer = (wss) => {
             reconnectAttempts = 0
             reconnectDelay = 1000
             console.log("✅ Deepgram STT connection established")
-
+    
+            // Send a keepalive message
+            const keepAliveInterval = setInterval(() => {
+              if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+                try {
+                  deepgramWs.send(JSON.stringify({ type: "KeepAlive" }))
+                } catch (error) {
+                  console.log("⚠️ Failed to send keepalive:", error.message)
+                  clearInterval(keepAliveInterval)
+                }
+              } else {
+                clearInterval(keepAliveInterval)
+              }
+            }, 30000) // Send keepalive every 30 seconds
+    
+            // Store the interval reference to clear it later
+            deepgramWs.keepAliveInterval = keepAliveInterval
+    
             if (audioQueue.length > 0) {
               console.log(`🎵 Processing ${audioQueue.length} queued audio chunks`)
               processAudioQueue()
             }
-
+    
             resolve()
           }
-
-          // Replace the onmessage handler in your Deepgram connection with this improved version
-
-deepgramWs.onmessage = async (event) => {
-  try {
-    const rawData = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString()
-    const data = JSON.parse(rawData)
-
-    if (data.type === "Results") {
-      if (data.channel?.alternatives?.[0]?.transcript) {
-        const transcript = data.channel.alternatives[0].transcript
-        const confidence = data.channel.alternatives[0].confidence
-        const is_final = data.is_final
-
-        if (transcript.trim()) {
-          if (is_final) {
-            // Add to current transcript
-            currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
-            console.log("📝 Final Transcript:", currentTranscript)
-            
-            // Reset counters when we get actual speech
-            emptyAudioCount = 0
-            isSpeaking = false
-            
-            // Start silence detection timer
-            if (silenceTimer) {
-              clearTimeout(silenceTimer)
-            }
-            
-            // Set a shorter timeout for better responsiveness
-            silenceTimer = setTimeout(() => {
-              if (currentTranscript.trim()) {
-                console.log("🔇 Silence timeout reached, sending to Gemini:", currentTranscript)
+    
+          // Your existing onmessage handler here...
+          deepgramWs.onmessage = async (event) => {
+            try {
+              const rawData = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString()
+              const data = JSON.parse(rawData)
+    
+              if (data.type === "Results") {
+                if (data.channel?.alternatives?.[0]?.transcript) {
+                  const transcript = data.channel.alternatives[0].transcript
+                  const confidence = data.channel.alternatives[0].confidence
+                  const is_final = data.is_final
+    
+                  if (transcript.trim()) {
+                    if (is_final) {
+                      currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
+                      console.log("📝 Final Transcript:", currentTranscript)
+                      
+                      emptyAudioCount = 0
+                      isSpeaking = false
+                      
+                      // Start silence detection timer
+                      if (silenceTimer) {
+                        clearTimeout(silenceTimer)
+                      }
+                      
+                      silenceTimer = setTimeout(() => {
+                        if (currentTranscript.trim()) {
+                          console.log("🔇 Silence timeout reached, sending to Gemini:", currentTranscript)
+                          
+                          geminiQueue.push(currentTranscript.trim())
+                          
+                          if (!isProcessingGemini) {
+                            processGeminiQueue()
+                          }
+                          
+                          currentTranscript = ""
+                          emptyAudioCount = 0
+                        }
+                      }, 2000)
+                      
+                    } else {
+                      console.log("📝 Interim Transcript:", transcript)
+                      isSpeaking = true
+                      emptyAudioCount = 0
+                      
+                      if (silenceTimer) {
+                        clearTimeout(silenceTimer)
+                        silenceTimer = null
+                      }
+                    }
+    
+                    if (ws.readyState === WebSocket.OPEN) {
+                      ws.send(
+                        JSON.stringify({
+                          type: "transcript",
+                          data: transcript,
+                          confidence: confidence,
+                          is_final: is_final,
+                          language: language,
+                          accumulated: currentTranscript,
+                        }),
+                      )
+                    }
+                  } else if (is_final) {
+                    emptyAudioCount++
+                    console.log(`🔇 Empty final result (${emptyAudioCount}/3)`)
+                    
+                    if (emptyAudioCount >= 3 && currentTranscript.trim()) {
+                      console.log("🔇 Empty result threshold reached, triggering Gemini")
+                      
+                      geminiQueue.push(currentTranscript.trim())
+                      
+                      if (!isProcessingGemini) {
+                        processGeminiQueue()
+                      }
+                      
+                      currentTranscript = ""
+                      emptyAudioCount = 0
+                      isSpeaking = false
+                    }
+                  }
+                }
+              } else if (data.type === "SpeechStarted") {
+                console.log("🎙️ STT: Speech started detected")
+                isSpeaking = true
+                emptyAudioCount = 0
                 
-                // Add to Gemini queue
-                geminiQueue.push(currentTranscript.trim())
+                if (silenceTimer) {
+                  clearTimeout(silenceTimer)
+                  silenceTimer = null
+                }
+              } else if (data.type === "UtteranceEnd") {
+                console.log("🎙️ STT: Utterance end detected")
+                isSpeaking = false
                 
-                // Process Gemini queue
-                if (!isProcessingGemini) {
-                  processGeminiQueue()
+                if (silenceTimer) {
+                  clearTimeout(silenceTimer)
                 }
                 
-                // Reset state
-                currentTranscript = ""
-                emptyAudioCount = 0
+                silenceTimer = setTimeout(() => {
+                  if (currentTranscript.trim()) {
+                    console.log("🔇 Utterance end timeout, sending to Gemini:", currentTranscript)
+                    
+                    geminiQueue.push(currentTranscript.trim())
+                    
+                    if (!isProcessingGemini) {
+                      processGeminiQueue()
+                    }
+                    
+                    currentTranscript = ""
+                    emptyAudioCount = 0
+                  }
+                }, 1500)
               }
-            }, 2000) // Reduced from 8 empty results to 2 seconds
-            
-          } else {
-            // Interim result
-            console.log("📝 Interim Transcript:", transcript)
-            isSpeaking = true
-            emptyAudioCount = 0
-            
-            // Clear silence timer during active speech
-            if (silenceTimer) {
-              clearTimeout(silenceTimer)
-              silenceTimer = null
+            } catch (parseError) {
+              console.log("❌ Error parsing STT response:", parseError.message)
             }
           }
-
-          // Send transcript update to client
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: "transcript",
-                data: transcript,
-                confidence: confidence,
-                is_final: is_final,
-                language: language,
-                accumulated: currentTranscript,
-              }),
-            )
-          }
-        } else if (is_final) {
-          // Empty final result - increment counter
-          emptyAudioCount++
-          console.log(`🔇 Empty final result (${emptyAudioCount}/3)`) // Reduced threshold
-          
-          // Trigger Gemini after fewer empty results if we have transcript
-          if (emptyAudioCount >= 3 && currentTranscript.trim()) { // Reduced from 8 to 3
-            console.log("🔇 Empty result threshold reached, triggering Gemini")
-            
-            // Add to Gemini queue
-            geminiQueue.push(currentTranscript.trim())
-            
-            // Process Gemini queue
-            if (!isProcessingGemini) {
-              processGeminiQueue()
-            }
-            
-            // Reset state
-            currentTranscript = ""
-            emptyAudioCount = 0
-            isSpeaking = false
-          }
-        }
-      } else if (data.is_final) {
-        // No alternatives but final result
-        emptyAudioCount++
-        console.log(`🔇 Empty final result (no alternatives) (${emptyAudioCount}/3)`)
-        
-        if (emptyAudioCount >= 3 && currentTranscript.trim()) {
-          console.log("🔇 Empty result threshold reached, triggering Gemini")
-          
-          // Add to Gemini queue
-          geminiQueue.push(currentTranscript.trim())
-          
-          // Process Gemini queue
-          if (!isProcessingGemini) {
-            processGeminiQueue()
-          }
-          
-          // Reset state
-          currentTranscript = ""
-          emptyAudioCount = 0
-          isSpeaking = false
-        }
-      }
-    } else if (data.type === "SpeechStarted") {
-      console.log("🎙️ STT: Speech started detected")
-      isSpeaking = true
-      emptyAudioCount = 0
-      
-      // Clear silence timer when speech starts
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-        silenceTimer = null
-      }
-    } else if (data.type === "UtteranceEnd") {
-      console.log("🎙️ STT: Utterance end detected")
-      isSpeaking = false
-      
-      // Start silence detection timer when utterance ends
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-      }
-      
-      silenceTimer = setTimeout(() => {
-        if (currentTranscript.trim()) {
-          console.log("🔇 Utterance end timeout, sending to Gemini:", currentTranscript)
-          
-          // Add to Gemini queue
-          geminiQueue.push(currentTranscript.trim())
-          
-          // Process Gemini queue
-          if (!isProcessingGemini) {
-            processGeminiQueue()
-          }
-          
-          // Reset state
-          currentTranscript = ""
-          emptyAudioCount = 0
-        }
-      }, 1500) // 1.5 seconds after utterance end
-    }
-  } catch (parseError) {
-    console.log("❌ Error parsing STT response:", parseError.message)
-  }
-}
-
-
+    
           deepgramWs.onerror = (error) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
@@ -735,29 +747,33 @@ deepgramWs.onmessage = async (event) => {
             console.log("❌ Deepgram STT error:", error.message)
             reject(error)
           }
-
+    
           deepgramWs.onclose = (event) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
+            
+            // Clear keepalive interval
+            if (deepgramWs.keepAliveInterval) {
+              clearInterval(deepgramWs.keepAliveInterval)
+            }
+            
             console.log(`🎙️ STT connection closed: ${event.code} - ${event.reason}`)
-
-            if (event.code === 1006 || event.code === 1011) {
+    
+            // Only attempt reconnection for certain close codes
+            if ([1006, 1011, 1013].includes(event.code) && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
               console.log("🔄 Attempting to reconnect to STT service...")
-
-              if (reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-                reconnectAttempts++
-                const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
-                console.log(`⏳ Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
-
-                setTimeout(() => {
-                  connectToDeepgram(options).catch((err) => {
-                    console.log("❌ STT reconnection failed:", err.message)
-                  })
-                }, delay)
-              } else {
-                console.log("❌ Max STT reconnection attempts reached")
-              }
+              reconnectAttempts++
+              const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
+              console.log(`⏳ Reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
+    
+              setTimeout(() => {
+                connectToDeepgram(options).catch((err) => {
+                  console.log("❌ STT reconnection failed:", err.message)
+                })
+              }, delay)
+            } else {
+              console.log("❌ STT connection closed permanently")
             }
           }
         } catch (error) {
@@ -968,70 +984,71 @@ deepgramWs.onmessage = async (event) => {
 
     // WebSocket message handling
     ws.on("message", async (message) => {
-      try {
-        let isTextMessage = false
-        let data = null
+  try {
+    let isTextMessage = false
+    let data = null
 
-        if (typeof message === "string") {
+    if (typeof message === "string") {
+      isTextMessage = true
+      try {
+        data = JSON.parse(message)
+      } catch (parseError) {
+        console.log("❌ Failed to parse JSON:", parseError.message)
+        return
+      }
+    } else if (message instanceof Buffer) {
+      try {
+        const messageStr = message.toString("utf8")
+        if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
+          data = JSON.parse(messageStr)
           isTextMessage = true
+        } else {
+          isTextMessage = false
+        }
+      } catch (parseError) {
+        isTextMessage = false
+      }
+    }
+
+    if (isTextMessage && data) {
+      // Handle text messages (existing code)
+      if (data.event === "start" && data.session_id) {
+        sessionId = data.session_id
+        audioChunkCount = 0
+        currentTranscript = ""
+        emptyAudioCount = 0
+        isSpeaking = false
+        console.log("✅ SIP Call Started with UUID:", sessionId)
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "session_started",
+              session_id: sessionId,
+              language: language,
+              message: "SIP call started, connecting to STT and sending greeting.",
+            }),
+          )
+        }
+
+        if (!deepgramConnected) {
           try {
-            data = JSON.parse(message)
-          } catch (parseError) {
-            console.log("❌ Failed to parse JSON:", parseError.message)
-            return
-          }
-        } else if (message instanceof Buffer) {
-          try {
-            const messageStr = message.toString("utf8")
-            if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
-              data = JSON.parse(messageStr)
-              isTextMessage = true
-            } else {
-              isTextMessage = false
-            }
-          } catch (parseError) {
-            isTextMessage = false
+            await connectToDeepgram({
+              language: language,
+              model: "nova-2",
+              punctuate: true,
+              diarize: false,
+              tier: "enhanced",
+            })
+          } catch (error) {
+            console.log("❌ Failed to initialize Deepgram:", error.message)
           }
         }
 
-        if (isTextMessage && data) {
-          if (data.event === "start" && data.session_id) {
-            sessionId = data.session_id
-            audioChunkCount = 0
-            currentTranscript = ""
-            emptyAudioCount = 0
-            isSpeaking = false
-            console.log("✅ SIP Call Started with UUID:", sessionId)
-
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "session_started",
-                  session_id: sessionId,
-                  language: language,
-                  message: "SIP call started, connecting to STT and sending greeting.",
-                }),
-              )
-            }
-
-            if (!deepgramConnected) {
-              try {
-                await connectToDeepgram({
-                  language: language,
-                  model: "nova-2",
-                  punctuate: true,
-                  diarize: false,
-                  tier: "enhanced",
-                })
-              } catch (error) {
-                console.log("❌ Failed to initialize Deepgram:", error.message)
-              }
-            }
-
-            setTimeout(() => {
-              sendGreeting()
-            }, 500)
-          } else if (data.type === "synthesize") {
+        setTimeout(() => {
+          sendGreeting()
+        }, 500)
+      } else if (data.type === "synthesize") {
             console.log("🔊 TTS synthesis request received")
 
             sipAudioQueue.push({
@@ -1072,24 +1089,25 @@ deepgramWs.onmessage = async (event) => {
             closeDeepgram()
           }
         } else {
-          const pcmAudio = await convertToPCM(message)
-          // const hasVoice = detectVoiceActivity(pcmAudio)
+      // Handle binary audio data
+      sipDataReceived++
+      console.log(`🎵 Received audio data: ${message.length} bytes (total: ${sipDataReceived})`)
+      
+      const pcmAudio = await convertToPCM(message)
+      const hasVoice = detectVoiceActivity(pcmAudio)
 
-          saveAudioChunk(pcmAudio, false)
+      saveAudioChunk(pcmAudio, hasVoice)
 
-          // if (hasVoice) {
-          //   if (deepgramConnected && deepgramReady) {
-          //     queueAudioData(pcmAudio)
-          //   }
-          // }
-          if (deepgramConnected && deepgramReady) {
-            queueAudioData(pcmAudio)
-          }
-        }
-      } catch (error) {
-        console.log("❌ Error processing message:", error.message)
+      if (deepgramConnected && deepgramReady) {
+        queueAudioData(pcmAudio)
+      } else {
+        console.log("⚠️ Deepgram not ready, audio queued:", audioQueue.length)
       }
-    })
+    }
+  } catch (error) {
+    console.log("❌ Error processing message:", error.message)
+  }
+})
 
     ws.on("close", () => {
       console.log("🔗 Unified voice connection closed")
