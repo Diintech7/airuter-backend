@@ -68,7 +68,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let isProcessingGemini = false
     let currentTranscript = ""
     let emptyAudioCount = 0
-    const SILENCE_THRESHOLD_FOR_GEMINI = 8 // 1 second of silence (8 chunks at 125ms each)
+    const SILENCE_THRESHOLD_FOR_GEMINI = 3 // 1 second of silence (8 chunks at 125ms each)
     let isSpeaking = false
     let silenceTimer = null
     let conversationHistory = []
@@ -187,25 +187,27 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log("❌ Gemini API key not configured")
         return "I'm sorry, I'm not properly configured to respond right now."
       }
-
+    
       try {
-        console.log("🤖 Sending to Gemini:", userMessage)
-
+        console.log("🤖 Sending to Gemini API:", userMessage)
+    
         // Add user message to conversation history
         conversationHistory.push({
           role: "user",
           content: userMessage,
         })
-
+    
         // Keep only last 10 exchanges to manage context
         if (conversationHistory.length > 20) {
           conversationHistory = conversationHistory.slice(-20)
         }
-
-        const systemPrompt = `You are a helpful voice assistant. Keep your responses concise and conversational, as they will be converted to speech. Respond in ${language === "hi" ? "Hindi" : "English"}.`
-
+    
+        const systemPrompt = `You are a helpful voice assistant for Aitota. Keep your responses concise and conversational (1-2 sentences max), as they will be converted to speech. Respond in ${language === "hi" ? "Hindi" : "English"}.`
+    
         const messages = [{ role: "system", content: systemPrompt }, ...conversationHistory]
-
+        
+        console.log("🤖 Sending request to Gemini with messages:", messages.length)
+    
         const response = await fetch(
           `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiApiKey}`,
           {
@@ -226,64 +228,88 @@ const setupUnifiedVoiceServer = (wss) => {
             }),
           },
         )
-
+    
+        console.log("🤖 Gemini API response status:", response.status)
+    
         if (!response.ok) {
           const errorText = await response.text()
           console.log("❌ Gemini API error:", errorText)
           return "I'm sorry, I'm having trouble processing your request right now."
         }
-
+    
         const data = await response.json()
+        console.log("🤖 Gemini API response data:", JSON.stringify(data, null, 2))
+        
         const aiResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || "I'm sorry, I didn't understand that."
-
-        console.log("🤖 Gemini response:", aiResponse)
-
+    
+        console.log("🤖 Extracted Gemini response:", aiResponse)
+    
         // Add AI response to conversation history
         conversationHistory.push({
           role: "assistant",
           content: aiResponse,
         })
-
+    
         return aiResponse
       } catch (error) {
         console.log("❌ Error communicating with Gemini:", error.message)
+        console.log("❌ Error stack:", error.stack)
         return "I'm sorry, I'm having trouble processing your request right now."
       }
     }
 
     // Gemini Queue Processing
     const processGeminiQueue = async () => {
+      console.log("🤖 processGeminiQueue called:", {
+        isProcessingGemini,
+        queueLength: geminiQueue.length,
+        queue: geminiQueue
+      })
+      
       if (isProcessingGemini || geminiQueue.length === 0) {
+        console.log("🤖 Skipping Gemini processing:", {
+          isProcessingGemini,
+          queueLength: geminiQueue.length
+        })
         return
       }
-
+    
       isProcessingGemini = true
-
+      console.log("🤖 Starting Gemini processing...")
+    
       while (geminiQueue.length > 0) {
         const userMessage = geminiQueue.shift()
-
+        console.log("🤖 Processing message from queue:", userMessage)
+    
         try {
           const aiResponse = await sendToGemini(userMessage)
-
+          console.log("🤖 Got response from Gemini:", aiResponse)
+    
           // Add to SIP audio queue for speech synthesis
           sipAudioQueue.push({
             text: aiResponse,
             type: "response",
           })
-
+          
+          console.log("🤖 Added to SIP audio queue, queue length:", sipAudioQueue.length)
+    
           // Process SIP audio queue
           if (!isProcessingSipAudio) {
+            console.log("🤖 Starting SIP audio processing...")
             processSipAudioQueue()
+          } else {
+            console.log("🤖 SIP audio processing already in progress")
           }
         } catch (error) {
           console.log("❌ Error processing Gemini queue:", error.message)
         }
-
+    
         // Small delay between requests
         await new Promise((resolve) => setTimeout(resolve, 100))
       }
-
+    
       isProcessingGemini = false
+      console.log("🤖 Finished Gemini processing")
     }
 
     // SIP Audio Queue Processing
@@ -343,29 +369,29 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     // Silence Detection and Gemini Trigger
-    const handleSilenceDetection = () => {
-      if (silenceTimer) {
-        clearTimeout(silenceTimer)
-      }
+    // const handleSilenceDetection = () => {
+    //   if (silenceTimer) {
+    //     clearTimeout(silenceTimer)
+    //   }
 
-      silenceTimer = setTimeout(() => {
-        if (currentTranscript.trim() && !isSpeaking) {
-          console.log("🔇 Silence detected for 1 second, sending to Gemini")
+    //   silenceTimer = setTimeout(() => {
+    //     if (currentTranscript.trim() && !isSpeaking) {
+    //       console.log("🔇 Silence detected for 1 second, sending to Gemini")
 
-          // Add to Gemini queue
-          geminiQueue.push(currentTranscript.trim())
+    //       // Add to Gemini queue
+    //       geminiQueue.push(currentTranscript.trim())
 
-          // Process Gemini queue
-          if (!isProcessingGemini) {
-            processGeminiQueue()
-          }
+    //       // Process Gemini queue
+    //       if (!isProcessingGemini) {
+    //         processGeminiQueue()
+    //       }
 
-          // Reset transcript
-          currentTranscript = ""
-          emptyAudioCount = 0
-        }
-      }, 1000) // 1 second timeout
-    }
+    //       // Reset transcript
+    //       currentTranscript = ""
+    //       emptyAudioCount = 0
+    //     }
+    //   }, 1000) // 1 second timeout
+    // }
 
     // Utility functions
     const getGreetingMessage = (lang) => {
@@ -541,77 +567,166 @@ const setupUnifiedVoiceServer = (wss) => {
             resolve()
           }
 
-          deepgramWs.onmessage = async (event) => {
-            try {
-              const rawData = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString()
-              const data = JSON.parse(rawData)
+          // Replace the onmessage handler in your Deepgram connection with this improved version
 
-              if (data.type === "Results") {
-                if (data.channel?.alternatives?.[0]?.transcript) {
-                  const transcript = data.channel.alternatives[0].transcript
-                  const confidence = data.channel.alternatives[0].confidence
-                  const is_final = data.is_final
+deepgramWs.onmessage = async (event) => {
+  try {
+    const rawData = typeof event.data === "string" ? event.data : Buffer.from(event.data).toString()
+    const data = JSON.parse(rawData)
 
-                  if (transcript.trim()) {
-                    if (is_final) {
-                      currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
-                      console.log("📝 Final Transcript:", currentTranscript)
-                      isSpeaking = false
-                      emptyAudioCount = 0 // Reset empty audio count on speech
-                      handleSilenceDetection() // Restart silence timer on final speech
-                    } else {
-                      console.log("📝 Interim Transcript:", transcript)
-                      isSpeaking = true
-                      emptyAudioCount = 0 // Reset empty audio count on speech
-                      if (silenceTimer) {
-                        clearTimeout(silenceTimer) // Clear timer on interim speech
-                        silenceTimer = null
-                      }
-                    }
+    if (data.type === "Results") {
+      if (data.channel?.alternatives?.[0]?.transcript) {
+        const transcript = data.channel.alternatives[0].transcript
+        const confidence = data.channel.alternatives[0].confidence
+        const is_final = data.is_final
 
-                    if (ws.readyState === WebSocket.OPEN) {
-                      ws.send(
-                        JSON.stringify({
-                          type: "transcript",
-                          data: transcript,
-                          confidence: confidence,
-                          is_final: is_final,
-                          language: language,
-                          accumulated: currentTranscript,
-                        }),
-                      )
-                    }
-                  } else if (is_final) {
-                    // This block handles empty final transcripts, indicating silence
-                    emptyAudioCount++
-                    console.log(`🔇 Empty final result (${emptyAudioCount}/${SILENCE_THRESHOLD_FOR_GEMINI})`)
-                    // The handleSilenceDetection will manage the Gemini trigger based on overall silence
-                  }
-                } else if (data.is_final) {
-                  // This handles cases where there's no alternative/transcript but it's a final result
-                  emptyAudioCount++
-                  console.log(
-                    `🔇 Empty final result (no transcript) (${emptyAudioCount}/${SILENCE_THRESHOLD_FOR_GEMINI})`,
-                  )
-                  // The handleSilenceDetection will manage the Gemini trigger based on overall silence
+        if (transcript.trim()) {
+          if (is_final) {
+            // Add to current transcript
+            currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
+            console.log("📝 Final Transcript:", currentTranscript)
+            
+            // Reset counters when we get actual speech
+            emptyAudioCount = 0
+            isSpeaking = false
+            
+            // Start silence detection timer
+            if (silenceTimer) {
+              clearTimeout(silenceTimer)
+            }
+            
+            // Set a shorter timeout for better responsiveness
+            silenceTimer = setTimeout(() => {
+              if (currentTranscript.trim()) {
+                console.log("🔇 Silence timeout reached, sending to Gemini:", currentTranscript)
+                
+                // Add to Gemini queue
+                geminiQueue.push(currentTranscript.trim())
+                
+                // Process Gemini queue
+                if (!isProcessingGemini) {
+                  processGeminiQueue()
                 }
-              } else if (data.type === "SpeechStarted") {
-                console.log("🎙️ STT: Speech started detected")
-                isSpeaking = true
+                
+                // Reset state
+                currentTranscript = ""
                 emptyAudioCount = 0
-                if (silenceTimer) {
-                  clearTimeout(silenceTimer)
-                  silenceTimer = null
-                }
-              } else if (data.type === "UtteranceEnd") {
-                console.log("🎙️ STT: Utterance end detected")
-                isSpeaking = false
-                handleSilenceDetection() // Start silence detection after utterance ends
               }
-            } catch (parseError) {
-              console.log("❌ Error parsing STT response:", parseError.message)
+            }, 2000) // Reduced from 8 empty results to 2 seconds
+            
+          } else {
+            // Interim result
+            console.log("📝 Interim Transcript:", transcript)
+            isSpeaking = true
+            emptyAudioCount = 0
+            
+            // Clear silence timer during active speech
+            if (silenceTimer) {
+              clearTimeout(silenceTimer)
+              silenceTimer = null
             }
           }
+
+          // Send transcript update to client
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "transcript",
+                data: transcript,
+                confidence: confidence,
+                is_final: is_final,
+                language: language,
+                accumulated: currentTranscript,
+              }),
+            )
+          }
+        } else if (is_final) {
+          // Empty final result - increment counter
+          emptyAudioCount++
+          console.log(`🔇 Empty final result (${emptyAudioCount}/3)`) // Reduced threshold
+          
+          // Trigger Gemini after fewer empty results if we have transcript
+          if (emptyAudioCount >= 3 && currentTranscript.trim()) { // Reduced from 8 to 3
+            console.log("🔇 Empty result threshold reached, triggering Gemini")
+            
+            // Add to Gemini queue
+            geminiQueue.push(currentTranscript.trim())
+            
+            // Process Gemini queue
+            if (!isProcessingGemini) {
+              processGeminiQueue()
+            }
+            
+            // Reset state
+            currentTranscript = ""
+            emptyAudioCount = 0
+            isSpeaking = false
+          }
+        }
+      } else if (data.is_final) {
+        // No alternatives but final result
+        emptyAudioCount++
+        console.log(`🔇 Empty final result (no alternatives) (${emptyAudioCount}/3)`)
+        
+        if (emptyAudioCount >= 3 && currentTranscript.trim()) {
+          console.log("🔇 Empty result threshold reached, triggering Gemini")
+          
+          // Add to Gemini queue
+          geminiQueue.push(currentTranscript.trim())
+          
+          // Process Gemini queue
+          if (!isProcessingGemini) {
+            processGeminiQueue()
+          }
+          
+          // Reset state
+          currentTranscript = ""
+          emptyAudioCount = 0
+          isSpeaking = false
+        }
+      }
+    } else if (data.type === "SpeechStarted") {
+      console.log("🎙️ STT: Speech started detected")
+      isSpeaking = true
+      emptyAudioCount = 0
+      
+      // Clear silence timer when speech starts
+      if (silenceTimer) {
+        clearTimeout(silenceTimer)
+        silenceTimer = null
+      }
+    } else if (data.type === "UtteranceEnd") {
+      console.log("🎙️ STT: Utterance end detected")
+      isSpeaking = false
+      
+      // Start silence detection timer when utterance ends
+      if (silenceTimer) {
+        clearTimeout(silenceTimer)
+      }
+      
+      silenceTimer = setTimeout(() => {
+        if (currentTranscript.trim()) {
+          console.log("🔇 Utterance end timeout, sending to Gemini:", currentTranscript)
+          
+          // Add to Gemini queue
+          geminiQueue.push(currentTranscript.trim())
+          
+          // Process Gemini queue
+          if (!isProcessingGemini) {
+            processGeminiQueue()
+          }
+          
+          // Reset state
+          currentTranscript = ""
+          emptyAudioCount = 0
+        }
+      }, 1500) // 1.5 seconds after utterance end
+    }
+  } catch (parseError) {
+    console.log("❌ Error parsing STT response:", parseError.message)
+  }
+}
+
 
           deepgramWs.onerror = (error) => {
             clearTimeout(connectionTimeout)
@@ -958,12 +1073,17 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         } else {
           const pcmAudio = await convertToPCM(message)
-          // const hasVoice = detectVoiceActivity(pcmAudio) // Keep for potential future use if needed for local VAD
+          // const hasVoice = detectVoiceActivity(pcmAudio)
 
-          saveAudioChunk(pcmAudio, false) // Save all chunks, voice or not
+          saveAudioChunk(pcmAudio, false)
 
+          // if (hasVoice) {
+          //   if (deepgramConnected && deepgramReady) {
+          //     queueAudioData(pcmAudio)
+          //   }
+          // }
           if (deepgramConnected && deepgramReady) {
-            queueAudioData(pcmAudio) // Always send audio to Deepgram to keep connection alive
+            queueAudioData(pcmAudio)
           }
         }
       } catch (error) {

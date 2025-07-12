@@ -102,12 +102,7 @@ app.use((err, req, res, next) => {
   }
 })
 
-// Apply fileUpload middleware only to specific routes that handle file uploads
-// For example, if your file uploads are only to /api/upload, you'd do:
-// app.use('/api/upload', fileUpload({ ... }));
-// For now, we'll apply it to all /api routes, but you might want to be more specific.
 app.use(
-  "/api", // Apply only to routes starting with /api
   fileUpload({
     useTempFiles: true,
     tempFileDir: tempDir,
