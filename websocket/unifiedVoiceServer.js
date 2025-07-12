@@ -22,6 +22,15 @@ const setupUnifiedVoiceServer = (wss) => {
       origin: req.headers.origin,
     })
 
+    // Add after the existing console.log statements in the connection handler
+    console.log("🎙️ VAD Configuration:")
+    console.log("   - Speech Started events: ✅ Enabled")
+    console.log("   - Utterance End detection: ✅ Enabled")
+    console.log("   - Voice Activity Detection: ✅ Active")
+    console.log("   - Endpointing: 300ms")
+    console.log("   - VAD Turnoff: 700ms")
+    console.log("   - Utterance End: 1000ms")
+
     // Direct Deepgram connection variables
     let deepgramWs = null
     let deepgramReady = false
@@ -63,6 +72,17 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log(`   - LMNT TTS: ${lmntApiKey ? "✅ Yes" : "❌ NO"}`)
     console.log(`   - Gemini: ${geminiApiKey ? "✅ Yes" : "❌ NO"}`)
 
+    // VAD and speech detection state
+    let vadState = {
+      speechActive: false,
+      lastSpeechStarted: null,
+      lastUtteranceEnd: null,
+      speechDuration: 0,
+      silenceDuration: 0,
+      totalSpeechEvents: 0,
+      totalUtteranceEnds: 0,
+    }
+
     // Direct Deepgram Connection
     const connectToDeepgram = async () => {
       return new Promise((resolve, reject) => {
@@ -76,7 +96,7 @@ const setupUnifiedVoiceServer = (wss) => {
             return
           }
 
-          // Build Deepgram WebSocket URL with optimized parameters
+          // Build Deepgram WebSocket URL with optimized parameters including VAD
           const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
           deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
@@ -89,6 +109,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("endpointing", "300")
           deepgramUrl.searchParams.append("vad_turnoff", "700")
           deepgramUrl.searchParams.append("utterance_end_ms", "1000")
+          deepgramUrl.searchParams.append("vad_events", "true") // Enable VAD events for SpeechStarted
 
           deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", deepgramApiKey])
           deepgramWs.binaryType = "arraybuffer"
@@ -155,7 +176,7 @@ const setupUnifiedVoiceServer = (wss) => {
       })
     }
 
-    // Handle Deepgram responses
+    // Handle Deepgram responses with VAD events
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const channel = data.channel
@@ -213,15 +234,55 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         }
       } else if (data.type === "SpeechStarted") {
-        console.log("🎙️ Speech started detected")
+        console.log("🎙️ VAD: Speech started detected at timestamp:", data.timestamp)
+        console.log("🎙️ VAD: Channel info:", data.channel)
+
+        // Reset silence timer immediately when speech starts
         resetSilenceTimer()
         isSpeaking = true
+
+        // Send speech started event to client
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "speech_started",
+              timestamp: data.timestamp,
+              channel: data.channel,
+              session_id: sessionId,
+              message: "Speech activity detected by VAD",
+            }),
+          )
+        }
+
+        console.log("✅ VAD: Speech detection active, ready for transcription")
+        vadState.totalSpeechEvents++
       } else if (data.type === "UtteranceEnd") {
-        console.log("🎙️ Utterance end detected")
+        console.log("🎙️ VAD: Utterance end detected")
         if (isSpeaking) {
           isSpeaking = false
           startSilenceTimer()
+
+          // Send utterance end event to client
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(
+              JSON.stringify({
+                type: "utterance_end",
+                session_id: sessionId,
+                accumulated_transcript: currentTranscript,
+                message: "End of speech utterance detected",
+              }),
+            )
+          }
         }
+        vadState.totalUtteranceEnds++
+      } else if (data.type === "Metadata") {
+        console.log("📊 Deepgram Metadata:", {
+          request_id: data.request_id,
+          model_info: data.model_info,
+          model_uuid: data.model_uuid,
+        })
+      } else {
+        console.log("📡 Deepgram event:", data.type, data)
       }
     }
 
@@ -258,13 +319,20 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Silence detection and Gemini integration
+    // Update the silence detection logic to work with VAD events
     const startSilenceTimer = () => {
       if (silenceTimeout) {
         clearTimeout(silenceTimeout)
       }
 
+      vadState.lastUtteranceEnd = Date.now()
+
       silenceTimeout = setTimeout(() => {
+        vadState.silenceDuration = Date.now() - vadState.lastUtteranceEnd
+        console.log(`🔕 VAD: ${SILENCE_DURATION}ms silence detected, processing transcript...`)
+        console.log(
+          `📊 VAD Stats: Speech duration: ${vadState.speechDuration}ms, Silence: ${vadState.silenceDuration}ms`,
+        )
         handleSilenceDetected()
       }, SILENCE_DURATION)
     }
@@ -273,6 +341,15 @@ const setupUnifiedVoiceServer = (wss) => {
       if (silenceTimeout) {
         clearTimeout(silenceTimeout)
         silenceTimeout = null
+      }
+
+      if (!vadState.speechActive) {
+        vadState.lastSpeechStarted = Date.now()
+        vadState.speechActive = true
+      }
+
+      if (vadState.lastSpeechStarted) {
+        vadState.speechDuration = Date.now() - vadState.lastSpeechStarted
       }
     }
 
@@ -630,13 +707,18 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     })
 
-    // Connection cleanup
+    // Connection cleanup with VAD stats
     ws.on("close", () => {
       console.log("🔗 Unified voice connection closed")
       console.log("📊 Session statistics:")
       console.log(`   Session ID: ${sessionId || "Not set"}`)
       console.log(`   Audio chunks processed: ${audioChunkCount}`)
       console.log(`   Conversation history: ${fullConversationHistory.length} messages`)
+      console.log("📊 VAD Statistics:")
+      console.log(`   Speech events detected: ${vadState.totalSpeechEvents}`)
+      console.log(`   Utterance ends detected: ${vadState.totalUtteranceEnds}`)
+      console.log(`   Last speech duration: ${vadState.speechDuration}ms`)
+      console.log(`   Last silence duration: ${vadState.silenceDuration}ms`)
 
       // Cleanup
       if (deepgramWs) {
@@ -644,7 +726,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
       resetSilenceTimer()
 
-      // Reset all state
+      // Reset all state including VAD
       sessionId = null
       audioChunkCount = 0
       deepgramReady = false
@@ -653,6 +735,15 @@ const setupUnifiedVoiceServer = (wss) => {
       currentTranscript = ""
       isSpeaking = false
       fullConversationHistory = []
+      vadState = {
+        speechActive: false,
+        lastSpeechStarted: null,
+        lastUtteranceEnd: null,
+        speechDuration: 0,
+        silenceDuration: 0,
+        totalSpeechEvents: 0,
+        totalUtteranceEnds: 0,
+      }
     })
 
     ws.on("error", (error) => {
