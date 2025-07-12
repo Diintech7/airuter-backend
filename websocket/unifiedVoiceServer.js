@@ -84,22 +84,22 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     // Text Processing Queue Management
-    const addToTextQueue = (text, type = 'transcript') => {
+    const addToTextQueue = (text, type = "transcript") => {
       const queueItem = {
         id: Date.now() + Math.random(),
         text: text.trim(),
         type: type,
         timestamp: new Date().toISOString(),
-        processed: false
+        processed: false,
       }
-      
+
       textProcessingQueue.push(queueItem)
       console.log(`📝 [QUEUE] Added to text processing queue:`)
       console.log(`   - ID: ${queueItem.id}`)
       console.log(`   - Type: ${queueItem.type}`)
       console.log(`   - Text: "${queueItem.text}"`)
       console.log(`   - Queue Length: ${textProcessingQueue.length}`)
-      
+
       // Process queue if not already processing
       if (!isProcessingQueue) {
         processTextQueue()
@@ -116,7 +116,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
       while (textProcessingQueue.length > 0) {
         const queueItem = textProcessingQueue.shift()
-        
+
         try {
           console.log(`⚡ [QUEUE] Processing item:`)
           console.log(`   - ID: ${queueItem.id}`)
@@ -127,10 +127,10 @@ const setupUnifiedVoiceServer = (wss) => {
             // Send to Gemini
             console.log(`🤖 [GEMINI] Sending text to Gemini: "${queueItem.text}"`)
             const geminiResponse = await sendToGemini(queueItem.text)
-            
+
             if (geminiResponse) {
               console.log(`✅ [GEMINI] Received response: "${geminiResponse}"`)
-              
+
               // Send to LMNT for voice synthesis
               console.log(`🔊 [LMNT] Sending to voice synthesis: "${geminiResponse}"`)
               await synthesizeAndSendResponse(geminiResponse)
@@ -142,7 +142,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
           queueItem.processed = true
           console.log(`✅ [QUEUE] Item processed successfully: ${queueItem.id}`)
-          
         } catch (error) {
           console.log(`❌ [QUEUE] Error processing item ${queueItem.id}:`, error.message)
         }
@@ -180,7 +179,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("utterance_end_ms", "1000")
           deepgramUrl.searchParams.append("vad_events", "true")
 
-          deepgramWs = new WebSocket(deepgramUrl.toString(), ["token", deepgramApiKey])
+          deepgramWs = new WebSocket(deepgramUrl.toString(), { headers: { Authorization: `Token ${deepgramApiKey}` } })
           deepgramWs.binaryType = "arraybuffer"
 
           const connectionTimeout = setTimeout(() => {
@@ -251,7 +250,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Handle Deepgram responses with comprehensive logging
     const handleDeepgramResponse = async (data) => {
       console.log(`📡 [DEEPGRAM] Received response type: ${data.type}`)
-      
+
       if (data.type === "Results") {
         const channel = data.channel
         if (channel && channel.alternatives && channel.alternatives.length > 0) {
@@ -275,7 +274,7 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log(`📝 [DEEPGRAM] Final accumulated transcript: "${currentTranscript}"`)
 
               // Add to processing queue
-              addToTextQueue(currentTranscript, 'final_transcript')
+              addToTextQueue(currentTranscript, "final_transcript")
 
               // Start silence timer for final transcripts
               startSilenceTimer()
@@ -344,7 +343,7 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`🎙️ [DEEPGRAM] VAD: Utterance end detected`)
         console.log(`   - Session ID: ${sessionId}`)
         console.log(`   - Current transcript: "${currentTranscript}"`)
-        
+
         if (isSpeaking) {
           isSpeaking = false
           startSilenceTimer()
@@ -439,9 +438,9 @@ const setupUnifiedVoiceServer = (wss) => {
     const handleSilenceDetected = async () => {
       if (currentTranscript.trim() && !isProcessingGemini) {
         console.log(`🔕 [SILENCE] Processing complete utterance: "${currentTranscript}"`)
-        
+
         // Add to queue for processing
-        addToTextQueue(currentTranscript.trim(), 'complete_utterance')
+        addToTextQueue(currentTranscript.trim(), "complete_utterance")
 
         // Reset for next utterance
         currentTranscript = ""
@@ -451,7 +450,9 @@ const setupUnifiedVoiceServer = (wss) => {
     // Enhanced Gemini API Integration with logging
     const sendToGemini = async (userMessage) => {
       if (isProcessingGemini || !geminiApiKey || !userMessage.trim()) {
-        console.log(`⚠️ [GEMINI] Skipping request - Processing: ${isProcessingGemini}, API Key: ${!!geminiApiKey}, Message: "${userMessage}"`)
+        console.log(
+          `⚠️ [GEMINI] Skipping request - Processing: ${isProcessingGemini}, API Key: ${!!geminiApiKey}, Message: "${userMessage}"`,
+        )
         return null
       }
 
@@ -548,7 +549,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (audioData && audioData.length > 0) {
           console.log(`✅ [LMNT] Audio synthesized successfully: ${audioData.length} bytes`)
-          
+
           const audioBuffer = Buffer.from(audioData)
           const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
           const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
@@ -589,7 +590,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       console.log(`🔊 [LMNT] Making synthesis request to API...`)
-      
+
       const requestOptions = {
         method: "POST",
         headers: {
@@ -744,7 +745,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (isTextMessage && data) {
           console.log(`📨 [MESSAGE] Received control message:`, data)
-          
+
           // Handle control messages
           if (data.event === "start" && data.session_id) {
             sessionId = data.session_id
@@ -791,13 +792,13 @@ const setupUnifiedVoiceServer = (wss) => {
             await synthesizeAndSendResponse(data.text)
           } else if (data.data && data.data.hangup === "true") {
             console.log(`📞 [SESSION] Hangup request received for session ${sessionId}`)
-            
+
             // Close Deepgram connection on hangup
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
               console.log(`🎙️ [DEEPGRAM] Closing persistent connection due to hangup`)
               deepgramWs.close(1000, "Call ended")
             }
-            
+
             ws.close(1000, "Hangup requested")
           }
         } else {
@@ -823,7 +824,7 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log(`   - Session ID: ${sessionId || "Not set"}`)
       console.log(`   - Audio chunks processed: ${audioChunkCount}`)
       console.log(`   - Conversation history: ${fullConversationHistory.length} messages`)
-      console.log(`   - Text queue items processed: ${textProcessingQueue.filter(item => item.processed).length}`)
+      console.log(`   - Text queue items processed: ${textProcessingQueue.filter((item) => item.processed).length}`)
       console.log(`📊 [VAD] Final VAD statistics:`)
       console.log(`   - Speech events detected: ${vadState.totalSpeechEvents}`)
       console.log(`   - Utterance ends detected: ${vadState.totalUtteranceEnds}`)
