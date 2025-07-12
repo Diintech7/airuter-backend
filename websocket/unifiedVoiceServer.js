@@ -150,7 +150,8 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log(`   - Text: "${queueItem.text}"`)
           console.log(`   - Timestamp: ${queueItem.timestamp}`)
 
-          if (queueItem.text && queueItem.text.length > 0) {
+          // Only send to Gemini if the sentence is non-empty after trimming
+          if (queueItem.text && queueItem.text.trim().length > 0) {
             // Send to Gemini
             console.log(`🤖 [GEMINI] Sending text to Gemini: "${queueItem.text}"`)
             const geminiResponse = await sendToGemini(queueItem.text)
@@ -165,6 +166,8 @@ const setupUnifiedVoiceServer = (wss) => {
             } else {
               console.log(`❌ [GEMINI] No response received for: "${queueItem.text}"`)
             }
+          } else {
+            console.log(`⚠️ [QUEUE] Skipping empty or whitespace-only sentence, not sending to Gemini.`)
           }
 
           queueItem.processed = true
