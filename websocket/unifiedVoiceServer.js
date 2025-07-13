@@ -11,7 +11,7 @@ if (!fetch) {
 }
 
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 Unified Voice WebSocket server initialized with Persistent Deepgram Connection")
+  console.log("🚀 Unified Voice WebSocket server initialized with Sarvam TTS and Persistent Deepgram Connection")
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 New unified voice connection established")
@@ -38,10 +38,6 @@ const setupUnifiedVoiceServer = (wss) => {
     const MAX_RECONNECT_ATTEMPTS = 5
     let reconnectDelay = 1000
 
-    // Abort controllers for Gemini and TTS
-    let geminiAbortController = null
-    let ttsAbortController = null
-
     // Session management
     let sessionId = null
     let audioChunkCount = 0
@@ -57,14 +53,19 @@ const setupUnifiedVoiceServer = (wss) => {
     const SILENCE_DURATION = 2000
     let isSpeaking = false
 
-    // Audio processing
+    // Audio processing and streaming
     const MIN_CHUNK_SIZE = 320
-    // const SEND_INTERVAL = 50
-    // let lastAudioSent = 0
     const SEND_INTERVAL = 50
 
+    // Sarvam TTS streaming variables
+    let sarvamSocket = null
+    let isStreamingAudio = false
+    let audioStreamQueue = []
+    let currentAudioChunks = []
+    let shouldStopAudio = false
+
     // API Keys
-    const lmntApiKey = process.env.LMNT_API_KEY
+    const sarvamApiKey = process.env.SARVAM_API_KEY
     const deepgramApiKey = process.env.DEEPGRAM_API_KEY
     const geminiApiKey = process.env.GEMINI_API_KEY
 
@@ -74,11 +75,11 @@ const setupUnifiedVoiceServer = (wss) => {
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 API Keys configured:`)
     console.log(`   - Deepgram: ${deepgramApiKey ? "✅ Yes" : "❌ NO"}`)
-    console.log(`   - LMNT TTS: ${lmntApiKey ? "✅ Yes" : "❌ NO"}`)
+    console.log(`   - Sarvam TTS: ${sarvamApiKey ? "✅ Yes" : "❌ NO"}`)
     console.log(`   - Gemini: ${geminiApiKey ? "✅ Yes" : "❌ NO"}`)
 
     // VAD and speech detection state
-    let vadState = {
+    const vadState = {
       speechActive: false,
       lastSpeechStarted: null,
       lastUtteranceEnd: null,
@@ -111,28 +112,6 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Interrupt and flush logic
-    const interruptAndFlush = () => {
-      // Abort Gemini fetch if in progress
-      if (geminiAbortController) {
-        try { geminiAbortController.abort(); } catch (e) {}
-        geminiAbortController = null
-        console.log("⏹️ [INTERRUPT] Gemini processing aborted.")
-      }
-      // Abort TTS fetch if in progress
-      if (ttsAbortController) {
-        try { ttsAbortController.abort(); } catch (e) {}
-        ttsAbortController = null
-        console.log("⏹️ [INTERRUPT] TTS processing aborted.")
-      }
-      // Clear queue and transcript
-      textProcessingQueue = []
-      isProcessingQueue = false
-      currentTranscript = ""
-      isProcessingGemini = false
-      console.log("⏹️ [INTERRUPT] Queue and transcript cleared.")
-    }
-
     const processTextQueue = async () => {
       if (isProcessingQueue || textProcessingQueue.length === 0) {
         return
@@ -150,24 +129,21 @@ const setupUnifiedVoiceServer = (wss) => {
           console.log(`   - Text: "${queueItem.text}"`)
           console.log(`   - Timestamp: ${queueItem.timestamp}`)
 
-          // Only send to Gemini if the sentence is non-empty after trimming
-          if (queueItem.text && queueItem.text.trim().length > 0) {
-            // Send to Gemini
+          if (queueItem.text && queueItem.text.length > 0) {
+            // Send to Gemini for short response
             console.log(`🤖 [GEMINI] Sending text to Gemini: "${queueItem.text}"`)
             const geminiResponse = await sendToGemini(queueItem.text)
 
             if (geminiResponse) {
               console.log(`✅ [GEMINI] Received response: "${geminiResponse}"`)
 
-              // Send to LMNT for voice synthesis
-              console.log(`🔊 [LMNT] Sending to voice synthesis: "${geminiResponse}"`)
-              await synthesizeAndSendResponse(geminiResponse)
-              console.log(`✅ [LMNT] Voice response sent successfully`)
+              // Send to Sarvam for streaming voice synthesis
+              console.log(`🔊 [SARVAM] Sending to streaming voice synthesis: "${geminiResponse}"`)
+              await synthesizeAndStreamResponse(geminiResponse)
+              console.log(`✅ [SARVAM] Voice response streaming completed`)
             } else {
               console.log(`❌ [GEMINI] No response received for: "${queueItem.text}"`)
             }
-          } else {
-            console.log(`⚠️ [QUEUE] Skipping empty or whitespace-only sentence, not sending to Gemini.`)
           }
 
           queueItem.processed = true
@@ -181,7 +157,7 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log(`🏁 [QUEUE] Queue processing completed`)
     }
 
-    // Persistent Deepgram Connection - Connect once and keep alive
+    // Persistent Deepgram Connection
     const connectToDeepgram = async () => {
       return new Promise((resolve, reject) => {
         try {
@@ -194,7 +170,6 @@ const setupUnifiedVoiceServer = (wss) => {
             return
           }
 
-          // Build Deepgram WebSocket URL with optimized parameters
           const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
           deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
@@ -222,7 +197,6 @@ const setupUnifiedVoiceServer = (wss) => {
             reconnectAttempts = 0
             reconnectDelay = 1000
             console.log("✅ PERSISTENT Deepgram connection established and ready")
-            console.log("🔄 Connection will remain alive until call termination")
             resolve()
           }
 
@@ -239,17 +213,7 @@ const setupUnifiedVoiceServer = (wss) => {
             clearTimeout(connectionTimeout)
             deepgramReady = false
             deepgramConnected = false
-            console.log("❌ Deepgram connection error:")
-            console.log(`   - Message: ${error.message}`)
-            if (error.code) console.log(`   - Error Code: ${error.code}`)
-            if (error.reason) console.log(`   - Reason: ${error.reason}`)
-            if (error.target && error.target.readyState === WebSocket.CLOSED) {
-              console.log(`   - WebSocket State: CLOSED`)
-            }
-            // Attempt to log more specific error details if available (e.g., from a server response)
-            if (error.target && error.target.response) {
-              console.log(`   - Server Response: ${error.target.response}`)
-            }
+            console.log("❌ Deepgram connection error:", error.message)
             reject(error)
           }
 
@@ -259,7 +223,6 @@ const setupUnifiedVoiceServer = (wss) => {
             deepgramConnected = false
             console.log(`🎙️ Deepgram connection closed: ${event.code} - ${event.reason}`)
 
-            // Only reconnect if not a normal closure and session is still active
             if (event.code !== 1000 && sessionId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
               reconnectAttempts++
               const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
@@ -272,8 +235,6 @@ const setupUnifiedVoiceServer = (wss) => {
                   console.log("❌ Deepgram reconnection failed:", err.message)
                 })
               }, delay)
-            } else if (event.code === 1000) {
-              console.log("✅ Deepgram connection closed normally")
             }
           }
         } catch (error) {
@@ -283,7 +244,7 @@ const setupUnifiedVoiceServer = (wss) => {
       })
     }
 
-    // Handle Deepgram responses with comprehensive logging
+    // Handle Deepgram responses with speech interruption
     const handleDeepgramResponse = async (data) => {
       console.log(`📡 [DEEPGRAM] Received response type: ${data.type}`)
 
@@ -295,27 +256,18 @@ const setupUnifiedVoiceServer = (wss) => {
           const is_final = data.is_final
 
           if (transcript && transcript.trim()) {
-            console.log(`📝 [DEEPGRAM] Transcript received:`)
-            console.log(`   - Text: "${transcript}"`)
-            console.log(`   - Confidence: ${confidence}`)
-            console.log(`   - Is Final: ${is_final}`)
-            console.log(`   - Session ID: ${sessionId}`)
+            console.log(`📝 [DEEPGRAM] Transcript received: "${transcript}" (Final: ${is_final})`)
 
             // Reset silence timer when we get speech
             resetSilenceTimer()
 
             if (is_final) {
-              // Append to current transcript
               currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
               console.log(`📝 [DEEPGRAM] Final accumulated transcript: "${currentTranscript}"`)
 
-              // Add to processing queue
               addToTextQueue(currentTranscript, "final_transcript")
-
-              // Start silence timer for final transcripts
               startSilenceTimer()
 
-              // Send transcript to client
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(
                   JSON.stringify({
@@ -329,11 +281,8 @@ const setupUnifiedVoiceServer = (wss) => {
                 )
               }
             } else {
-              // Interim results
               const displayTranscript = currentTranscript + (currentTranscript ? " " : "") + transcript.trim()
-              console.log(`📝 [DEEPGRAM] Interim transcript: "${displayTranscript}"`)
 
-              // Send interim transcript to client
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(
                   JSON.stringify({
@@ -352,19 +301,15 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         }
       } else if (data.type === "SpeechStarted") {
-        console.log(`🎙️ [DEEPGRAM] VAD: Speech started detected`)
-        console.log(`   - Timestamp: ${data.timestamp}`)
-        console.log(`   - Channel: ${data.channel}`)
-        console.log(`   - Session ID: ${sessionId}`)
+        console.log(`🎙️ [DEEPGRAM] VAD: Speech started detected - STOPPING AUDIO`)
 
-        // INTERRUPT and FLUSH on new speech
-        interruptAndFlush()
+        // Stop current audio streaming when user starts speaking
+        shouldStopAudio = true
+        stopCurrentAudioStream()
 
-        // Reset silence timer immediately when speech starts
         resetSilenceTimer()
         isSpeaking = true
 
-        // Send speech started event to client
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(
             JSON.stringify({
@@ -372,7 +317,7 @@ const setupUnifiedVoiceServer = (wss) => {
               timestamp: data.timestamp,
               channel: data.channel,
               session_id: sessionId,
-              message: "Speech activity detected by VAD",
+              message: "Speech activity detected - audio stopped",
             }),
           )
         }
@@ -380,14 +325,12 @@ const setupUnifiedVoiceServer = (wss) => {
         vadState.totalSpeechEvents++
       } else if (data.type === "UtteranceEnd") {
         console.log(`🎙️ [DEEPGRAM] VAD: Utterance end detected`)
-        console.log(`   - Session ID: ${sessionId}`)
-        console.log(`   - Current transcript: "${currentTranscript}"`)
 
         if (isSpeaking) {
           isSpeaking = false
+          shouldStopAudio = false // Allow audio to resume
           startSilenceTimer()
 
-          // Send utterance end event to client
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
               JSON.stringify({
@@ -400,13 +343,31 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         }
         vadState.totalUtteranceEnds++
-      } else if (data.type === "Metadata") {
-        console.log(`📊 [DEEPGRAM] Metadata received:`)
-        console.log(`   - Request ID: ${data.request_id}`)
-        console.log(`   - Model Info: ${JSON.stringify(data.model_info)}`)
-        console.log(`   - Model UUID: ${data.model_uuid}`)
-      } else {
-        console.log(`📡 [DEEPGRAM] Other event: ${data.type}`, data)
+      }
+    }
+
+    // Stop current audio streaming
+    const stopCurrentAudioStream = () => {
+      console.log(`🛑 [AUDIO] Stopping current audio stream`)
+
+      if (sarvamSocket && sarvamSocket.readyState === WebSocket.OPEN) {
+        sarvamSocket.close()
+        sarvamSocket = null
+      }
+
+      isStreamingAudio = false
+      audioStreamQueue = []
+      currentAudioChunks = []
+
+      // Send stop signal to client
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: "audio_stopped",
+            session_id: sessionId,
+            message: "Audio playback stopped due to user speech",
+          }),
+        )
       }
     }
 
@@ -422,25 +383,17 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (buffer.length >= MIN_CHUNK_SIZE) {
           deepgramWs.send(buffer)
-          // lastAudioSent = Date.now()
           console.log(`🎵 [DEEPGRAM] Audio sent: ${buffer.length} bytes`)
           return true
         }
         return false
       } catch (error) {
         console.log("❌ [DEEPGRAM] Error sending audio:", error.message)
-
-        if (error.message.includes("connection") || error.message.includes("CLOSED")) {
-          console.log("🔄 [DEEPGRAM] Attempting reconnection...")
-          connectToDeepgram().catch((err) => {
-            console.log("❌ [DEEPGRAM] Reconnection failed:", err.message)
-          })
-        }
         return false
       }
     }
 
-    // Silence detection with logging
+    // Silence detection
     const startSilenceTimer = () => {
       if (silenceTimeout) {
         clearTimeout(silenceTimeout)
@@ -451,9 +404,6 @@ const setupUnifiedVoiceServer = (wss) => {
       silenceTimeout = setTimeout(() => {
         vadState.silenceDuration = Date.now() - vadState.lastUtteranceEnd
         console.log(`🔕 [VAD] ${SILENCE_DURATION}ms silence detected`)
-        console.log(`   - Processing transcript: "${currentTranscript}"`)
-        console.log(`   - Speech duration: ${vadState.speechDuration}ms`)
-        console.log(`   - Silence duration: ${vadState.silenceDuration}ms`)
         handleSilenceDetected()
       }, SILENCE_DURATION)
     }
@@ -477,68 +427,51 @@ const setupUnifiedVoiceServer = (wss) => {
     const handleSilenceDetected = async () => {
       if (currentTranscript.trim() && !isProcessingGemini) {
         console.log(`🔕 [SILENCE] Processing complete utterance: "${currentTranscript}"`)
-
-        // Add to queue for processing
         addToTextQueue(currentTranscript.trim(), "complete_utterance")
-
-        // Reset for next utterance
         currentTranscript = ""
       }
     }
 
-    // Enhanced Gemini API Integration with logging
+    // Enhanced Gemini API Integration with SHORT responses for telephonic calls
     const sendToGemini = async (userMessage) => {
       if (isProcessingGemini || !geminiApiKey || !userMessage.trim()) {
-        console.log(
-          `⚠️ [GEMINI] Skipping request - Processing: ${isProcessingGemini}, API Key: ${!!geminiApiKey}, Message: "${userMessage}"`,
-        )
+        console.log(`⚠️ [GEMINI] Skipping request - Processing: ${isProcessingGemini}, Message: "${userMessage}"`)
         return null
       }
 
       isProcessingGemini = true
-      geminiAbortController = new AbortController()
-      console.log(`🤖 [GEMINI] Sending request:`)
-      console.log(`   - Message: "${userMessage}"`)
-      console.log(`   - Session ID: ${sessionId}`)
-      console.log(`   - Conversation History Length: ${fullConversationHistory.length}`)
+      console.log(`🤖 [GEMINI] Sending request: "${userMessage}"`)
 
       try {
         const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${geminiApiKey}`
 
-        // Remove any system role messages from history (if present)
-        const filteredHistory = fullConversationHistory.filter(msg => msg.role !== "system")
-
-        // Add system prompt as the first message ONCE per session
-        const aitotaSystemPrompt = `You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English and Hindi. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. End each message with a friendly follow-up question to keep the conversation going. When speaking Hindi, use Devanagari script (e.g., नमस्ते, कैसे मदद कर सकता हूँ?). Your goal is to make customers feel heard, supported, and valued.\n\n---\n\n💬 Example Conversations (2 English + 2 Hindi)\n\n---\n\n🗨 English Example 1\n\n👤: I forgot my password.\n🤖: No worries, I can help reset it. Should I send the reset link to your email now?\n\n---\n\n🗨 English Example 2\n\n👤: How can I track my order?\n🤖: I’ll check it for you—could you share your order ID please?\n\n---\n\n🗨 Hindi Example 1\n\n👤: मेरा रिचार्ज नहीं हुआ है।\n🤖: क्षमा कीजिए, मैं तुरंत जाँच करता हूँ। क्या आप अपना मोबाइल नंबर बता सकते हैं?\n\n---\n\n🗨 Hindi Example 2\n\n👤: मुझे नया पता जोड़ना है।\n🤖: बिल्कुल, कृपया नया पता बताइए। क्या आप इसे डिलीवरी एड्रेस भी बनाना चाहेंगे?`;
-        if (!filteredHistory.length || (filteredHistory.length && filteredHistory[0].parts[0].text !== aitotaSystemPrompt)) {
-          filteredHistory.unshift({
-            role: "user",
-            parts: [{ text: aitotaSystemPrompt }],
-          })
-        }
-
-        // Add to conversation history, prepending instruction to user message
-        filteredHistory.push({
+        fullConversationHistory.push({
           role: "user",
-          parts: [{ text: "Answer briefly and concisely, in 1-2 sentences.\n" + userMessage }],
+          parts: [{ text: userMessage }],
         })
 
         const requestBody = {
-          contents: filteredHistory,
+          contents: fullConversationHistory,
           generationConfig: {
             temperature: 0.7,
             topK: 40,
             topP: 0.95,
-            maxOutputTokens: 60, // Make response short
+            maxOutputTokens: 50, // VERY SHORT responses for telephonic calls
+          },
+          systemInstruction: {
+            parts: [
+              {
+                text: "You are an AI assistant for telephonic conversations. Keep responses VERY SHORT (1-2 sentences maximum, under 20 words). Be conversational, helpful, and direct. This is a real-time phone call, so be concise and natural.",
+              },
+            ],
           },
         }
 
-        console.log(`🤖 [GEMINI] Making API request...`)
+        console.log(`🤖 [GEMINI] Making API request for SHORT response...`)
         const response = await fetch(apiUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(requestBody),
-          signal: geminiAbortController.signal,
         })
 
         if (!response.ok) {
@@ -548,163 +481,237 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         const data = await response.json()
-        console.log(`✅ [GEMINI] API response received`)
 
         if (data.candidates && data.candidates[0] && data.candidates[0].content) {
           const geminiResponse = data.candidates[0].content.parts[0].text
 
-          console.log(`🤖 [GEMINI] Response: "${geminiResponse}"`)
+          console.log(`🤖 [GEMINI] SHORT Response: "${geminiResponse}"`)
 
-          // Add to conversation history
           fullConversationHistory.push({
             role: "model",
             parts: [{ text: geminiResponse }],
           })
 
-          console.log(`📚 [GEMINI] Updated conversation history length: ${fullConversationHistory.length}`)
           return geminiResponse
         }
 
-        console.log(`❌ [GEMINI] No valid response in API data`)
         return null
       } catch (error) {
-        if (error.name === "AbortError") {
-          console.log("⏹️ [GEMINI] Request aborted due to interrupt.")
-        } else {
-          console.log(`❌ [GEMINI] API error: ${error.message}`)
-        }
+        console.log(`❌ [GEMINI] API error: ${error.message}`)
         return null
       } finally {
         isProcessingGemini = false
-        geminiAbortController = null
-        console.log(`🤖 [GEMINI] Request processing completed`)
       }
     }
 
-    // Enhanced TTS Synthesis with logging
-    const synthesizeAndSendResponse = async (text) => {
-      if (!lmntApiKey || !text.trim()) {
-        console.log(`⚠️ [LMNT] Skipping synthesis - API Key: ${!!lmntApiKey}, Text: "${text}"`)
+    // Sarvam Streaming TTS Implementation
+    const synthesizeAndStreamResponse = async (text) => {
+      if (!sarvamApiKey || !text.trim() || shouldStopAudio) {
+        console.log(
+          `⚠️ [SARVAM] Skipping synthesis - API Key: ${!!sarvamApiKey}, Text: "${text}", ShouldStop: ${shouldStopAudio}`,
+        )
         return
       }
 
-      ttsAbortController = new AbortController()
       try {
-        console.log(`🔊 [LMNT] Starting synthesis:`)
-        console.log(`   - Text: "${text}"`)
-        console.log(`   - Language: ${language}`)
-        console.log(`   - Session ID: ${sessionId}`)
+        console.log(`🔊 [SARVAM] Starting streaming synthesis: "${text}"`)
 
-        const synthesisOptions = {
-          voice: "lily",
-          language: language === "en" ? "en" : "hi",
-          speed: 1.0,
-          format: "wav",
-          sample_rate: 8000,
-        }
+        // Split text into smaller chunks for streaming
+        const textChunks = splitTextIntoChunks(text, 100) // Max 100 chars per chunk
 
-        console.log(`🔊 [LMNT] Synthesis options:`, synthesisOptions)
-        const audioData = await synthesizeWithLMNT(text, synthesisOptions, ttsAbortController)
-
-        if (audioData && audioData.length > 0) {
-          console.log(`✅ [LMNT] Audio synthesized successfully: ${audioData.length} bytes`)
-
-          const audioBuffer = Buffer.from(audioData)
-          const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
-          const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
-
-          audioChunkCount++
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: audioChunkCount,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: 8000,
-              channels: 1,
-              sample_width: 2,
-            },
-            type: "ai_response",
+        for (let i = 0; i < textChunks.length; i++) {
+          if (shouldStopAudio) {
+            console.log(`🛑 [SARVAM] Stopping synthesis due to user speech`)
+            break
           }
 
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            console.log(`✅ [LMNT] Audio response sent to client`)
-            console.log(`   - Chunk Count: ${audioChunkCount}`)
-            console.log(`   - Audio Size: ${audioWithHeader.length} bytes`)
-          } else {
-            console.log(`❌ [LMNT] WebSocket not open, cannot send audio`)
+          const chunk = textChunks[i]
+          console.log(`🔊 [SARVAM] Processing chunk ${i + 1}/${textChunks.length}: "${chunk}"`)
+
+          await streamTextChunkWithSarvam(chunk, i === textChunks.length - 1)
+
+          // Small delay between chunks for natural flow
+          if (i < textChunks.length - 1 && !shouldStopAudio) {
+            await new Promise((resolve) => setTimeout(resolve, 100))
           }
-        } else {
-          console.log(`❌ [LMNT] No audio data received from synthesis`)
         }
+
+        console.log(`✅ [SARVAM] Streaming synthesis completed`)
       } catch (error) {
-        if (error.name === "AbortError") {
-          console.log("⏹️ [LMNT] Synthesis aborted due to interrupt.")
+        console.log(`❌ [SARVAM] Synthesis failed: ${error.message}`)
+      }
+    }
+
+    // Split text into smaller chunks for streaming
+    const splitTextIntoChunks = (text, maxLength = 100) => {
+      const words = text.split(" ")
+      const chunks = []
+      let currentChunk = ""
+
+      for (const word of words) {
+        if ((currentChunk + " " + word).length <= maxLength) {
+          currentChunk += (currentChunk ? " " : "") + word
         } else {
-          console.log(`❌ [LMNT] Synthesis failed: ${error.message}`)
+          if (currentChunk) {
+            chunks.push(currentChunk)
+          }
+          currentChunk = word
         }
-      } finally {
-        ttsAbortController = null
+      }
+
+      if (currentChunk) {
+        chunks.push(currentChunk)
+      }
+
+      return chunks.length > 0 ? chunks : [text]
+    }
+
+    // Stream individual text chunk with Sarvam
+    const streamTextChunkWithSarvam = async (textChunk, isLastChunk = false) => {
+      return new Promise((resolve, reject) => {
+        if (shouldStopAudio) {
+          resolve()
+          return
+        }
+
+        try {
+          console.log(`🔊 [SARVAM] Connecting to streaming WebSocket for chunk: "${textChunk}"`)
+
+          const sarvamWsUrl = "wss://api.sarvam.ai/text-to-speech-websocket"
+          sarvamSocket = new WebSocket(sarvamWsUrl, {
+            headers: {
+              "api-subscription-key": sarvamApiKey,
+            },
+          })
+
+          let chunkCount = 0
+          const audioChunks = []
+
+          sarvamSocket.onopen = () => {
+            console.log(`✅ [SARVAM] WebSocket connected for chunk`)
+
+            // Send config first
+            sarvamSocket.send(
+              JSON.stringify({
+                type: "config",
+                data: {
+                  target_language_code: language === "hi" ? "hi-IN" : "en-IN",
+                  speaker: "anushka",
+                  pitch: 1.0,
+                  pace: 1.0,
+                  min_buffer_size: 30,
+                  max_chunk_length: 100,
+                  output_audio_codec: "mp3",
+                  output_audio_bitrate: 128,
+                },
+              }),
+            )
+
+            // Send text for conversion
+            sarvamSocket.send(
+              JSON.stringify({
+                type: "text",
+                data: {
+                  text: textChunk,
+                },
+              }),
+            )
+
+            // Send flush to ensure processing
+            if (isLastChunk) {
+              sarvamSocket.send(
+                JSON.stringify({
+                  type: "flush",
+                }),
+              )
+            }
+          }
+
+          sarvamSocket.onmessage = (event) => {
+            if (shouldStopAudio) {
+              sarvamSocket.close()
+              resolve()
+              return
+            }
+
+            try {
+              const message = JSON.parse(event.data)
+
+              if (message.type === "audio" && message.data && message.data.audio) {
+                chunkCount++
+                const audioBuffer = Buffer.from(message.data.audio, "base64")
+                audioChunks.push(audioBuffer)
+
+                console.log(`🎵 [SARVAM] Received audio chunk ${chunkCount}: ${audioBuffer.length} bytes`)
+
+                // Send audio immediately to client for real-time playback
+                sendAudioChunkToClient(audioBuffer, chunkCount)
+              } else if (message.type === "error") {
+                console.log(`❌ [SARVAM] Error: ${message.data}`)
+                reject(new Error(message.data))
+              }
+            } catch (parseError) {
+              console.log(`❌ [SARVAM] Error parsing message: ${parseError.message}`)
+            }
+          }
+
+          sarvamSocket.onclose = () => {
+            console.log(`🔊 [SARVAM] WebSocket closed for chunk. Total audio chunks: ${chunkCount}`)
+            resolve()
+          }
+
+          sarvamSocket.onerror = (error) => {
+            console.log(`❌ [SARVAM] WebSocket error: ${error.message}`)
+            reject(error)
+          }
+
+          // Timeout for chunk processing
+          setTimeout(() => {
+            if (sarvamSocket && sarvamSocket.readyState === WebSocket.OPEN) {
+              sarvamSocket.close()
+            }
+            resolve()
+          }, 10000)
+        } catch (error) {
+          console.log(`❌ [SARVAM] Error creating WebSocket: ${error.message}`)
+          reject(error)
+        }
+      })
+    }
+
+    // Send audio chunk to client immediately
+    const sendAudioChunkToClient = (audioBuffer, chunkIndex) => {
+      if (shouldStopAudio || ws.readyState !== WebSocket.OPEN) {
+        return
+      }
+
+      try {
+        const audioWithHeader = createWAVHeader(audioBuffer, 8000, 1, 16)
+        const pythonBytesString = bufferToPythonBytesString(audioWithHeader)
+
+        audioChunkCount++
+        const audioResponse = {
+          data: {
+            session_id: sessionId,
+            count: audioChunkCount,
+            chunk_index: chunkIndex,
+            audio_bytes_to_play: pythonBytesString,
+            sample_rate: 8000,
+            channels: 1,
+            sample_width: 2,
+            streaming: true,
+          },
+          type: "ai_response_stream",
+        }
+
+        ws.send(JSON.stringify(audioResponse))
+        console.log(`✅ [SARVAM] Streamed audio chunk ${chunkIndex} to client (${audioWithHeader.length} bytes)`)
+      } catch (error) {
+        console.log(`❌ [SARVAM] Error sending audio chunk: ${error.message}`)
       }
     }
 
-    // TTS Synthesis with LMNT (unchanged but with enhanced logging)
-    const synthesizeWithLMNT = async (text, options = {}, abortController = null) => {
-      if (!lmntApiKey) {
-        throw new Error("LMNT API key not configured")
-      }
-
-      console.log(`🔊 [LMNT] Making synthesis request to API...`)
-
-      const requestOptions = {
-        method: "POST",
-        headers: {
-          "X-API-Key": lmntApiKey,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          text: text,
-          voice: options.voice || "lily",
-          format: options.format || "wav",
-          language: options.language || "en",
-          sample_rate: options.sample_rate || 8000,
-          speed: options.speed || 1.0,
-        }),
-        signal: abortController ? abortController.signal : undefined,
-      }
-
-      const response = await fetch("https://api.lmnt.com/v1/ai/speech", requestOptions)
-
-      if (!response.ok) {
-        const errorText = await response.text()
-        console.log(`❌ [LMNT] API error: ${response.status} - ${errorText}`)
-        throw new Error(`LMNT API error: ${response.status} - ${errorText}`)
-      }
-
-      console.log(`✅ [LMNT] API response received successfully`)
-      const contentType = response.headers.get("content-type")
-
-      if (contentType && contentType.includes("application/json")) {
-        const jsonResponse = await response.json()
-        if (jsonResponse.audio_url) {
-          console.log(`🔊 [LMNT] Fetching audio from URL...`)
-          const audioResponse = await fetch(jsonResponse.audio_url, { signal: abortController ? abortController.signal : undefined })
-          const audioBuffer = await audioResponse.arrayBuffer()
-          return Buffer.from(audioBuffer)
-        } else if (jsonResponse.audio) {
-          console.log(`🔊 [LMNT] Processing base64 audio data...`)
-          return Buffer.from(jsonResponse.audio, "base64")
-        }
-      } else {
-        console.log(`🔊 [LMNT] Processing direct audio buffer...`)
-        const audioBuffer = await response.arrayBuffer()
-        return Buffer.from(audioBuffer)
-      }
-
-      throw new Error("Unexpected response format from LMNT")
-    }
-
-    // Utility functions (unchanged)
+    // Utility functions
     const bufferToPythonBytesString = (buffer) => {
       let result = "b'"
       for (let i = 0; i < buffer.length; i++) {
@@ -758,20 +765,20 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const sendGreeting = async () => {
-      if (connectionGreetingSent || !lmntApiKey || !sessionId) {
+      if (connectionGreetingSent || !sarvamApiKey || !sessionId) {
         return
       }
 
       const greetings = {
-        hi: "नमस्ते! हैलो, Aitota से संपर्क करने के लिए धन्यवाद।",
-        en: "Hello, thank you for contacting Aitota. How can I help you?",
+        hi: "नमस्ते! Aitota में आपका स्वागत है।",
+        en: "Hi! Welcome to Aitota.",
       }
 
       const greetingText = greetings[language] || greetings["en"]
-      console.log(`👋 [GREETING] Sending greeting: "${greetingText}"`)
+      console.log(`👋 [GREETING] Sending short greeting: "${greetingText}"`)
 
       try {
-        await synthesizeAndSendResponse(greetingText)
+        await synthesizeAndStreamResponse(greetingText)
         connectionGreetingSent = true
         console.log(`✅ [GREETING] Greeting sent successfully!`)
       } catch (error) {
@@ -780,13 +787,12 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // WebSocket message handling with enhanced logging
+    // WebSocket message handling
     ws.on("message", async (message) => {
       try {
         let isTextMessage = false
         let data = null
 
-        // Parse message
         if (typeof message === "string") {
           isTextMessage = true
           try {
@@ -812,41 +818,36 @@ const setupUnifiedVoiceServer = (wss) => {
         if (isTextMessage && data) {
           console.log(`📨 [MESSAGE] Received control message:`, data)
 
-          // Handle control messages
           if (data.event === "start" && data.session_id) {
             sessionId = data.session_id
             audioChunkCount = 0
             currentTranscript = ""
             isSpeaking = false
+            shouldStopAudio = false
             fullConversationHistory = []
             textProcessingQueue = []
             isProcessingQueue = false
 
-            console.log(`✅ [SESSION] SIP Call Started:`)
-            console.log(`   - Session ID: ${sessionId}`)
-            console.log(`   - Language: ${language}`)
+            console.log(`✅ [SESSION] SIP Call Started with session ID: ${sessionId}`)
 
-            // Send session started confirmation
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(
                 JSON.stringify({
                   type: "session_started",
                   session_id: sessionId,
                   language: language,
-                  message: "SIP call started, establishing persistent Deepgram connection.",
+                  message: "SIP call started with Sarvam streaming TTS",
                 }),
               )
             }
 
-            // Connect to Deepgram ONCE for the entire session
             try {
               await connectToDeepgram()
-              console.log(`✅ [SESSION] Persistent Deepgram connection established for session ${sessionId}`)
+              console.log(`✅ [SESSION] Persistent Deepgram connection established`)
             } catch (error) {
               console.log(`❌ [SESSION] Failed to connect to Deepgram: ${error.message}`)
             }
 
-            // Send greeting after a short delay
             setTimeout(() => {
               sendGreeting()
             }, 500)
@@ -855,28 +856,25 @@ const setupUnifiedVoiceServer = (wss) => {
             if (data.session_id) {
               sessionId = data.session_id
             }
-            await synthesizeAndSendResponse(data.text)
+            await synthesizeAndStreamResponse(data.text)
           } else if (data.data && data.data.hangup === "true") {
-            console.log(`📞 [SESSION] Hangup request received for session ${sessionId}`)
+            console.log(`📞 [SESSION] Hangup request received`)
 
-            // Close Deepgram connection on hangup
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              console.log(`🎙️ [DEEPGRAM] Closing persistent connection due to hangup`)
               deepgramWs.close(1000, "Call ended")
+            }
+
+            if (sarvamSocket && sarvamSocket.readyState === WebSocket.OPEN) {
+              sarvamSocket.close(1000, "Call ended")
             }
 
             ws.close(1000, "Hangup requested")
           }
         } else {
-          // Handle audio data - send to persistent Deepgram connection
+          // Handle audio data
           console.log(`Received audio buffer size: ${message.length} bytes`)
           if (deepgramConnected && deepgramReady) {
-            // const now = Date.now()
-            // if (now - lastAudioSent >= SEND_INTERVAL) {
             await sendAudioToDeepgram(message)
-            // }
-          } else {
-            console.log(`⚠️ [AUDIO] Audio received but Deepgram not connected`)
           }
         }
       } catch (error) {
@@ -884,30 +882,21 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     })
 
-    // Enhanced connection cleanup
+    // Connection cleanup
     ws.on("close", () => {
-      console.log(`🔗 [SESSION] Unified voice connection closed for session ${sessionId}`)
-      console.log(`📊 [SESSION] Final statistics:`)
-      console.log(`   - Session ID: ${sessionId || "Not set"}`)
-      console.log(`   - Audio chunks processed: ${audioChunkCount}`)
-      console.log(`   - Conversation history: ${fullConversationHistory.length} messages`)
-      console.log(`   - Text queue items processed: ${textProcessingQueue.filter((item) => item.processed).length}`)
-      console.log(`📊 [VAD] Final VAD statistics:`)
-      console.log(`   - Speech events detected: ${vadState.totalSpeechEvents}`)
-      console.log(`   - Utterance ends detected: ${vadState.totalUtteranceEnds}`)
-      console.log(`   - Last speech duration: ${vadState.speechDuration}ms`)
-      console.log(`   - Last silence duration: ${vadState.silenceDuration}ms`)
+      console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
 
-      // Close persistent Deepgram connection
       if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-        console.log(`🎙️ [DEEPGRAM] Closing persistent connection for session ${sessionId}`)
         deepgramWs.close(1000, "Session ended")
       }
 
-      // Cleanup
+      if (sarvamSocket && sarvamSocket.readyState === WebSocket.OPEN) {
+        sarvamSocket.close(1000, "Session ended")
+      }
+
       resetSilenceTimer()
 
-      // Reset all state
+      // Reset state
       sessionId = null
       audioChunkCount = 0
       deepgramReady = false
@@ -915,25 +904,20 @@ const setupUnifiedVoiceServer = (wss) => {
       connectionGreetingSent = false
       currentTranscript = ""
       isSpeaking = false
+      shouldStopAudio = false
+      isStreamingAudio = false
       fullConversationHistory = []
       textProcessingQueue = []
       isProcessingQueue = false
-      vadState = {
-        speechActive: false,
-        lastSpeechStarted: null,
-        lastUtteranceEnd: null,
-        speechDuration: 0,
-        silenceDuration: 0,
-        totalSpeechEvents: 0,
-        totalUtteranceEnds: 0,
-      }
+      audioStreamQueue = []
+      currentAudioChunks = []
     })
 
     ws.on("error", (error) => {
-      console.log(`❌ [SESSION] WebSocket connection error: ${error.message}`)
+      console.log(`❌ [SESSION] WebSocket error: ${error.message}`)
     })
 
-    console.log(`✅ [SESSION] WebSocket connection ready, waiting for SIP 'start' event`)
+    console.log(`✅ [SESSION] WebSocket ready with Sarvam streaming TTS`)
   })
 }
 
