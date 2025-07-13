@@ -924,5 +924,4 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log(`✅ [SESSION] WebSocket connection ready, waiting for SIP 'start' event`)
               })
             }
-            
             module.exports = { setupUnifiedVoiceServer }
