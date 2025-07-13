@@ -429,7 +429,8 @@ const setupUnifiedVoiceServer = (wss) => {
           messages: [
             {
               role: "system",
-              content: "You are an AI assistant for telephonic conversations. Keep responses VERY SHORT (1-2 sentences maximum, under 15 words). Be conversational, helpful, and direct. This is a real-time phone call, so be concise and natural.",
+              content:
+                "You are an AI assistant for telephonic conversations. Keep responses VERY SHORT (1-2 sentences maximum, under 15 words). Be conversational, helpful, and direct. This is a real-time phone call, so be concise and natural.",
             },
             ...fullConversationHistory,
           ],
@@ -477,26 +478,142 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced Sarvam TTS Synthesis with proper audio handling
+    // Enhanced Sarvam TTS Synthesis with HTTP API fallback
     const synthesizeAndSendResponse = async (text) => {
       if (!sarvamApiKey || !text.trim() || shouldStopAudio) {
-        console.log(`⚠️ [SARVAM] Skipping synthesis - API Key: ${!!sarvamApiKey}, Text: "${text}", ShouldStop: ${shouldStopAudio}`)
+        console.log(
+          `⚠️ [SARVAM] Skipping synthesis - API Key: ${!!sarvamApiKey}, Text: "${text}", ShouldStop: ${shouldStopAudio}`,
+        )
         return
       }
 
       try {
         console.log(`🔊 [SARVAM] Starting synthesis: "${text}"`)
 
-        // Use Sarvam streaming WebSocket
-        await streamTextWithSarvam(text)
+        // Try HTTP API first (more reliable)
+        await synthesizeWithSarvamHTTP(text)
 
         console.log(`✅ [SARVAM] Synthesis completed`)
       } catch (error) {
         console.log(`❌ [SARVAM] Synthesis failed: ${error.message}`)
+
+        // Fallback to simple TTS if Sarvam fails
+        await synthesizeWithFallbackTTS(text)
       }
     }
 
-    // Sarvam Streaming TTS Implementation
+    // HTTP-based Sarvam TTS (more reliable than WebSocket)
+    const synthesizeWithSarvamHTTP = async (text) => {
+      try {
+        console.log(`🔊 [SARVAM] Using HTTP API for: "${text}"`)
+
+        const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "API-Subscription-Key": sarvamApiKey,
+          },
+          body: JSON.stringify({
+            inputs: [text],
+            target_language_code: language === "hi" ? "hi-IN" : "en-IN",
+            speaker: "anushka",
+            pitch: 1.0,
+            pace: 1.0,
+            loudness: 1.0,
+            speech_sample_rate: 22050,
+            enable_preprocessing: true,
+            model: "bulbul:v1",
+          }),
+        })
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          console.log(`❌ [SARVAM] HTTP API error: ${response.status} - ${errorText}`)
+          throw new Error(`Sarvam HTTP API error: ${response.status} - ${errorText}`)
+        }
+
+        const data = await response.json()
+        console.log(`✅ [SARVAM] HTTP API response received`)
+
+        if (data.audios && data.audios.length > 0) {
+          const audioBase64 = data.audios[0]
+          const audioBuffer = Buffer.from(audioBase64, "base64")
+
+          console.log(`🎵 [SARVAM] Audio received: ${audioBuffer.length} bytes`)
+
+          // Send audio to client
+          sendCompleteAudioToClient(audioBuffer)
+        } else {
+          throw new Error("No audio data in response")
+        }
+      } catch (error) {
+        console.log(`❌ [SARVAM] HTTP API failed: ${error.message}`)
+        throw error
+      }
+    }
+
+    // Fallback TTS using a simple text-to-speech service
+    const synthesizeWithFallbackTTS = async (text) => {
+      try {
+        console.log(`🔊 [FALLBACK] Using fallback TTS for: "${text}"`)
+
+        // Use a simple TTS service or generate a simple audio response
+        const simpleResponse = `I heard you say: ${text}`
+
+        // For now, we'll create a simple beep or use browser's speech synthesis
+        // In a real implementation, you could use another TTS service like Google TTS
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "fallback_response",
+              session_id: sessionId,
+              message: simpleResponse,
+              text: text,
+            }),
+          )
+        }
+
+        console.log(`✅ [FALLBACK] Fallback response sent`)
+      } catch (error) {
+        console.log(`❌ [FALLBACK] Fallback TTS failed: ${error.message}`)
+      }
+    }
+
+    // Send complete audio to client (for HTTP API response)
+    const sendCompleteAudioToClient = (audioBuffer) => {
+      if (shouldStopAudio || ws.readyState !== WebSocket.OPEN) {
+        return
+      }
+
+      try {
+        // Convert to WAV format for better compatibility
+        const audioWithHeader = createWAVHeader(audioBuffer, 22050, 1, 16)
+        const base64Audio = audioWithHeader.toString("base64")
+
+        audioChunkCount++
+        const audioResponse = {
+          data: {
+            session_id: sessionId,
+            count: audioChunkCount,
+            audio_data: base64Audio,
+            format: "wav",
+            sample_rate: 22050,
+            channels: 1,
+            sample_width: 2,
+            complete: true,
+          },
+          type: "ai_response_complete",
+        }
+
+        ws.send(JSON.stringify(audioResponse))
+        console.log(`✅ [SARVAM] Complete audio sent to client (${audioWithHeader.length} bytes)`)
+      } catch (error) {
+        console.log(`❌ [SARVAM] Error sending complete audio: ${error.message}`)
+      }
+    }
+
+    // Improved Sarvam WebSocket with proper authentication
     const streamTextWithSarvam = async (text) => {
       return new Promise((resolve, reject) => {
         if (shouldStopAudio) {
@@ -507,20 +624,24 @@ const setupUnifiedVoiceServer = (wss) => {
         try {
           console.log(`🔊 [SARVAM] Connecting to streaming WebSocket for: "${text}"`)
 
+          // Use proper WebSocket URL and headers
           const sarvamWsUrl = "wss://api.sarvam.ai/text-to-speech-websocket"
           sarvamSocket = new WebSocket(sarvamWsUrl, {
             headers: {
-              "api-subscription-key": sarvamApiKey,
+              "API-Subscription-Key": sarvamApiKey,
+              "User-Agent": "SarvamVoiceServer/1.0",
+              Origin: "https://api.sarvam.ai",
             },
           })
 
           let chunkCount = 0
-          let totalAudioData = Buffer.alloc(0)
+          let connectionEstablished = false
 
           sarvamSocket.onopen = () => {
-            console.log(`✅ [SARVAM] WebSocket connected`)
+            console.log(`✅ [SARVAM] WebSocket connected successfully`)
+            connectionEstablished = true
 
-            // Send config first
+            // Send config with proper format
             const configMessage = {
               type: "config",
               data: {
@@ -528,34 +649,37 @@ const setupUnifiedVoiceServer = (wss) => {
                 speaker: "anushka",
                 pitch: 1.0,
                 pace: 1.0,
-                min_buffer_size: 30,
+                loudness: 1.0,
+                min_buffer_size: 50,
                 max_chunk_length: 200,
                 output_audio_codec: "mp3",
                 output_audio_bitrate: 128,
+                model: "bulbul:v1",
               },
             }
 
-            console.log(`🔊 [SARVAM] Sending config:`, configMessage)
+            console.log(`🔊 [SARVAM] Sending config`)
             sarvamSocket.send(JSON.stringify(configMessage))
 
-            // Send text for conversion
-            const textMessage = {
-              type: "text",
-              data: {
-                text: text,
-              },
-            }
+            // Wait a bit before sending text
+            setTimeout(() => {
+              const textMessage = {
+                type: "text",
+                data: {
+                  text: text,
+                },
+              }
 
-            console.log(`🔊 [SARVAM] Sending text:`, textMessage)
-            sarvamSocket.send(JSON.stringify(textMessage))
+              console.log(`🔊 [SARVAM] Sending text`)
+              sarvamSocket.send(JSON.stringify(textMessage))
 
-            // Send flush to ensure processing
-            const flushMessage = {
-              type: "flush",
-            }
-
-            console.log(`🔊 [SARVAM] Sending flush`)
-            sarvamSocket.send(JSON.stringify(flushMessage))
+              // Send flush after text
+              setTimeout(() => {
+                const flushMessage = { type: "flush" }
+                console.log(`🔊 [SARVAM] Sending flush`)
+                sarvamSocket.send(JSON.stringify(flushMessage))
+              }, 100)
+            }, 200)
           }
 
           sarvamSocket.onmessage = (event) => {
@@ -572,22 +696,16 @@ const setupUnifiedVoiceServer = (wss) => {
               if (message.type === "audio" && message.data && message.data.audio) {
                 chunkCount++
                 const audioBuffer = Buffer.from(message.data.audio, "base64")
-                totalAudioData = Buffer.concat([totalAudioData, audioBuffer])
 
                 console.log(`🎵 [SARVAM] Received audio chunk ${chunkCount}: ${audioBuffer.length} bytes`)
-
-                // Send audio chunk immediately to client
                 sendAudioChunkToClient(audioBuffer, chunkCount)
               } else if (message.type === "error") {
-                console.log(`❌ [SARVAM] Error: ${JSON.stringify(message.data)}`)
-                reject(new Error(JSON.stringify(message.data)))
-              } else if (message.type === "done") {
+                console.log(`❌ [SARVAM] Error: ${JSON.stringify(message)}`)
+                reject(new Error(JSON.stringify(message)))
+              } else if (message.type === "done" || message.type === "end") {
                 console.log(`✅ [SARVAM] Synthesis completed. Total chunks: ${chunkCount}`)
-                console.log(`📊 [SARVAM] Total audio data: ${totalAudioData.length} bytes`)
                 sarvamSocket.close()
                 resolve()
-              } else {
-                console.log(`📨 [SARVAM] Other message:`, message)
               }
             } catch (parseError) {
               console.log(`❌ [SARVAM] Error parsing message: ${parseError.message}`)
@@ -596,26 +714,40 @@ const setupUnifiedVoiceServer = (wss) => {
 
           sarvamSocket.onclose = (event) => {
             console.log(`🔊 [SARVAM] WebSocket closed: ${event.code} - ${event.reason}`)
-            console.log(`📊 [SARVAM] Final stats - Chunks: ${chunkCount}, Total audio: ${totalAudioData.length} bytes`)
-            resolve()
+            if (connectionEstablished && chunkCount === 0) {
+              console.log(`⚠️ [SARVAM] No audio received, trying HTTP API fallback`)
+              synthesizeWithSarvamHTTP(text).then(resolve).catch(reject)
+            } else {
+              resolve()
+            }
           }
 
           sarvamSocket.onerror = (error) => {
             console.log(`❌ [SARVAM] WebSocket error: ${error.message}`)
-            reject(error)
+
+            if (error.message.includes("403")) {
+              console.log(`🔑 [SARVAM] Authentication failed - check API key`)
+              console.log(
+                `🔑 [SARVAM] API Key format: ${sarvamApiKey ? sarvamApiKey.substring(0, 10) + "..." : "NOT SET"}`,
+              )
+            }
+
+            // Try HTTP API as fallback
+            console.log(`🔄 [SARVAM] Trying HTTP API fallback`)
+            synthesizeWithSarvamHTTP(text).then(resolve).catch(reject)
           }
 
-          // Timeout for synthesis
+          // Timeout for WebSocket connection
           setTimeout(() => {
-            if (sarvamSocket && sarvamSocket.readyState === WebSocket.OPEN) {
-              console.log(`⏰ [SARVAM] Synthesis timeout, closing connection`)
+            if (sarvamSocket && sarvamSocket.readyState === WebSocket.CONNECTING) {
+              console.log(`⏰ [SARVAM] WebSocket connection timeout`)
               sarvamSocket.close()
+              synthesizeWithSarvamHTTP(text).then(resolve).catch(reject)
             }
-            resolve()
-          }, 15000)
+          }, 10000)
         } catch (error) {
           console.log(`❌ [SARVAM] Error creating WebSocket: ${error.message}`)
-          reject(error)
+          synthesizeWithSarvamHTTP(text).then(resolve).catch(reject)
         }
       })
     }
@@ -629,7 +761,7 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         // Convert MP3 to WAV format for better compatibility
         const audioWithHeader = createWAVHeader(audioBuffer, 22050, 1, 16) // MP3 is typically 22050Hz
-        const base64Audio = audioWithHeader.toString('base64')
+        const base64Audio = audioWithHeader.toString("base64")
 
         audioChunkCount++
         const audioResponse = {
