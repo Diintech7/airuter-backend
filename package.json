@@ -38,6 +38,7 @@
     "passport-google-oauth20": "^2.0.0",
     "pdf-parse": "^1.1.1",
     "recharts": "^2.15.0",
+    "sarvamai": "^0.1.6-a6",
     "uuid": "^11.1.0",
     "ws": "^8.18.2"
   }
