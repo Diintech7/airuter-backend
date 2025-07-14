@@ -518,7 +518,6 @@ const setupUnifiedVoiceServer = (wss) => {
           ],
           max_tokens: 150,
           temperature: 0.5,
-          stream: true,
         }
 
         console.log(`🤖 [OPENAI] Making API request...`)
