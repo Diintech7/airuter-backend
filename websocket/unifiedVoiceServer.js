@@ -4,8 +4,8 @@ const fs = require("fs")
 const path = require("path")
 const { SarvamAIClient } = require("sarvamai")
 const mongoose = require("mongoose")
-const ApiKey = require("./ApiKey") // Assuming models are in the same directory
-const Tenant = require("./Tenant")
+const ApiKey = require("./models/ApiKey") // Assuming models are in the same directory
+const Tenant = require("./models/Tenant")
 
 const fetch = globalThis.fetch || require("node-fetch")
 
