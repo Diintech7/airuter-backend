@@ -558,11 +558,8 @@ const setupUnifiedVoiceServer = (wss) => {
         return
       }
 
-      // Validate API key format
-      if (!sarvamApiKey.startsWith('sk-')) {
-        console.log(`❌ [SARVAM] Invalid API key format. Expected 'sk-' prefix, got: ${sarvamApiKey.substring(0, 10)}...`)
-        return
-      }
+      // Only log the API key for debugging, do not block execution
+      console.log(`🔑 [SARVAM] Using API key: ${sarvamApiKey.substring(0, 12)}...`)
 
       try {
         console.log(`🔊 [SARVAM] Starting streaming synthesis:`)
