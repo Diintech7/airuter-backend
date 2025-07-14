@@ -73,7 +73,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const openaiApiKey = process.env.OPENAI_API_KEY
 
     const url = new URL(req.url, "http://localhost")
-    const language = url.searchParams.get("language") || "en"
+    const language = url.searchParams.get("language") || "hi"
 
     console.log(`🌐 Connection established with language: ${language}`)
     console.log(`🔑 API Keys configured:`)
