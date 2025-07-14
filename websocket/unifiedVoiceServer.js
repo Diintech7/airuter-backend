@@ -54,6 +54,9 @@ const setupUnifiedVoiceServer = (wss) => {
     const SILENCE_DURATION = 2000
     let isSpeaking = false
 
+    // TTS interruption state
+    let ttsInterrupted = false;
+
     // Audio streaming and interruption management
     let currentTTSSocket = null
     let isPlayingAudio = false
@@ -61,13 +64,112 @@ const setupUnifiedVoiceServer = (wss) => {
     let currentAudioChunk = 0
     let shouldInterruptAudio = false
     let greetingInProgress = false // Add flag to prevent interruption during greeting
-    let ttsChunkQueue = [] // New: queue for TTS sentence chunks
-    let ttsChunkInProgress = false // New: flag for chunked TTS
+
+    // --- TTS Queue Management ---
+    // Add utterance to TTS queue (only on VAD utterance end or final transcript)
+    const addUtteranceToTTSQueue = (text) => {
+      if (!text || !text.trim()) return;
+      // Clear queue if interrupted
+      if (ttsInterrupted) {
+        textProcessingQueue = [];
+        ttsInterrupted = false;
+      }
+      textProcessingQueue.push({
+        id: Date.now() + Math.random(),
+        text: text.trim(),
+        processed: false,
+      });
+      if (!isProcessingQueue) {
+        processTTSQueue();
+      }
+    };
+
+    // Process TTS queue: only one at a time, skip if interrupted
+    const processTTSQueue = async () => {
+      if (isProcessingQueue || textProcessingQueue.length === 0) return;
+      isProcessingQueue = true;
+      while (textProcessingQueue.length > 0) {
+        const queueItem = textProcessingQueue.shift();
+        if (ttsInterrupted) {
+          console.log('[TTS] Queue interrupted, skipping item');
+          break;
+        }
+        try {
+          console.log(`[TTS] Processing utterance: "${queueItem.text}"`);
+          isPlayingAudio = true;
+          await synthesizeAndSendResponse(queueItem.text);
+          queueItem.processed = true;
+          isPlayingAudio = false;
+        } catch (err) {
+          console.log(`[TTS] Error processing utterance: ${err.message}`);
+        }
+      }
+      isProcessingQueue = false;
+    };
+
+    // Interrupt current TTS playback and clear queue
+    const interruptCurrentAudio = () => {
+      if (greetingInProgress) {
+        console.log("🛑 [AUDIO] Interruption blocked - greeting in progress");
+        return;
+      }
+      console.log("🛑 [AUDIO] Interrupting current audio playback and clearing TTS queue");
+      shouldInterruptAudio = true;
+      isPlayingAudio = false;
+      audioQueue = [];
+      ttsInterrupted = true;
+      textProcessingQueue = [];
+      if (currentTTSSocket) {
+        try {
+          currentTTSSocket.close();
+          console.log("🛑 [SARVAM] TTS socket closed due to interruption");
+        } catch (error) {
+          console.log("❌ [SARVAM] Error closing TTS socket:", error.message);
+        }
+        currentTTSSocket = null;
+      }
+    };
+
+    // --- VAD Event Handling ---
+    // In handleDeepgramResponse, on VAD: SpeechStarted, interrupt TTS
+    // On VAD: UtteranceEnd or final transcript, add to TTS queue
+    // (This is a code comment for clarity; actual code is below)
+
+    // --- Replace addToTextQueue and processTextQueue usages ---
+    // In handleDeepgramResponse, replace addToTextQueue with addUtteranceToTTSQueue
+    // In processTextQueue, remove old logic (now handled by processTTSQueue)
+
+    // --- In handleDeepgramResponse ---
+    // ...
+    // if (is_final) {
+    //   currentTranscript += (currentTranscript ? " " : "") + transcript.trim();
+    //   addUtteranceToTTSQueue(currentTranscript);
+    //   startSilenceTimer();
+    //   ...
+    // }
+    // ...
+    // else if (data.type === "UtteranceEnd") {
+    //   if (isSpeaking) {
+    //     isSpeaking = false;
+    //     startSilenceTimer();
+    //     addUtteranceToTTSQueue(currentTranscript);
+    //     currentTranscript = "";
+    //     ...
+    //   }
+    // }
+    // ...
+    // else if (data.type === "SpeechStarted") {
+    //   if (isPlayingAudio) {
+    //     interruptCurrentAudio();
+    //   }
+    //   ...
+    // }
+    // ...
 
     // Audio processing
     const MIN_CHUNK_SIZE = 320
     const SEND_INTERVAL = 50
-    const GREETING_PROTECTION_DELAY = 0 // 5 seconds protection for greeting
+    const GREETING_PROTECTION_DELAY = 5000 // 5 seconds protection for greeting
 
     // API Keys
     const sarvamApiKey = process.env.SARVAM_API_KEY
@@ -95,98 +197,96 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     // Audio interruption handler
-    const interruptCurrentAudio = () => {
-      // Don't interrupt if greeting is in progress
-      if (greetingInProgress) {
-        console.log("🛑 [AUDIO] Interruption blocked - greeting in progress")
-        return
-      }
+    // const interruptCurrentAudio = () => {
+    //   // Don't interrupt if greeting is in progress
+    //   if (greetingInProgress) {
+    //     console.log("🛑 [AUDIO] Interruption blocked - greeting in progress")
+    //     return
+    //   }
 
-      console.log("🛑 [AUDIO] Interrupting current audio playback")
-      shouldInterruptAudio = true
-      isPlayingAudio = false
-      audioQueue = []
-      ttsChunkQueue = [] // Clear TTS chunk queue
-      ttsChunkInProgress = false
+    //   console.log("🛑 [AUDIO] Interrupting current audio playback")
+    //   shouldInterruptAudio = true
+    //   isPlayingAudio = false
+    //   audioQueue = []
       
-      if (currentTTSSocket) {
-        try {
-          currentTTSSocket.close()
-          console.log("🛑 [SARVAM] TTS socket closed due to interruption")
-        } catch (error) {
-          console.log("❌ [SARVAM] Error closing TTS socket:", error.message)
-        }
-        currentTTSSocket = null
-      }
-    }
+    //   if (currentTTSSocket) {
+    //     try {
+    //       currentTTSSocket.close()
+    //       console.log("🛑 [SARVAM] TTS socket closed due to interruption")
+    //     } catch (error) {
+    //       console.log("❌ [SARVAM] Error closing TTS socket:", error.message)
+    //     }
+    //     currentTTSSocket = null
+    //   }
+    // }
 
     // Text Processing Queue Management
-    const addToTextQueue = (text, type = "transcript") => {
-      const queueItem = {
-        id: Date.now() + Math.random(),
-        text: text.trim(),
-        type: type,
-        timestamp: new Date().toISOString(),
-        processed: false,
-      }
+    // const addToTextQueue = (text, type = "transcript") => {
+    //   const queueItem = {
+    //     id: Date.now() + Math.random(),
+    //     text: text.trim(),
+    //     type: type,
+    //     timestamp: new Date().toISOString(),
+    //     processed: false,
+    //   }
 
-      textProcessingQueue.push(queueItem)
-      console.log(`📝 [QUEUE] Added to text processing queue:`)
-      console.log(`   - ID: ${queueItem.id}`)
-      console.log(`   - Type: ${queueItem.type}`)
-      console.log(`   - Text: "${queueItem.text}"`)
-      console.log(`   - Queue Length: ${textProcessingQueue.length}`)
+    //   textProcessingQueue.push(queueItem)
+    //   console.log(`📝 [QUEUE] Added to text processing queue:`)
+    //   console.log(`   - ID: ${queueItem.id}`)
+    //   console.log(`   - Type: ${queueItem.type}`)
+    //   console.log(`   - Text: "${queueItem.text}"`)
+    //   console.log(`   - Queue Length: ${textProcessingQueue.length}`)
 
-      // Process queue if not already processing
-      if (!isProcessingQueue) {
-        processTextQueue()
-      }
-    }
+    //   // Process queue if not already processing
+    //   if (!isProcessingQueue) {
+    //     processTextQueue()
+    //   }
+    // }
 
-    const processTextQueue = async () => {
-      if (isProcessingQueue || textProcessingQueue.length === 0) {
-        return
-      }
+    // const processTextQueue = async () => {
+    //   if (isProcessingQueue || textProcessingQueue.length === 0) {
+    //     return
+    //   }
 
-      isProcessingQueue = true
-      console.log(`🔄 [QUEUE] Starting queue processing. Items in queue: ${textProcessingQueue.length}`)
+    //   isProcessingQueue = true
+    //   console.log(`🔄 [QUEUE] Starting queue processing. Items in queue: ${textProcessingQueue.length}`)
 
-      while (textProcessingQueue.length > 0) {
-        const queueItem = textProcessingQueue.shift()
+    //   while (textProcessingQueue.length > 0) {
+    //     const queueItem = textProcessingQueue.shift()
 
-        try {
-          console.log(`⚡ [QUEUE] Processing item:`)
-          console.log(`   - ID: ${queueItem.id}`)
-          console.log(`   - Text: "${queueItem.text}"`)
-          console.log(`   - Timestamp: ${queueItem.timestamp}`)
+    //     try {
+    //       console.log(`⚡ [QUEUE] Processing item:`)
+    //       console.log(`   - ID: ${queueItem.id}`)
+    //       console.log(`   - Text: "${queueItem.text}"`)
+    //       console.log(`   - Timestamp: ${queueItem.timestamp}`)
 
-          if (queueItem.text && queueItem.text.length > 0) {
-            // Send to OpenAI
-            console.log(`🤖 [OPENAI] Sending text to OpenAI: "${queueItem.text}"`)
-            const openaiResponse = await sendToOpenAI(queueItem.text)
+    //       if (queueItem.text && queueItem.text.length > 0) {
+    //         // Send to OpenAI
+    //         console.log(`🤖 [OPENAI] Sending text to OpenAI: "${queueItem.text}"`)
+    //         const openaiResponse = await sendToOpenAI(queueItem.text)
 
-            if (openaiResponse) {
-              console.log(`✅ [OPENAI] Received response: "${openaiResponse}"`)
+    //         if (openaiResponse) {
+    //           console.log(`✅ [OPENAI] Received response: "${openaiResponse}"`)
 
-              // Send to Sarvam TTS for voice synthesis in chunks
-              console.log(`🔊 [SARVAM] Sending to voice synthesis in chunks: "${openaiResponse}"`)
-              await playTTSChunks(openaiResponse)
-              console.log(`✅ [SARVAM] Voice response sent successfully (chunked)`)
-            } else {
-              console.log(`❌ [OPENAI] No response received for: "${queueItem.text}"`)
-            }
-          }
+    //           // Send to Sarvam TTS for voice synthesis
+    //           console.log(`🔊 [SARVAM] Sending to voice synthesis: "${openaiResponse}"`)
+    //           await synthesizeAndSendResponse(openaiResponse)
+    //           console.log(`✅ [SARVAM] Voice response sent successfully`)
+    //         } else {
+    //           console.log(`❌ [OPENAI] No response received for: "${queueItem.text}"`)
+    //         }
+    //       }
 
-          queueItem.processed = true
-          console.log(`✅ [QUEUE] Item processed successfully: ${queueItem.id}`)
-        } catch (error) {
-          console.log(`❌ [QUEUE] Error processing item ${queueItem.id}:`, error.message)
-        }
-      }
+    //       queueItem.processed = true
+    //       console.log(`✅ [QUEUE] Item processed successfully: ${queueItem.id}`)
+    //     } catch (error) {
+    //       console.log(`❌ [QUEUE] Error processing item ${queueItem.id}:`, error.message)
+    //     }
+    //   }
 
-      isProcessingQueue = false
-      console.log(`🏁 [QUEUE] Queue processing completed`)
-    }
+    //   isProcessingQueue = false
+    //   console.log(`🏁 [QUEUE] Queue processing completed`)
+    // }
 
     // Persistent Deepgram Connection - Connect once and keep alive
     const connectToDeepgram = async () => {
@@ -306,7 +406,7 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log(`📝 [DEEPGRAM] Final accumulated transcript: "${currentTranscript}"`)
 
               // Add to processing queue
-              addToTextQueue(currentTranscript, "final_transcript")
+              addUtteranceToTTSQueue(currentTranscript)
 
               // Start silence timer for final transcripts
               startSilenceTimer()
@@ -466,7 +566,7 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`🔕 [SILENCE] Processing complete utterance: "${currentTranscript}"`)
 
         // Add to queue for processing
-        addToTextQueue(currentTranscript.trim(), "complete_utterance")
+        // addToTextQueue(currentTranscript.trim(), "complete_utterance") // This line is removed
 
         // Reset for next utterance
         currentTranscript = ""
@@ -733,40 +833,6 @@ const setupUnifiedVoiceServer = (wss) => {
           }))
           console.log(`📝 [GREETING] Sent fallback text response`)
         }
-      }
-    }
-
-    // Play TTS response in small chunks (sentences)
-    const playTTSChunks = async (text) => {
-      if (!text || !text.trim()) return;
-      // Split text into sentences (simple split, can be improved)
-      const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
-      ttsChunkQueue = sentences.map(s => s.trim()).filter(Boolean);
-      ttsChunkInProgress = false;
-      shouldInterruptAudio = false;
-      playNextTTSChunk();
-    }
-
-    const playNextTTSChunk = async () => {
-      if (shouldInterruptAudio || ttsChunkQueue.length === 0) {
-        isPlayingAudio = false;
-        ttsChunkInProgress = false;
-        return;
-      }
-      isPlayingAudio = true;
-      ttsChunkInProgress = true;
-      const nextSentence = ttsChunkQueue.shift();
-      try {
-        await synthesizeAndSendResponse(nextSentence);
-      } catch (e) {
-        console.log(`[TTS] Error playing chunk: ${e.message}`);
-      }
-      // Only play next if not interrupted
-      if (!shouldInterruptAudio) {
-        setTimeout(() => playNextTTSChunk(), 100); // Small delay between chunks
-      } else {
-        isPlayingAudio = false;
-        ttsChunkInProgress = false;
       }
     }
 
