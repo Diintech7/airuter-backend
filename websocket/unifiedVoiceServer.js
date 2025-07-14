@@ -65,7 +65,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Audio processing
     const MIN_CHUNK_SIZE = 320
     const SEND_INTERVAL = 50
-    const GREETING_PROTECTION_DELAY = 3000 // 3 seconds protection for greeting
+    const GREETING_PROTECTION_DELAY = 5000 // 5 seconds protection for greeting
 
     // API Keys
     const sarvamApiKey = process.env.SARVAM_API_KEY
@@ -561,6 +561,18 @@ const setupUnifiedVoiceServer = (wss) => {
       // Only log the API key for debugging, do not block execution
       console.log(`🔑 [SARVAM] Using API key: ${sarvamApiKey.substring(0, 12)}...`)
 
+      // Set greeting protection if this is a greeting (BEFORE TTS connection)
+      const isGreeting = text.includes("Thank you for contacting") || text.includes("संपर्क करने के लिए")
+      if (isGreeting) {
+        greetingInProgress = true
+        console.log("🛡️ [GREETING] Greeting protection enabled (pre-TTS)")
+        // Disable greeting protection after delay
+        setTimeout(() => {
+          greetingInProgress = false
+          console.log("🛡️ [GREETING] Greeting protection disabled")
+        }, GREETING_PROTECTION_DELAY)
+      }
+
       try {
         console.log(`🔊 [SARVAM] Starting streaming synthesis:`)
         console.log(`   - Text: "${text}"`)
@@ -572,19 +584,6 @@ const setupUnifiedVoiceServer = (wss) => {
         isPlayingAudio = true
         currentAudioChunk = 0
         audioQueue = []
-
-        // Set greeting protection if this is a greeting
-        const isGreeting = text.includes("Thank you for contacting") || text.includes("संपर्क करने के लिए")
-        if (isGreeting) {
-          greetingInProgress = true
-          console.log("🛡️ [GREETING] Greeting protection enabled")
-          
-          // Disable greeting protection after delay
-          setTimeout(() => {
-            greetingInProgress = false
-            console.log("🛡️ [GREETING] Greeting protection disabled")
-          }, GREETING_PROTECTION_DELAY)
-        }
 
         const client = new SarvamAIClient({
           apiSubscriptionKey: sarvamApiKey,
@@ -634,6 +633,7 @@ const setupUnifiedVoiceServer = (wss) => {
         })
 
         socket.on("message", (message) => {
+          console.log(`[SARVAM][RAW MESSAGE]`, message)
           console.log(`🔊 [SARVAM] Received message type: ${message.type}`)
           
           if (shouldInterruptAudio && !greetingInProgress) {
