@@ -726,7 +726,7 @@ const setupUnifiedVoiceServer = (wss) => {
         en: "Hi! Thank you for contacting Aitota.",
       }
 
-      const greetingText = greetings[language] || greetings["hi"]
+      const greetingText = greetings["hi"]
       console.log(`👋 [GREETING] Sending greeting: "${greetingText}"`)
 
       try {
