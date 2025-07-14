@@ -744,8 +744,7 @@ const setupUnifiedVoiceServer = (wss) => {
       ttsChunkQueue = sentences.map(s => s.trim()).filter(Boolean);
       ttsChunkInProgress = false;
       shouldInterruptAudio = false;
-      isPlayingAudio = true;
-      await playNextTTSChunk();
+      playNextTTSChunk();
     }
 
     const playNextTTSChunk = async () => {
@@ -754,6 +753,7 @@ const setupUnifiedVoiceServer = (wss) => {
         ttsChunkInProgress = false;
         return;
       }
+      isPlayingAudio = true;
       ttsChunkInProgress = true;
       const nextSentence = ttsChunkQueue.shift();
       try {
@@ -763,10 +763,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
       // Only play next if not interrupted
       if (!shouldInterruptAudio) {
-        // Add a small break between chunks (e.g., 200ms)
-        setTimeout(async () => {
-          await playNextTTSChunk();
-        }, 200);
+        setTimeout(() => playNextTTSChunk(), 100); // Small delay between chunks
       } else {
         isPlayingAudio = false;
         ttsChunkInProgress = false;
