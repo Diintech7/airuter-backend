@@ -203,7 +203,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("model", "nova-2")
-          deepgramUrl.searchParams.append("language", "en-In")
+          deepgramUrl.searchParams.append("language", "hi-IN")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
@@ -581,7 +581,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Build request body as in sarvamStreaming.js
         const requestBody = {
           inputs: [text],
-          target_language_code: language === "hi" ? "hi-IN" : "en-IN",
+          target_language_code: language === "hi" ? "hi-IN" : "hi-IN",
           speaker: language === "hi" ? "anushka" : "abhilash",
           pitch: 0,
           pace: 1.0,
@@ -722,7 +722,7 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log(`🔑 [SARVAM] Testing API key: ${sarvamApiKey.substring(0, 10)}...`)
       
       const greetings = {
-        hi: "नमस्ते! Aitota से संपर्क करने के लिए धन्यवाद।",
+        hi: "नमस्कार! एआई तोता में संपर्क करने के लिए धन्यवाद। बताइए, मैं आपकी किस प्रकार मदद कर सकता हूँ?",
         en: "Hi! Thank you for contacting Aitota.",
       }
 
