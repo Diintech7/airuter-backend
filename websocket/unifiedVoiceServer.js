@@ -67,7 +67,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Audio processing
     const MIN_CHUNK_SIZE = 320
     const SEND_INTERVAL = 50
-    const GREETING_PROTECTION_DELAY = 5000 // 5 seconds protection for greeting
+    const GREETING_PROTECTION_DELAY = 0 // 5 seconds protection for greeting
 
     // API Keys
     const sarvamApiKey = process.env.SARVAM_API_KEY
