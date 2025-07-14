@@ -4,7 +4,7 @@ const fs = require("fs")
 const path = require("path")
 const { SarvamAIClient } = require("sarvamai")
 const mongoose = require("mongoose")
-const ApiKey = require("../models/ApiKey") // Assuming models are in the same directory
+const ApiKey = require("../models/ApiKey")
 const Tenant = require("../models/Tenant")
 
 const fetch = globalThis.fetch || require("node-fetch")
@@ -13,6 +13,94 @@ if (!fetch) {
   console.error("❌ Fetch not available. Please use Node.js 18+ or install node-fetch@2")
   process.exit(1)
 }
+
+// Agent Schema - Import the schema from your models
+const agentSchema = new mongoose.Schema({
+  // Tenant Information
+  tenantId: { type: String, required: true, index: true },
+
+  // Personal Information
+  agentName: { type: String, required: true },
+  description: { type: String, required: true },
+  category: { type: String },
+  personality: {
+    type: String,
+    enum: ["formal", "informal", "friendly", "flirty", "disciplined"],
+    default: "formal",
+  },
+  language: { type: String, default: "en" },
+
+  // System Information
+  firstMessage: { type: String, required: true },
+  systemPrompt: { type: String, required: true },
+  sttSelection: {
+    type: String,
+    enum: ["deepgram", "whisper", "google", "azure", "aws"],
+    default: "deepgram",
+  },
+  ttsSelection: {
+    type: String,
+    enum: ["sarvam", "elevenlabs", "openai", "google", "azure", "aws"],
+    default: "sarvam",
+  },
+  llmSelection: {
+    type: String,
+    enum: ["openai", "anthropic", "google", "azure"],
+    default: "openai",
+  },
+  voiceSelection: {
+    type: String,
+    enum: [
+      "default",
+      "male-professional",
+      "female-professional",
+      "male-friendly",
+      "female-friendly",
+      "neutral",
+      "abhilash",
+      "anushka",
+    ],
+    default: "default",
+  },
+  contextMemory: { type: String },
+  brandInfo: { type: String },
+
+  // Telephony
+  didNumber: { type: String },
+  serviceProvider: {
+    type: String,
+    enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
+  },
+
+  // Audio storage
+  audioFile: { type: String },
+  audioBytes: { type: Buffer },
+  audioMetadata: {
+    format: { type: String, default: "mp3" },
+    sampleRate: { type: Number, default: 22050 },
+    channels: { type: Number, default: 1 },
+    size: { type: Number },
+    generatedAt: { type: Date },
+    language: { type: String, default: "en" },
+    speaker: { type: String },
+    provider: { type: String, default: "sarvam" },
+  },
+
+  // Timestamps
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+})
+
+// Compound index for tenant + agent name uniqueness
+agentSchema.index({ tenantId: 1, agentName: 1 }, { unique: true })
+
+// Update the updatedAt field before saving
+agentSchema.pre("save", function (next) {
+  this.updatedAt = Date.now()
+  next()
+})
+
+const Agent = mongoose.model("Agent", agentSchema)
 
 // Database connection
 const connectToDatabase = async () => {
@@ -30,7 +118,7 @@ const connectToDatabase = async () => {
 connectToDatabase()
 
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 Unified Voice WebSocket server initialized with Database Integration")
+  console.log("🚀 Unified Voice WebSocket server initialized with Agent Integration")
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 New unified voice connection established")
@@ -41,19 +129,86 @@ const setupUnifiedVoiceServer = (wss) => {
       origin: req.headers.origin,
     })
 
-    // Extract tenant ID from URL parameters or headers
+    // Extract parameters from URL
     const url = new URL(req.url, "http://localhost")
     const tenantId = url.searchParams.get("tenantId") || req.headers["x-tenant-id"] || "default"
+    const agentId = url.searchParams.get("agentId") || req.headers["x-agent-id"]
+    const agentName = url.searchParams.get("agentName") || req.headers["x-agent-name"]
     const language = url.searchParams.get("language") || "hi"
 
     console.log(`🏢 Tenant ID: ${tenantId}`)
+    console.log(`🤖 Agent ID: ${agentId}`)
+    console.log(`🤖 Agent Name: ${agentName}`)
     console.log(`🌐 Language: ${language}`)
+
+    // Agent configuration
+    let agentConfig = null
+    let systemPrompt = null
+    let greetingAudio = null
 
     // API Keys will be loaded from database
     let apiKeys = {
       deepgram: null,
       sarvam: null,
       openai: null
+    }
+
+    // Load agent configuration from database
+    const loadAgentConfig = async () => {
+      try {
+        console.log(`🤖 Loading agent configuration for tenant: ${tenantId}`)
+        
+        let agent = null
+        
+        // Try to find by agent ID first
+        if (agentId) {
+          agent = await Agent.findOne({ _id: agentId, tenantId })
+          console.log(`🔍 Searching by Agent ID: ${agentId}`)
+        }
+        
+        // If not found by ID, try by agent name
+        if (!agent && agentName) {
+          agent = await Agent.findOne({ agentName, tenantId })
+          console.log(`🔍 Searching by Agent Name: ${agentName}`)
+        }
+        
+        // If still not found, get the first agent for the tenant
+        if (!agent) {
+          agent = await Agent.findOne({ tenantId }).sort({ createdAt: -1 })
+          console.log(`🔍 Using first available agent for tenant: ${tenantId}`)
+        }
+
+        if (!agent) {
+          console.error(`❌ No agent found for tenant: ${tenantId}`)
+          return false
+        }
+
+        agentConfig = agent
+        systemPrompt = agent.systemPrompt || `You are ${agent.agentName}, a helpful voice assistant. ${agent.description || ''} Keep responses brief and conversational for telephonic conversations.`
+        
+        // Extract greeting audio from database
+        if (agent.audioBytes && agent.audioBytes.length > 0) {
+          greetingAudio = agent.audioBytes
+          console.log(`🎵 Greeting audio loaded from database: ${agent.audioBytes.length} bytes`)
+        }
+
+        console.log(`✅ Agent configuration loaded:`)
+        console.log(`   - Agent Name: ${agent.agentName}`)
+        console.log(`   - Description: ${agent.description}`)
+        console.log(`   - Language: ${agent.language}`)
+        console.log(`   - Personality: ${agent.personality}`)
+        console.log(`   - TTS Provider: ${agent.ttsSelection}`)
+        console.log(`   - LLM Provider: ${agent.llmSelection}`)
+        console.log(`   - Voice Selection: ${agent.voiceSelection}`)
+        console.log(`   - First Message: ${agent.firstMessage}`)
+        console.log(`   - System Prompt: ${systemPrompt.substring(0, 100)}...`)
+        console.log(`   - Greeting Audio: ${greetingAudio ? '✅ Available' : '❌ Not Available'}`)
+
+        return true
+      } catch (error) {
+        console.error(`❌ Error loading agent configuration: ${error.message}`)
+        return false
+      }
     }
 
     // Load API keys from database
@@ -282,7 +437,11 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("model", "nova-2")
-          deepgramUrl.searchParams.append("language", "hi")
+          
+          // Use agent's configured language or fallback to default
+          const agentLanguage = agentConfig?.language || language || "hi"
+          deepgramUrl.searchParams.append("language", agentLanguage)
+          
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
@@ -393,8 +552,9 @@ const setupUnifiedVoiceServer = (wss) => {
                     data: transcript,
                     confidence: confidence,
                     is_final: true,
-                    language: language,
+                    language: agentConfig?.language || language,
                     accumulated: currentTranscript,
+                    agent: agentConfig?.agentName || "Unknown",
                   }),
                 )
               }
@@ -409,8 +569,9 @@ const setupUnifiedVoiceServer = (wss) => {
                     data: transcript,
                     confidence: confidence,
                     is_final: false,
-                    language: language,
+                    language: agentConfig?.language || language,
                     accumulated: displayTranscript,
+                    agent: agentConfig?.agentName || "Unknown",
                   }),
                 )
               }
@@ -436,6 +597,7 @@ const setupUnifiedVoiceServer = (wss) => {
               timestamp: data.timestamp,
               channel: data.channel,
               session_id: sessionId,
+              agent: agentConfig?.agentName || "Unknown",
               message: "Speech activity detected by VAD",
             }),
           )
@@ -454,6 +616,7 @@ const setupUnifiedVoiceServer = (wss) => {
               JSON.stringify({
                 type: "utterance_end",
                 session_id: sessionId,
+                agent: agentConfig?.agentName || "Unknown",
                 accumulated_transcript: currentTranscript,
                 message: "End of speech utterance detected",
               }),
@@ -539,7 +702,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // OpenAI Integration
+    // OpenAI Integration with Agent Context
     const sendToOpenAI = async (userMessage) => {
       if (isProcessingOpenAI || !apiKeys.openai || !userMessage.trim()) {
         console.log(
@@ -549,7 +712,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       isProcessingOpenAI = true
-      console.log(`🤖 [OPENAI] Sending request for tenant ${tenantId}:`)
+      console.log(`🤖 [OPENAI] Sending request for agent ${agentConfig?.agentName || 'Unknown'}:`)
       console.log(`   - Message: "${userMessage}"`)
       console.log(`   - Session ID: ${sessionId}`)
 
@@ -563,12 +726,26 @@ const setupUnifiedVoiceServer = (wss) => {
           content: userMessage,
         })
 
+        // Use agent's configured LLM model or fallback to default
+        const llmModel = agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini"
+        
+        // Build system prompt with agent context
+        const agentSystemPrompt = systemPrompt || `You are ${agentConfig?.agentName || 'an AI assistant'}, a helpful voice assistant for telephonic conversations. 
+        ${agentConfig?.description || ''} 
+        
+        Your personality is ${agentConfig?.personality || 'formal'}. 
+        ${agentConfig?.contextMemory || ''} 
+        ${agentConfig?.brandInfo || ''} 
+        
+        Keep responses very short and conversational, maximum 2-3 sentences. You're speaking to someone over the phone so be natural and brief. 
+        Respond in ${agentConfig?.language === "hi" ? "Hindi" : agentConfig?.language || "Hindi"}.`
+
         const requestBody = {
-          model: "gpt-4o-mini",
+          model: llmModel,
           messages: [
             {
               role: "system",
-              content: `You are a helpful voice assistant for telephonic conversations. Keep responses very short and conversational, maximum 2-3 sentences. You're speaking to someone over the phone so be natural and brief. Respond in ${language === "hi-IN" ? "Hindi" : "Hindi"}.`
+              content: agentSystemPrompt
             },
             ...fullConversationHistory.slice(-10)
           ],
@@ -576,7 +753,11 @@ const setupUnifiedVoiceServer = (wss) => {
           temperature: 0.5,
         }
 
-        console.log(`🤖 [OPENAI] Making API request...`)
+        console.log(`🤖 [OPENAI] Making API request with agent context...`)
+        console.log(`   - Model: ${llmModel}`)
+        console.log(`   - Agent: ${agentConfig?.agentName || 'Unknown'}`)
+        console.log(`   - Personality: ${agentConfig?.personality || 'formal'}`)
+        
         const response = await fetch(apiUrl, {
           method: "POST",
           headers: { 
@@ -623,20 +804,81 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // TTS Synthesis with Sarvam
+        // TTS Synthesis with Sarvam or using pre-generated audio
     const synthesizeAndSendResponse = async (text) => {
-      if (!apiKeys.sarvam || !text.trim()) {
-        console.log(`[SARVAM] Skipping synthesis - API Key: ${!!apiKeys.sarvam}, Text: "${text}"`)
+      if (!text.trim()) {
+        console.log(`[TTS] Skipping synthesis - Empty text`)
+        return
+      }
+
+      // Check if this is the first message and we have pre-generated audio
+      if (!connectionGreetingSent && greetingAudio && 
+          text === agentConfig?.firstMessage) {
+        console.log(`🎵 [AGENT] Using pre-generated greeting audio`)
+        
+        try {
+          const pythonBytesString = bufferToPythonBytesString(greetingAudio)
+          
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: 1,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: agentConfig?.audioMetadata?.sampleRate || 22050,
+              channels: agentConfig?.audioMetadata?.channels || 1,
+              sample_width: 2,
+              is_streaming: false,
+              format: agentConfig?.audioMetadata?.format || "mp3",
+            },
+            type: "ai_response",
+          }
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(audioResponse))
+            ws.send(JSON.stringify({
+              type: "ai_response_complete",
+              session_id: sessionId,
+              total_chunks: 1,
+            }))
+            console.log(`✅ [AGENT] Pre-generated audio sent successfully`)
+          }
+          
+          connectionGreetingSent = true
+          return
+        } catch (error) {
+          console.log(`❌ [AGENT] Error using pre-generated audio: ${error.message}`)
+          // Fall through to regular TTS synthesis
+        }
+      }
+
+      // Use agent's configured TTS provider
+      const ttsProvider = agentConfig?.ttsSelection || "sarvam"
+      
+      if (ttsProvider === "sarvam" && apiKeys.sarvam) {
+        await synthesizeWithSarvam(text)
+      } else {
+        console.log(`❌ [TTS] No available TTS provider configured`)
+      }
+    }
+
+    // Sarvam TTS Synthesis
+    const synthesizeWithSarvam = async (text) => {
+      if (!apiKeys.sarvam) {
+        console.log(`[SARVAM] Skipping synthesis - No API key`)
         return
       }
 
       const sarvamStartTime = Date.now()
 
       try {
+        // Use agent's configured voice selection
+        const voice = agentConfig?.voiceSelection || "anushka"
+        const lang = agentConfig?.language === "hi" ? "hi-IN" : "hi-IN"
+
         const requestBody = {
           inputs: [text],
-          target_language_code: language === "hi-IN" ? "hi-IN" : "hi-IN",
-          speaker: language === "hi-IN" ? "anushka" : "abhilash",
+          target_language_code: lang,
+          speaker: voice,
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
@@ -645,7 +887,7 @@ const setupUnifiedVoiceServer = (wss) => {
           model: "bulbul:v2"
         }
 
-        console.log("[SARVAM] TTS Request for tenant", tenantId, ":", requestBody)
+        console.log("[SARVAM] TTS Request for agent", agentConfig?.agentName, ":", requestBody)
 
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
           method: "POST",
@@ -750,23 +992,23 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     const sendGreeting = async () => {
-      if (connectionGreetingSent || !apiKeys.sarvam || !sessionId) {
-        console.log(`⚠️ [GREETING] Skipping greeting - Sent: ${connectionGreetingSent}, API Key: ${!!apiKeys.sarvam}, Session: ${!!sessionId}`)
+      if (connectionGreetingSent || !sessionId) {
+        console.log(`⚠️ [GREETING] Skipping greeting - Already sent or no session`)
         return
       }
 
-      const greetings = {
-        hi: "नमस्कार! एआई तोता में संपर्क करने के लिए धन्यवाद। बताइए, मैं आपकी किस प्रकार मदद कर सकता हूँ?",
-        en: "Hi! Thank you for contacting Aitota.",
-      }
+      // Use agent's first message if available
+      const greetingText = agentConfig?.firstMessage || 
+        "नमस्कार! मैं आपकी किस प्रकार मदद कर सकता हूँ?"
 
-      const greetingText = greetings["hi"]
-      console.log(`👋 [GREETING] Sending greeting for tenant ${tenantId}: "${greetingText}"`)
+      console.log(`👋 [GREETING] Sending greeting for agent ${agentConfig?.agentName}: "${greetingText}"`)
 
       try {
+        greetingInProgress = true
         await new Promise(resolve => setTimeout(resolve, 1000))
         await synthesizeAndSendResponse(greetingText)
         connectionGreetingSent = true
+        greetingInProgress = false
         console.log(`✅ [GREETING] Greeting sent successfully!`)
       } catch (error) {
         console.log(`❌ [GREETING] Failed to send greeting: ${error.message}`)
@@ -831,7 +1073,19 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log(`   - Session ID: ${sessionId}`)
             console.log(`   - Language: ${language}`)
 
-            // Load API keys for this tenant
+            // Load agent configuration first
+            const agentLoaded = await loadAgentConfig()
+            if (!agentLoaded) {
+              console.log(`❌ [SESSION] Cannot start session - Agent not configured`)
+              ws.send(JSON.stringify({
+                type: "error",
+                message: "Agent configuration not found",
+                session_id: sessionId
+              }))
+              return
+            }
+
+            // Then load API keys
             const keysLoaded = await loadApiKeys()
             if (!keysLoaded) {
               console.log(`❌ [SESSION] Cannot start session - API keys not available`)
@@ -849,8 +1103,9 @@ const setupUnifiedVoiceServer = (wss) => {
                 JSON.stringify({
                   type: "session_started",
                   session_id: sessionId,
-                  language: language,
-                  message: "SIP call started, establishing persistent Deepgram connection.",
+                  language: agentConfig?.language || language,
+                  agent: agentConfig?.agentName || "Unknown",
+                  message: "SIP call started, establishing persistent connection.",
                 }),
               )
             }
@@ -921,6 +1176,7 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log(`🔗 [SESSION] Unified voice connection closed for session ${sessionId}`)
       console.log(`📊 [SESSION] Final statistics:`)
       console.log(`   - Tenant ID: ${tenantId}`)
+      console.log(`   - Agent: ${agentConfig?.agentName || "Unknown"}`)
       console.log(`   - Session ID: ${sessionId || "Not set"}`)
       console.log(`   - Audio chunks processed: ${audioChunkCount}`)
       console.log(`   - Conversation history: ${fullConversationHistory.length} messages`)
