@@ -440,6 +440,7 @@ const setupUnifiedVoiceServer = (wss) => {
         handleSilenceDetected()
       }, SILENCE_DURATION)
     }
+    
 
     const resetSilenceTimer = () => {
       if (silenceTimeout) {
@@ -484,6 +485,8 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log(`   - Session ID: ${sessionId}`)
       console.log(`   - Conversation History Length: ${fullConversationHistory.length}`)
 
+      const openaiStartTime = Date.now(); // Start timing
+
       try {
         const apiUrl = "https://api.openai.com/v1/chat/completions"
 
@@ -503,7 +506,8 @@ const setupUnifiedVoiceServer = (wss) => {
             ...fullConversationHistory.slice(-10) // Keep last 10 messages for context
           ],
           max_tokens: 150,
-          temperature: 0.7,
+          temperature: 0.5,
+          stream: true,
         }
 
         console.log(`🤖 [OPENAI] Making API request...`)
@@ -515,6 +519,9 @@ const setupUnifiedVoiceServer = (wss) => {
           },
           body: JSON.stringify(requestBody),
         })
+
+        const openaiEndTime = Date.now(); // End timing
+        console.log(`[OPENAI] API call duration: ${openaiEndTime - openaiStartTime} ms`);
 
         if (!response.ok) {
           const errorText = await response.text()
@@ -558,6 +565,8 @@ const setupUnifiedVoiceServer = (wss) => {
         return;
       }
 
+      const sarvamStartTime = Date.now(); // Start timing
+
       try {
         // Build request body as in sarvamStreaming.js
         const requestBody = {
@@ -582,6 +591,9 @@ const setupUnifiedVoiceServer = (wss) => {
           },
           body: JSON.stringify(requestBody),
         });
+
+        const sarvamEndTime = Date.now(); // End timing
+        console.log(`[SARVAM] TTS API call duration: ${sarvamEndTime - sarvamStartTime} ms`);
 
         if (!response.ok) {
           const errorText = await response.text();
