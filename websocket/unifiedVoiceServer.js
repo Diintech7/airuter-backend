@@ -61,6 +61,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let currentAudioChunk = 0
     let shouldInterruptAudio = false
     let greetingInProgress = false // Add flag to prevent interruption during greeting
+    let ttsChunkQueue = [] // New: queue for TTS sentence chunks
+    let ttsChunkInProgress = false // New: flag for chunked TTS
 
     // Audio processing
     const MIN_CHUNK_SIZE = 320
@@ -104,6 +106,8 @@ const setupUnifiedVoiceServer = (wss) => {
       shouldInterruptAudio = true
       isPlayingAudio = false
       audioQueue = []
+      ttsChunkQueue = [] // Clear TTS chunk queue
+      ttsChunkInProgress = false
       
       if (currentTTSSocket) {
         try {
@@ -164,10 +168,10 @@ const setupUnifiedVoiceServer = (wss) => {
             if (openaiResponse) {
               console.log(`✅ [OPENAI] Received response: "${openaiResponse}"`)
 
-              // Send to Sarvam TTS for voice synthesis
-              console.log(`🔊 [SARVAM] Sending to voice synthesis: "${openaiResponse}"`)
-              await synthesizeAndSendResponse(openaiResponse)
-              console.log(`✅ [SARVAM] Voice response sent successfully`)
+              // Send to Sarvam TTS for voice synthesis in chunks
+              console.log(`🔊 [SARVAM] Sending to voice synthesis in chunks: "${openaiResponse}"`)
+              await playTTSChunks(openaiResponse)
+              console.log(`✅ [SARVAM] Voice response sent successfully (chunked)`)
             } else {
               console.log(`❌ [OPENAI] No response received for: "${queueItem.text}"`)
             }
@@ -729,6 +733,40 @@ const setupUnifiedVoiceServer = (wss) => {
           }))
           console.log(`📝 [GREETING] Sent fallback text response`)
         }
+      }
+    }
+
+    // Play TTS response in small chunks (sentences)
+    const playTTSChunks = async (text) => {
+      if (!text || !text.trim()) return;
+      // Split text into sentences (simple split, can be improved)
+      const sentences = text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
+      ttsChunkQueue = sentences.map(s => s.trim()).filter(Boolean);
+      ttsChunkInProgress = false;
+      shouldInterruptAudio = false;
+      playNextTTSChunk();
+    }
+
+    const playNextTTSChunk = async () => {
+      if (shouldInterruptAudio || ttsChunkQueue.length === 0) {
+        isPlayingAudio = false;
+        ttsChunkInProgress = false;
+        return;
+      }
+      isPlayingAudio = true;
+      ttsChunkInProgress = true;
+      const nextSentence = ttsChunkQueue.shift();
+      try {
+        await synthesizeAndSendResponse(nextSentence);
+      } catch (e) {
+        console.log(`[TTS] Error playing chunk: ${e.message}`);
+      }
+      // Only play next if not interrupted
+      if (!shouldInterruptAudio) {
+        setTimeout(() => playNextTTSChunk(), 100); // Small delay between chunks
+      } else {
+        isPlayingAudio = false;
+        ttsChunkInProgress = false;
       }
     }
 
