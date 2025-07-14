@@ -512,7 +512,7 @@ const setupUnifiedVoiceServer = (wss) => {
           messages: [
             {
               role: "system",
-              content: `You are a helpful voice assistant for telephonic conversations. Keep responses very short and conversational, maximum 2-3 sentences. You're speaking to someone over the phone so be natural and brief. Respond in ${language === "hi" ? "Hindi" : "English"}.`
+              content: `You are a helpful voice assistant for telephonic conversations. Keep responses very short and conversational, maximum 2-3 sentences. You're speaking to someone over the phone so be natural and brief. Respond in ${language === "hi" ? "Hindi" : "Hinidi"}.`
             },
             ...fullConversationHistory.slice(-10) // Keep last 10 messages for context
           ],
