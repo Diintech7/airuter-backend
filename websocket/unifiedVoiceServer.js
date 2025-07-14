@@ -203,7 +203,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("model", "nova-2")
-          deepgramUrl.searchParams.append("language", "hi")
+          deepgramUrl.searchParams.append("language", "hi-IN")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
@@ -512,7 +512,7 @@ const setupUnifiedVoiceServer = (wss) => {
           messages: [
             {
               role: "system",
-              content: `You are a helpful voice assistant for telephonic conversations. Keep responses very short and conversational, maximum 2-3 sentences. You're speaking to someone over the phone so be natural and brief. Respond in ${language === "hi" ? "Hindi" : "Hinidi"}.`
+              content: `You are a helpful voice assistant for telephonic conversations. Keep responses very short and conversational, maximum 2-3 sentences. You're speaking to someone over the phone so be natural and brief. Respond in ${language === "hi-IN" ? "Hindi" : "Hinidi"}.`
             },
             ...fullConversationHistory.slice(-10) // Keep last 10 messages for context
           ],
@@ -581,8 +581,8 @@ const setupUnifiedVoiceServer = (wss) => {
         // Build request body as in sarvamStreaming.js
         const requestBody = {
           inputs: [text],
-          target_language_code: language === "hi" ? "hi" : "hi",
-          speaker: language === "hi" ? "anushka" : "abhilash",
+          target_language_code: language === "hi-IN" ? "hi-IN" : "hi-IN",
+          speaker: language === "hi-IN" ? "anushka" : "abhilash",
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
