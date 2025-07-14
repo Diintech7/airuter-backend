@@ -166,7 +166,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
               // Send to Sarvam TTS for voice synthesis
               console.log(`🔊 [SARVAM] Sending to voice synthesis: "${openaiResponse}"`)
-              await synthesizeAndStreamResponse(openaiResponse)
+              await synthesizeAndSendResponse(openaiResponse)
               console.log(`✅ [SARVAM] Voice response sent successfully`)
             } else {
               console.log(`❌ [OPENAI] No response received for: "${queueItem.text}"`)
@@ -551,185 +551,59 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced TTS Synthesis with Sarvam Streaming
-    const synthesizeAndStreamResponse = async (text) => {
+    // Enhanced TTS Synthesis with Sarvam Non-Streaming API
+    const synthesizeAndSendResponse = async (text) => {
       if (!sarvamApiKey || !text.trim()) {
-        console.log(`⚠️ [SARVAM] Skipping synthesis - API Key: ${!!sarvamApiKey}, Text: "${text}"`)
-        return
-      }
-
-      // Only log the API key for debugging, do not block execution
-      console.log(`🔑 [SARVAM] Using API key: ${sarvamApiKey.substring(0, 12)}...`)
-
-      // Set greeting protection if this is a greeting (BEFORE TTS connection)
-      const isGreeting = text.includes("Thank you for contacting") || text.includes("संपर्क करने के लिए")
-      if (isGreeting) {
-        greetingInProgress = true
-        console.log("🛡️ [GREETING] Greeting protection enabled (pre-TTS)")
-        // Disable greeting protection after delay
-        setTimeout(() => {
-          greetingInProgress = false
-          console.log("🛡️ [GREETING] Greeting protection disabled")
-        }, GREETING_PROTECTION_DELAY)
+        console.log(`[SARVAM] Skipping synthesis - API Key: ${!!sarvamApiKey}, Text: "${text}"`)
+        return;
       }
 
       try {
-        console.log(`🔊 [SARVAM] Starting streaming synthesis:`)
-        console.log(`   - Text: "${text}"`)
-        console.log(`   - Language: ${language}`)
-        console.log(`   - Session ID: ${sessionId}`)
-        console.log(`   - API Key: ${sarvamApiKey.substring(0, 10)}...`)
-
-        shouldInterruptAudio = false
-        isPlayingAudio = true
-        currentAudioChunk = 0
-        audioQueue = []
-
+        console.log(`[SARVAM] Using non-streaming TTS for: "${text}"`);
         const client = new SarvamAIClient({
           apiSubscriptionKey: sarvamApiKey,
-        })
+        });
 
-        console.log(`🔊 [SARVAM] Client created with API key: ${sarvamApiKey ? 'Present' : 'Missing'}`)
-
-        // Add timeout for connection
-        const connectionPromise = client.textToSpeechStreaming.connect({
+        const response = await client.textToSpeech.convert({
+          text,
           model: "bulbul:v2",
-        })
+          speaker: language === "hi" ? "anushka" : "meera",
+          target_language_code: language === "hi" ? "hi-IN" : "en-IN",
+        });
 
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error('Sarvam connection timeout')), 10000)
-        })
+        if (response && response.audio) {
+          // Send the audio to the client
+          const audioBuffer = Buffer.from(response.audio, "base64");
+          const pythonBytesString = bufferToPythonBytesString(audioBuffer);
 
-        const socket = await Promise.race([connectionPromise, timeoutPromise])
-
-        console.log(`🔊 [SARVAM] Socket connection created`)
-
-        currentTTSSocket = socket
-        let audioChunks = []
-
-        socket.on("open", () => {
-          console.log("🔊 [SARVAM] TTS connection opened")
-          
-          // Configure the connection
-          socket.configureConnection({
-            type: "config",
+          const audioResponse = {
             data: {
-              speaker: language === "hi" ? "anushka" : "meera",
-              target_language_code: language === "hi" ? "hi-IN" : "en-IN",
-              min_buffer_size: 30,
-              max_chunk_length: 100,
-              output_audio_codec: "mp3",
-              output_audio_bitrate: 128,
-              pitch: 1.0,
-              pace: 1.0,
+              session_id: sessionId,
+              count: 1,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: 8000,
+              channels: 1,
+              sample_width: 2,
+              is_streaming: false,
+              format: "mp3",
             },
-          })
+            type: "ai_response",
+          };
 
-          console.log("🔊 [SARVAM] Configuration sent")
-          
-          // Send text for conversion
-          socket.convert(text)
-          console.log("🔊 [SARVAM] Text sent for conversion")
-        })
-
-        socket.on("message", (message) => {
-          console.log(`[SARVAM][RAW MESSAGE]`, message)
-          console.log(`🔊 [SARVAM] Received message type: ${message.type}`)
-          
-          if (shouldInterruptAudio && !greetingInProgress) {
-            console.log("🛑 [SARVAM] Audio interrupted, stopping stream")
-            socket.close()
-            return
-          }
-
-          if (message.type === "audio") {
-            currentAudioChunk++
-            audioChunkCount++ // Increment global audio chunk counter
-            
-            // Validate audio data
-            if (!message.data || !message.data.audio) {
-              console.log(`❌ [SARVAM] Invalid audio data in chunk ${currentAudioChunk}`)
-              return
-            }
-
-            try {
-              const audioBuffer = Buffer.from(message.data.audio, "base64")
-              
-              if (audioBuffer.length === 0) {
-                console.log(`⚠️ [SARVAM] Empty audio buffer in chunk ${currentAudioChunk}`)
-                return
-              }
-              
-              console.log(`✅ [SARVAM] Received audio chunk ${currentAudioChunk}: ${audioBuffer.length} bytes`)
-              
-              // Send audio chunk immediately to client (Sarvam returns MP3, not raw PCM)
-              const pythonBytesString = bufferToPythonBytesString(audioBuffer)
-
-              const audioResponse = {
-                data: {
-                  session_id: sessionId,
-                  count: currentAudioChunk,
-                  audio_bytes_to_play: pythonBytesString,
-                  sample_rate: 8000,
-                  channels: 1,
-                  sample_width: 2,
-                  is_streaming: true,
-                  format: "mp3", // Specify format
-                },
-                type: "ai_response",
-              }
-
-              if (ws.readyState === WebSocket.OPEN && (!shouldInterruptAudio || greetingInProgress)) {
-                ws.send(JSON.stringify(audioResponse))
-                console.log(`✅ [SARVAM] Audio chunk ${currentAudioChunk} sent to client (${audioBuffer.length} bytes, ${pythonBytesString.length} chars)`)
-              } else {
-                console.log(`⚠️ [SARVAM] Skipping audio chunk ${currentAudioChunk} - connection not ready or interrupted`)
-              }
-            } catch (error) {
-              console.log(`❌ [SARVAM] Error processing audio chunk ${currentAudioChunk}: ${error.message}`)
-            }
-          } else if (message.type === "error") {
-            console.log(`❌ [SARVAM] TTS error message:`, message)
-          } else if (message.type === "config") {
-            console.log(`🔧 [SARVAM] Config response:`, message)
-          } else if (message.type === "convert") {
-            console.log(`🔄 [SARVAM] Convert response:`, message)
-          } else {
-            console.log("🔊 [SARVAM] Received message:", message)
-          }
-        })
-
-        socket.on("close", (event) => {
-          console.log("🔊 [SARVAM] TTS connection closed:", event)
-          isPlayingAudio = false
-          currentTTSSocket = null
-          
-          // Send end-of-stream marker
-          if (ws.readyState === WebSocket.OPEN && (!shouldInterruptAudio || greetingInProgress)) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(audioResponse));
             ws.send(JSON.stringify({
               type: "ai_response_complete",
               session_id: sessionId,
-              total_chunks: currentAudioChunk,
-            }))
-            console.log(`✅ [SARVAM] End-of-stream marker sent (${currentAudioChunk} chunks)`)
+              total_chunks: 1,
+            }));
+            console.log(`[SARVAM] Non-streaming audio sent to client`);
           }
-        })
-
-        socket.on("error", (error) => {
-          console.error("❌ [SARVAM] TTS error:", error)
-          isPlayingAudio = false
-          currentTTSSocket = null
-          greetingInProgress = false // Reset greeting protection on error
-        })
-
-        await socket.waitForOpen()
-        console.log("🔊 [SARVAM] TTS WebSocket is ready")
-
+        } else {
+          console.log(`[SARVAM] No audio received from TTS`);
+        }
       } catch (error) {
-        console.log(`❌ [SARVAM] Synthesis failed: ${error.message}`)
-        isPlayingAudio = false
-        currentTTSSocket = null
-        greetingInProgress = false // Reset greeting protection on error
+        console.log(`[SARVAM] Non-streaming TTS error: ${error.message}`);
       }
     }
 
@@ -807,7 +681,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Add a longer delay to ensure Deepgram connection is stable
         await new Promise(resolve => setTimeout(resolve, 1000))
         
-        await synthesizeAndStreamResponse(greetingText)
+        await synthesizeAndSendResponse(greetingText)
         connectionGreetingSent = true
         console.log(`✅ [GREETING] Greeting sent successfully!`)
       } catch (error) {
@@ -906,7 +780,7 @@ const setupUnifiedVoiceServer = (wss) => {
             if (data.session_id) {
               sessionId = data.session_id
             }
-            await synthesizeAndStreamResponse(data.text)
+            await synthesizeAndSendResponse(data.text)
           } else if (data.data && data.data.hangup === "true") {
             console.log(`📞 [SESSION] Hangup request received for session ${sessionId}`)
             
