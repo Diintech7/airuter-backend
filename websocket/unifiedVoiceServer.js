@@ -279,6 +279,14 @@ const setupUnifiedVoiceServer = (wss) => {
     // Handle Deepgram responses with comprehensive logging
     const handleDeepgramResponse = async (data) => {
       console.log(`📡 [DEEPGRAM] Received response type: ${data.type}`)
+      // Log timing if available
+      if (deepgramWs && deepgramWs._lastSendTime) {
+        const now = Date.now();
+        const duration = now - deepgramWs._lastSendTime;
+        console.log(`[DEEPGRAM] Time from audio send to response: ${duration} ms`);
+        // Optionally, reset _lastSendTime if you want to measure only the first response per chunk
+        deepgramWs._lastSendTime = null;
+      }
 
       if (data.type === "Results") {
         const channel = data.channel
@@ -407,6 +415,9 @@ const setupUnifiedVoiceServer = (wss) => {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
 
         if (buffer.length >= MIN_CHUNK_SIZE) {
+          // Mark the time when audio is sent
+          const deepgramSendTime = Date.now();
+          deepgramWs._lastSendTime = deepgramSendTime;
           deepgramWs.send(buffer)
           console.log(`🎵 [DEEPGRAM] Audio sent: ${buffer.length} bytes`)
           return true
