@@ -567,7 +567,7 @@ const setupUnifiedVoiceServer = (wss) => {
         const response = await client.textToSpeech.convert({
           text,
           model: "bulbul:v2",
-          speaker: language === "hi" ? "anushka" : "meera",
+          speaker: language === "hi" ? "anushka" : "abhilash",
           target_language_code: language === "hi" ? "hi-IN" : "en-IN",
         });
 
