@@ -551,7 +551,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced TTS Synthesis with Sarvam Non-Streaming API
+    // Enhanced TTS Synthesis with Sarvam Non-Streaming API (matching sarvamStreaming.js)
     const synthesizeAndSendResponse = async (text) => {
       if (!sarvamApiKey || !text.trim()) {
         console.log(`[SARVAM] Skipping synthesis - API Key: ${!!sarvamApiKey}, Text: "${text}"`)
@@ -559,48 +559,78 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       try {
-        console.log(`[SARVAM] Using non-streaming TTS for: "${text}"`);
-        const client = new SarvamAIClient({
-          apiSubscriptionKey: sarvamApiKey,
-        });
-
-        const response = await client.textToSpeech.convert({
-          text,
-          model: "bulbul:v2",
-          speaker: language === "hi" ? "anushka" : "abhilash",
+        // Build request body as in sarvamStreaming.js
+        const requestBody = {
+          inputs: [text],
           target_language_code: language === "hi" ? "hi-IN" : "en-IN",
+          speaker: language === "hi" ? "anushka" : "abhilash",
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 22050,
+          enable_preprocessing: true,
+          model: "bulbul:v2"
+        };
+
+        console.log("[SARVAM] TTS Request:", requestBody);
+
+        const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "API-Subscription-Key": sarvamApiKey,
+          },
+          body: JSON.stringify(requestBody),
         });
 
-        if (response && response.audio) {
-          // Send the audio to the client
-          const audioBuffer = Buffer.from(response.audio, "base64");
-          const pythonBytesString = bufferToPythonBytesString(audioBuffer);
-
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: 1,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: 8000,
-              channels: 1,
-              sample_width: 2,
-              is_streaming: false,
-              format: "mp3",
-            },
-            type: "ai_response",
-          };
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse));
-            ws.send(JSON.stringify({
-              type: "ai_response_complete",
-              session_id: sessionId,
-              total_chunks: 1,
-            }));
-            console.log(`[SARVAM] Non-streaming audio sent to client`);
+        if (!response.ok) {
+          const errorText = await response.text();
+          let errorData;
+          try {
+            errorData = JSON.parse(errorText);
+          } catch {
+            errorData = { error: errorText };
           }
-        } else {
-          console.log(`[SARVAM] No audio received from TTS`);
+          console.error("[SARVAM] API Error:", {
+            status: response.status,
+            error: errorData.error || "Unknown error",
+            requestBody,
+          });
+          throw new Error(`Sarvam AI API error: ${response.status} - ${errorData.error || "Unknown error"}`);
+        }
+
+        const responseData = await response.json();
+        if (!responseData.audios || responseData.audios.length === 0) {
+          throw new Error("No audio data received from Sarvam AI");
+        }
+
+        // Convert base64 audio to buffer
+        const audioBase64 = responseData.audios[0];
+        const audioBuffer = Buffer.from(audioBase64, 'base64');
+        const pythonBytesString = bufferToPythonBytesString(audioBuffer);
+
+        const audioResponse = {
+          data: {
+            session_id: sessionId,
+            count: 1,
+            audio_bytes_to_play: pythonBytesString,
+            sample_rate: 22050,
+            channels: 1,
+            sample_width: 2,
+            is_streaming: false,
+            format: "mp3",
+          },
+          type: "ai_response",
+        };
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(audioResponse));
+          ws.send(JSON.stringify({
+            type: "ai_response_complete",
+            session_id: sessionId,
+            total_chunks: 1,
+          }));
+          console.log(`[SARVAM] Non-streaming audio sent to client (${audioBuffer.length} bytes)`);
         }
       } catch (error) {
         console.log(`[SARVAM] Non-streaming TTS error: ${error.message}`);
