@@ -203,7 +203,7 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("model", "nova-2")
-          deepgramUrl.searchParams.append("language", "hi-IN")
+          deepgramUrl.searchParams.append("language", "hi")
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
@@ -581,7 +581,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Build request body as in sarvamStreaming.js
         const requestBody = {
           inputs: [text],
-          target_language_code: language === "hi" ? "hi-IN" : "hi-IN",
+          target_language_code: language === "hi" ? "hi" : "hi",
           speaker: language === "hi" ? "anushka" : "abhilash",
           pitch: 0,
           pace: 1.0,
