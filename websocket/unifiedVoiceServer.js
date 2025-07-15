@@ -7,36 +7,6 @@ const mongoose = require("mongoose")
 const ApiKey = require("../models/ApiKey")
 const Tenant = require("../models/Tenant")
 
-// --- Read-only DB connection for Agent reads ---
-const readOnlyDbUri = process.env.READ_ONLY_MONGODB_URI
-const readOnlyConnection = mongoose.createConnection(readOnlyDbUri, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-  readPreference: 'secondaryPreferred',
-})
-// Connection event listeners for debugging
-readOnlyConnection.on('connected', () => {
-  console.log('✅ Read-only MongoDB connected');
-});
-readOnlyConnection.on('error', (err) => {
-  console.error('❌ Read-only MongoDB connection error:', err.message);
-});
-// Register AgentProfile model on the correct collection name
-const AgentProfileModel = require("../models/AgentProfile")
-const agentProfileSchema = AgentProfileModel.schema
-// Explicitly specify the collection name to avoid default pluralization issues
-const ReadOnlyAgentProfile = readOnlyConnection.model("AgentProfile", agentProfileSchema, "agentprofiles")
-
-// --- Unified Voice Server dedicated DB connection ---
-// This connection is used exclusively for Unified Voice Server operations
-const unifiedVoiceDbUri = process.env.UNIFIED_VOICE_MONGODB_URI
-const unifiedVoiceDbConnection = mongoose.createConnection(unifiedVoiceDbUri, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true,
-})
-// Example: Register a model on this connection if needed
-// const SomeModel = unifiedVoiceDbConnection.model('SomeModel', someSchema)
-
 const fetch = globalThis.fetch || require("node-fetch")
 
 if (!fetch) {
@@ -44,16 +14,97 @@ if (!fetch) {
   process.exit(1)
 }
 
-// Update the updatedAt field before saving
-agentProfileSchema.pre("save", function (next) {
+// Agent Schema - Optimized for DID matching
+const agentSchema = new mongoose.Schema({
+  // Tenant Information
+  tenantId: { type: String, required: true, index: true },
+
+  // Personal Information
+  agentName: { type: String, required: true },
+  description: { type: String, required: true },
+  category: { type: String },
+  personality: {
+    type: String,
+    enum: ["formal", "informal", "friendly", "flirty", "disciplined"],
+    default: "formal",
+  },
+  language: { type: String, default: "en" },
+
+  // System Information
+  firstMessage: { type: String, required: true },
+  systemPrompt: { type: String, required: true },
+  sttSelection: {
+    type: String,
+    enum: ["deepgram", "whisper", "google", "azure", "aws"],
+    default: "deepgram",
+  },
+  ttsSelection: {
+    type: String,
+    enum: ["sarvam", "elevenlabs", "openai", "google", "azure", "aws"],
+    default: "sarvam",
+  },
+  llmSelection: {
+    type: String,
+    enum: ["openai", "anthropic", "google", "azure"],
+    default: "openai",
+  },
+  voiceSelection: {
+    type: String,
+    enum: [
+      "default",
+      "male-professional",
+      "female-professional", 
+      "male-friendly",
+      "female-friendly",
+      "neutral",
+      "abhilash",
+      "anushka",
+    ],
+    default: "default",
+  },
+  contextMemory: { type: String },
+  brandInfo: { type: String },
+
+  // Telephony - DID number is key for matching
+  didNumber: { type: String, required: true, index: true },
+  serviceProvider: {
+    type: String,
+    enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
+  },
+
+  // Pre-generated audio storage for fast response
+  audioFile: { type: String },
+  audioBytes: { type: Buffer },
+  audioMetadata: {
+    format: { type: String, default: "mp3" },
+    sampleRate: { type: Number, default: 22050 },
+    channels: { type: Number, default: 1 },
+    size: { type: Number },
+    generatedAt: { type: Date },
+    language: { type: String, default: "en" },
+    speaker: { type: String },
+    provider: { type: String, default: "sarvam" },
+  },
+
+  // Timestamps
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+})
+
+// Compound indexes for fast DID lookup
+agentSchema.index({ tenantId: 1, didNumber: 1 }, { unique: true })
+agentSchema.index({ didNumber: 1 }) // Fast DID lookup across all tenants
+
+agentSchema.pre("save", function (next) {
   this.updatedAt = Date.now()
   next()
 })
 
-const Agent = mongoose.model("AgentProfile", agentProfileSchema)
+const Agent = mongoose.model("Agent", agentSchema)
+
 
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 Unified Voice WebSocket server initialized with Agent Integration")
+  console.log("🚀 Unified Voice WebSocket server initialized with DID-based Agent Matching")
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 New unified voice connection established")
@@ -64,163 +115,19 @@ const setupUnifiedVoiceServer = (wss) => {
       origin: req.headers.origin,
     })
 
-    // Extract parameters from URL
-    const url = new URL(req.url, "http://localhost")
-    const tenantId = url.searchParams.get("tenantId") || req.headers["x-tenant-id"] || "default"
-    const agentId = url.searchParams.get("agentId") || req.headers["x-agent-id"]
-    const agentName = url.searchParams.get("agentName") || req.headers["x-agent-name"]
-    const language = url.searchParams.get("language") || "hi"
-
-    console.log(`🏢 Tenant ID: ${tenantId}`)
-    console.log(`🤖 Agent ID: ${agentId}`)
-    console.log(`🤖 Agent Name: ${agentName}`)
-    console.log(`🌐 Language: ${language}`)
-
-    // Agent configuration
+    // Session variables
+    let sessionId = null
+    let destinationNumber = null
+    let sourceNumber = null
+    let tenantId = null
     let agentConfig = null
-    let systemPrompt = null
-    let greetingAudio = null
-
-    // API Keys will be loaded from database
     let apiKeys = {
       deepgram: null,
       sarvam: null,
       openai: null
     }
 
-    // Load agent configuration from database
-    const loadAgentConfig = async () => {
-      try {
-        console.log(`🤖 Loading agent configuration for tenant: ${tenantId}`)
-        
-        let agent = null
-        
-        // Try to find by agent ID first
-        if (agentId) {
-          agent = await ReadOnlyAgentProfile.findOne({ _id: agentId, tenantId })
-          console.log(`🔍 Searching by Agent ID: ${agentId}`)
-        }
-        
-        // If not found by ID, try by agent name
-        if (!agent && agentName) {
-          agent = await ReadOnlyAgentProfile.findOne({ agentName, tenantId })
-          console.log(`🔍 Searching by Agent Name: ${agentName}`)
-        }
-        
-        // If still not found, get the first agent for the tenant
-        if (!agent) {
-          agent = await ReadOnlyAgentProfile.findOne({ tenantId }).sort({ createdAt: -1 })
-          console.log(`🔍 Using first available agent for tenant: ${tenantId}`)
-        }
-
-        if (!agent) {
-          console.error(`❌ No agent found for tenant: ${tenantId}`)
-          return false
-        }
-
-        agentConfig = agent
-        systemPrompt = agent.systemPrompt || `You are ${agent.agentName}, a helpful voice assistant. ${agent.description || ''} Keep responses brief and conversational for telephonic conversations.`
-        
-        // Extract greeting audio from database
-        if (agent.audioBytes && agent.audioBytes.length > 0) {
-          greetingAudio = agent.audioBytes
-          console.log(`🎵 Greeting audio loaded from database: ${agent.audioBytes.length} bytes`)
-        }
-
-        console.log(`✅ Agent configuration loaded:`)
-        console.log(`   - Agent Name: ${agent.agentName}`)
-        console.log(`   - Description: ${agent.description}`)
-        console.log(`   - Language: ${agent.language}`)
-        console.log(`   - Personality: ${agent.personality}`)
-        console.log(`   - TTS Provider: ${agent.ttsSelection}`)
-        console.log(`   - LLM Provider: ${agent.llmSelection}`)
-        console.log(`   - Voice Selection: ${agent.voiceSelection}`)
-        console.log(`   - First Message: ${agent.firstMessage}`)
-        console.log(`   - System Prompt: ${systemPrompt.substring(0, 100)}...`)
-        console.log(`   - Greeting Audio: ${greetingAudio ? '✅ Available' : '❌ Not Available'}`)
-
-        return true
-      } catch (error) {
-        console.error(`❌ Error loading agent configuration: ${error.message}`)
-        return false
-      }
-    }
-
-    // Load API keys from database
-    const loadApiKeys = async () => {
-      try {
-        console.log(`🔑 Loading API keys for tenant: ${tenantId}`)
-        
-        // Check if tenant exists
-        const tenant = await Tenant.findOne({ tenantId, status: "active" })
-        if (!tenant) {
-          console.error(`❌ Tenant not found or inactive: ${tenantId}`)
-          return false
-        }
-
-        console.log(`✅ Active tenant found: ${tenant.tenantName}`)
-
-        // Load API keys for the tenant
-        const keys = await ApiKey.find({ 
-          tenantId, 
-          isActive: true 
-        })
-
-        if (keys.length === 0) {
-          console.error(`❌ No active API keys found for tenant: ${tenantId}`)
-          return false
-        }
-
-        // Decrypt and assign API keys
-        for (const keyDoc of keys) {
-          const decryptedKey = keyDoc.getDecryptedKey()
-          
-          switch (keyDoc.provider) {
-            case "deepgram":
-              apiKeys.deepgram = decryptedKey
-              console.log(`✅ Deepgram API key loaded for ${tenantId}`)
-              break
-            case "sarvam":
-              apiKeys.sarvam = decryptedKey
-              console.log(`✅ Sarvam API key loaded for ${tenantId}`)
-              break
-            case "openai":
-              apiKeys.openai = decryptedKey
-              console.log(`✅ OpenAI API key loaded for ${tenantId}`)
-              break
-          }
-
-          // Update usage statistics
-          await ApiKey.updateOne(
-            { _id: keyDoc._id },
-            { 
-              $inc: { "usage.totalRequests": 1 },
-              $set: { "usage.lastUsed": new Date() }
-            }
-          )
-        }
-
-        console.log(`🔑 API Keys loaded:`)
-        console.log(`   - Deepgram: ${apiKeys.deepgram ? "✅ Yes" : "❌ NO"}`)
-        console.log(`   - Sarvam TTS: ${apiKeys.sarvam ? "✅ Yes" : "❌ NO"}`)
-        console.log(`   - OpenAI: ${apiKeys.openai ? "✅ Yes" : "❌ NO"}`)
-
-        return true
-      } catch (error) {
-        console.error(`❌ Error loading API keys: ${error.message}`)
-        return false
-      }
-    }
-
-    console.log(`🎙️ VAD Configuration:`)
-    console.log("   - Speech Started events: ✅ Enabled")
-    console.log("   - Utterance End detection: ✅ Enabled")
-    console.log("   - Voice Activity Detection: ✅ Active")
-    console.log("   - Endpointing: 300ms")
-    console.log("   - VAD Turnoff: 700ms")
-    console.log("   - Utterance End: 1000ms")
-
-    // Persistent Deepgram connection variables
+    // Connection state
     let deepgramWs = null
     let deepgramReady = false
     let deepgramConnected = false
@@ -228,12 +135,9 @@ const setupUnifiedVoiceServer = (wss) => {
     const MAX_RECONNECT_ATTEMPTS = 5
     let reconnectDelay = 1000
 
-    // Session management
-    let sessionId = null
+    // Audio and conversation state
     let audioChunkCount = 0
     let connectionGreetingSent = false
-
-    // Text processing queue system
     let textProcessingQueue = []
     let isProcessingQueue = false
     let currentTranscript = ""
@@ -247,16 +151,10 @@ const setupUnifiedVoiceServer = (wss) => {
     let currentTTSSocket = null
     let isPlayingAudio = false
     let audioQueue = []
-    let currentAudioChunk = 0
     let shouldInterruptAudio = false
     let greetingInProgress = false
 
-    // Audio processing
-    const MIN_CHUNK_SIZE = 320
-    const SEND_INTERVAL = 50
-    const GREETING_PROTECTION_DELAY = 5000
-
-    // VAD and speech detection state
+    // VAD state
     let vadState = {
       speechActive: false,
       lastSpeechStarted: null,
@@ -265,6 +163,302 @@ const setupUnifiedVoiceServer = (wss) => {
       silenceDuration: 0,
       totalSpeechEvents: 0,
       totalUtteranceEnds: 0,
+    }
+
+    // Fast DID-based agent lookup
+    const loadAgentByDID = async (didNumber) => {
+      try {
+        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: ${didNumber}`)
+        
+        const startTime = Date.now()
+        
+        // Direct DID lookup - fastest method
+        const agent = await Agent.findOne({ didNumber: didNumber }).lean()
+        
+        const lookupTime = Date.now() - startTime
+        console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
+
+        if (!agent) {
+          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${didNumber}`)
+          return null
+        }
+
+        // Set tenant ID from found agent
+        tenantId = agent.tenantId
+        agentConfig = agent
+
+        console.log(`✅ [AGENT_LOOKUP] Agent found:`)
+        console.log(`   - Agent Name: ${agent.agentName}`)
+        console.log(`   - Tenant ID: ${agent.tenantId}`)
+        console.log(`   - DID Number: ${agent.didNumber}`)
+        console.log(`   - Language: ${agent.language}`)
+        console.log(`   - TTS Provider: ${agent.ttsSelection}`)
+        console.log(`   - Pre-generated Audio: ${agent.audioBytes ? '✅ Available' : '❌ Not Available'}`)
+
+        return agent
+      } catch (error) {
+        console.error(`❌ [AGENT_LOOKUP] Error: ${error.message}`)
+        return null
+      }
+    }
+
+    // Fast API keys loading
+    const loadApiKeysForTenant = async (tenantId) => {
+      try {
+        console.log(`🔑 [API_KEYS] Loading keys for tenant: ${tenantId}`)
+        
+        const startTime = Date.now()
+        
+        // Check tenant status first
+        const tenant = await Tenant.findOne({ tenantId, status: "active" }).lean()
+        if (!tenant) {
+          console.error(`❌ [API_KEYS] Tenant not found or inactive: ${tenantId}`)
+          return false
+        }
+
+        // Load all active API keys for tenant
+        const keys = await ApiKey.find({ 
+          tenantId, 
+          isActive: true 
+        }).lean()
+
+        const loadTime = Date.now() - startTime
+        console.log(`⚡ [API_KEYS] Keys loaded in ${loadTime}ms`)
+
+        if (keys.length === 0) {
+          console.error(`❌ [API_KEYS] No active API keys found for tenant: ${tenantId}`)
+          return false
+        }
+
+        // Decrypt and assign API keys
+        for (const keyDoc of keys) {
+          const decryptedKey = ApiKey.decryptKey(keyDoc.encryptedKey)
+          
+          switch (keyDoc.provider) {
+            case "deepgram":
+              apiKeys.deepgram = decryptedKey
+              break
+            case "sarvam":
+              apiKeys.sarvam = decryptedKey
+              break
+            case "openai":
+              apiKeys.openai = decryptedKey
+              break
+          }
+
+          // Update usage statistics asynchronously
+          ApiKey.updateOne(
+            { _id: keyDoc._id },
+            { 
+              $inc: { "usage.totalRequests": 1 },
+              $set: { "usage.lastUsed": new Date() }
+            }
+          ).exec()
+        }
+
+        console.log(`🔑 [API_KEYS] Loaded for ${tenantId}:`)
+        console.log(`   - Deepgram: ${apiKeys.deepgram ? "✅" : "❌"}`)
+        console.log(`   - Sarvam: ${apiKeys.sarvam ? "✅" : "❌"}`)
+        console.log(`   - OpenAI: ${apiKeys.openai ? "✅" : "❌"}`)
+
+        return true
+      } catch (error) {
+        console.error(`❌ [API_KEYS] Error: ${error.message}`)
+        return false
+      }
+    }
+
+    // Fast greeting with pre-generated audio
+    const sendFastGreeting = async () => {
+      if (connectionGreetingSent || !sessionId || !agentConfig) {
+        return
+      }
+
+      console.log(`🚀 [FAST_GREETING] Sending for agent: ${agentConfig.agentName}`)
+      
+      try {
+        greetingInProgress = true
+        
+        // Use pre-generated audio if available
+        if (agentConfig.audioBytes && agentConfig.audioBytes.length > 0) {
+          console.log(`⚡ [FAST_GREETING] Using pre-generated audio (${agentConfig.audioBytes.length} bytes)`)
+          
+          const pythonBytesString = bufferToPythonBytesString(agentConfig.audioBytes)
+          
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: 1,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: agentConfig.audioMetadata?.sampleRate || 22050,
+              channels: agentConfig.audioMetadata?.channels || 1,
+              sample_width: 2,
+              is_streaming: false,
+              format: agentConfig.audioMetadata?.format || "mp3",
+            },
+            type: "ai_response",
+          }
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(audioResponse))
+            ws.send(JSON.stringify({
+              type: "ai_response_complete",
+              session_id: sessionId,
+              total_chunks: 1,
+            }))
+            console.log(`✅ [FAST_GREETING] Pre-generated audio sent successfully`)
+          }
+        } else {
+          // Fallback to real-time synthesis
+          console.log(`🔄 [FAST_GREETING] Generating audio in real-time`)
+          await synthesizeWithSarvam(agentConfig.firstMessage)
+        }
+        
+        connectionGreetingSent = true
+        greetingInProgress = false
+        
+      } catch (error) {
+        console.error(`❌ [FAST_GREETING] Error: ${error.message}`)
+        greetingInProgress = false
+        
+        // Send fallback text response
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "greeting_fallback",
+            session_id: sessionId,
+            message: agentConfig.firstMessage,
+            error: error.message
+          }))
+        }
+      }
+    }
+
+    // Optimized Deepgram connection
+    const connectToDeepgram = async () => {
+      return new Promise((resolve, reject) => {
+        try {
+          if (!apiKeys.deepgram) {
+            reject(new Error("Deepgram API key not available"))
+            return
+          }
+
+          const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
+          deepgramUrl.searchParams.append("sample_rate", "8000")
+          deepgramUrl.searchParams.append("channels", "1")
+          deepgramUrl.searchParams.append("encoding", "linear16")
+          deepgramUrl.searchParams.append("model", "nova-2")
+          deepgramUrl.searchParams.append("language", agentConfig?.language || "hi")
+          deepgramUrl.searchParams.append("interim_results", "true")
+          deepgramUrl.searchParams.append("smart_format", "true")
+          deepgramUrl.searchParams.append("endpointing", "300")
+
+          deepgramWs = new WebSocket(deepgramUrl.toString(), { 
+            headers: { Authorization: `Token ${apiKeys.deepgram}` } 
+          })
+          deepgramWs.binaryType = "arraybuffer"
+
+          const connectionTimeout = setTimeout(() => {
+            if (deepgramWs) deepgramWs.close()
+            reject(new Error("Deepgram connection timeout"))
+          }, 10000)
+
+          deepgramWs.onopen = () => {
+            clearTimeout(connectionTimeout)
+            deepgramReady = true
+            deepgramConnected = true
+            reconnectAttempts = 0
+            console.log("✅ [DEEPGRAM] Connected and ready")
+            resolve()
+          }
+
+          deepgramWs.onmessage = async (event) => {
+            try {
+              const data = JSON.parse(event.data)
+              await handleDeepgramResponse(data)
+            } catch (parseError) {
+              console.error("❌ [DEEPGRAM] Parse error:", parseError.message)
+            }
+          }
+
+          deepgramWs.onerror = (error) => {
+            clearTimeout(connectionTimeout)
+            deepgramReady = false
+            deepgramConnected = false
+            console.error("❌ [DEEPGRAM] Connection error:", error.message)
+            reject(error)
+          }
+
+          deepgramWs.onclose = (event) => {
+            clearTimeout(connectionTimeout)
+            deepgramReady = false
+            deepgramConnected = false
+            console.log(`🎙️ [DEEPGRAM] Connection closed: ${event.code}`)
+
+            if (event.code !== 1000 && sessionId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
+              reconnectAttempts++
+              const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
+              console.log(`🔄 [DEEPGRAM] Reconnecting in ${delay}ms (${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`)
+
+              setTimeout(() => {
+                connectToDeepgram().catch((err) => {
+                  console.error("❌ [DEEPGRAM] Reconnection failed:", err.message)
+                })
+              }, delay)
+            }
+          }
+        } catch (error) {
+          console.error("❌ [DEEPGRAM] Setup error:", error.message)
+          reject(error)
+        }
+      })
+    }
+
+    // Handle Deepgram responses
+    const handleDeepgramResponse = async (data) => {
+      if (data.type === "Results") {
+        const channel = data.channel
+        if (channel && channel.alternatives && channel.alternatives.length > 0) {
+          const transcript = channel.alternatives[0].transcript
+          const confidence = channel.alternatives[0].confidence
+          const is_final = data.is_final
+
+          if (transcript && transcript.trim()) {
+            resetSilenceTimer()
+
+            if (is_final) {
+              currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
+              addToTextQueue(currentTranscript, "final_transcript")
+              startSilenceTimer()
+
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({
+                  type: "transcript",
+                  data: transcript,
+                  confidence: confidence,
+                  is_final: true,
+                  language: agentConfig?.language,
+                  accumulated: currentTranscript,
+                  agent: agentConfig?.agentName,
+                }))
+              }
+            }
+            isSpeaking = true
+          }
+        }
+      } else if (data.type === "SpeechStarted") {
+        if (isPlayingAudio) {
+          interruptCurrentAudio()
+        }
+        resetSilenceTimer()
+        isSpeaking = true
+        vadState.totalSpeechEvents++
+      } else if (data.type === "UtteranceEnd") {
+        if (isSpeaking) {
+          isSpeaking = false
+          startSilenceTimer()
+        }
+        vadState.totalUtteranceEnds++
+      }
     }
 
     // Audio interruption handler
@@ -282,15 +476,14 @@ const setupUnifiedVoiceServer = (wss) => {
       if (currentTTSSocket) {
         try {
           currentTTSSocket.close()
-          console.log("🛑 [SARVAM] TTS socket closed due to interruption")
         } catch (error) {
-          console.log("❌ [SARVAM] Error closing TTS socket:", error.message)
+          console.error("❌ [AUDIO] Error closing TTS socket:", error.message)
         }
         currentTTSSocket = null
       }
     }
 
-    // Text Processing Queue Management
+    // Text processing queue
     const addToTextQueue = (text, type = "transcript") => {
       const queueItem = {
         id: Date.now() + Math.random(),
@@ -301,11 +494,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       textProcessingQueue.push(queueItem)
-      console.log(`📝 [QUEUE] Added to text processing queue:`)
-      console.log(`   - ID: ${queueItem.id}`)
-      console.log(`   - Type: ${queueItem.type}`)
-      console.log(`   - Text: "${queueItem.text}"`)
-      console.log(`   - Queue Length: ${textProcessingQueue.length}`)
+      console.log(`📝 [QUEUE] Added: "${queueItem.text}" (${textProcessingQueue.length} items)`)
 
       if (!isProcessingQueue) {
         processTextQueue()
@@ -318,281 +507,41 @@ const setupUnifiedVoiceServer = (wss) => {
       }
 
       isProcessingQueue = true
-      console.log(`🔄 [QUEUE] Starting queue processing. Items in queue: ${textProcessingQueue.length}`)
 
       while (textProcessingQueue.length > 0) {
         const queueItem = textProcessingQueue.shift()
 
         try {
-          console.log(`⚡ [QUEUE] Processing item:`)
-          console.log(`   - ID: ${queueItem.id}`)
-          console.log(`   - Text: "${queueItem.text}"`)
-          console.log(`   - Timestamp: ${queueItem.timestamp}`)
-
           if (queueItem.text && queueItem.text.length > 0) {
-            console.log(`🤖 [OPENAI] Sending text to OpenAI: "${queueItem.text}"`)
             const openaiResponse = await sendToOpenAI(queueItem.text)
-
             if (openaiResponse) {
-              console.log(`✅ [OPENAI] Received response: "${openaiResponse}"`)
-              console.log(`🔊 [SARVAM] Sending to voice synthesis: "${openaiResponse}"`)
-              await synthesizeAndSendResponse(openaiResponse)
-              console.log(`✅ [SARVAM] Voice response sent successfully`)
-            } else {
-              console.log(`❌ [OPENAI] No response received for: "${queueItem.text}"`)
+              await synthesizeWithSarvam(openaiResponse)
             }
           }
-
           queueItem.processed = true
-          console.log(`✅ [QUEUE] Item processed successfully: ${queueItem.id}`)
         } catch (error) {
-          console.log(`❌ [QUEUE] Error processing item ${queueItem.id}:`, error.message)
+          console.error(`❌ [QUEUE] Error processing: ${error.message}`)
         }
       }
 
       isProcessingQueue = false
-      console.log(`🏁 [QUEUE] Queue processing completed`)
-    }
-
-    // Persistent Deepgram Connection
-    const connectToDeepgram = async () => {
-      return new Promise((resolve, reject) => {
-        try {
-          console.log("🎙️ Establishing PERSISTENT connection to Deepgram...")
-
-          if (!apiKeys.deepgram) {
-            const error = "Deepgram API key not available for this tenant"
-            console.log("❌", error)
-            reject(new Error(error))
-            return
-          }
-
-          const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
-          deepgramUrl.searchParams.append("sample_rate", "8000")
-          deepgramUrl.searchParams.append("channels", "1")
-          deepgramUrl.searchParams.append("encoding", "linear16")
-          deepgramUrl.searchParams.append("model", "nova-2")
-          
-          // Use agent's configured language or fallback to default
-          const agentLanguage = agentConfig?.language || language || "hi"
-          deepgramUrl.searchParams.append("language", agentLanguage)
-          
-          deepgramUrl.searchParams.append("interim_results", "true")
-          deepgramUrl.searchParams.append("smart_format", "true")
-          deepgramUrl.searchParams.append("endpointing", "300")
-
-          deepgramWs = new WebSocket(deepgramUrl.toString(), { 
-            headers: { Authorization: `Token ${apiKeys.deepgram}` } 
-          })
-          deepgramWs.binaryType = "arraybuffer"
-
-          const connectionTimeout = setTimeout(() => {
-            if (deepgramWs) {
-              deepgramWs.close()
-            }
-            reject(new Error("Deepgram connection timeout"))
-          }, 15000)
-
-          deepgramWs.onopen = () => {
-            clearTimeout(connectionTimeout)
-            deepgramReady = true
-            deepgramConnected = true
-            reconnectAttempts = 0
-            reconnectDelay = 1000
-            console.log("✅ PERSISTENT Deepgram connection established and ready")
-            resolve()
-          }
-
-          deepgramWs.onmessage = async (event) => {
-            try {
-              const data = JSON.parse(event.data)
-              await handleDeepgramResponse(data)
-            } catch (parseError) {
-              console.log("❌ Error parsing Deepgram response:", parseError.message)
-            }
-          }
-
-          deepgramWs.onerror = (error) => {
-            clearTimeout(connectionTimeout)
-            deepgramReady = false
-            deepgramConnected = false
-            console.log("❌ Deepgram connection error:", error.message)
-            reject(error)
-          }
-
-          deepgramWs.onclose = (event) => {
-            clearTimeout(connectionTimeout)
-            deepgramReady = false
-            deepgramConnected = false
-            console.log(`🎙️ Deepgram connection closed: ${event.code} - ${event.reason}`)
-
-            if (event.code !== 1000 && sessionId && reconnectAttempts < MAX_RECONNECT_ATTEMPTS) {
-              reconnectAttempts++
-              const delay = Math.min(reconnectDelay * Math.pow(2, reconnectAttempts - 1), 30000)
-              console.log(
-                `🔄 Reconnecting to Deepgram in ${delay}ms (attempt ${reconnectAttempts}/${MAX_RECONNECT_ATTEMPTS})`,
-              )
-
-              setTimeout(() => {
-                connectToDeepgram().catch((err) => {
-                  console.log("❌ Deepgram reconnection failed:", err.message)
-                })
-              }, delay)
-            }
-          }
-        } catch (error) {
-          console.log("❌ Error creating Deepgram connection:", error.message)
-          reject(error)
-        }
-      })
-    }
-
-    // Handle Deepgram responses
-    const handleDeepgramResponse = async (data) => {
-      console.log(`📡 [DEEPGRAM] Received response type: ${data.type}`)
-      
-      if (deepgramWs && deepgramWs._lastSendTime) {
-        const now = Date.now()
-        const duration = now - deepgramWs._lastSendTime
-        console.log(`[DEEPGRAM] Time from audio send to response: ${duration} ms`)
-        deepgramWs._lastSendTime = null
-      }
-
-      if (data.type === "Results") {
-        const channel = data.channel
-        if (channel && channel.alternatives && channel.alternatives.length > 0) {
-          const transcript = channel.alternatives[0].transcript
-          const confidence = channel.alternatives[0].confidence
-          const is_final = data.is_final
-
-          if (transcript && transcript.trim()) {
-            console.log(`📝 [DEEPGRAM] Transcript received:`)
-            console.log(`   - Text: "${transcript}"`)
-            console.log(`   - Confidence: ${confidence}`)
-            console.log(`   - Is Final: ${is_final}`)
-
-            resetSilenceTimer()
-
-            if (is_final) {
-              currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
-              console.log(`📝 [DEEPGRAM] Final accumulated transcript: "${currentTranscript}"`)
-
-              addToTextQueue(currentTranscript, "final_transcript")
-              startSilenceTimer()
-
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "transcript",
-                    data: transcript,
-                    confidence: confidence,
-                    is_final: true,
-                    language: agentConfig?.language || language,
-                    accumulated: currentTranscript,
-                    agent: agentConfig?.agentName || "Unknown",
-                  }),
-                )
-              }
-            } else {
-              const displayTranscript = currentTranscript + (currentTranscript ? " " : "") + transcript.trim()
-              console.log(`📝 [DEEPGRAM] Interim transcript: "${displayTranscript}"`)
-
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(
-                  JSON.stringify({
-                    type: "transcript",
-                    data: transcript,
-                    confidence: confidence,
-                    is_final: false,
-                    language: agentConfig?.language || language,
-                    accumulated: displayTranscript,
-                    agent: agentConfig?.agentName || "Unknown",
-                  }),
-                )
-              }
-            }
-
-            isSpeaking = true
-          }
-        }
-      } else if (data.type === "SpeechStarted") {
-        console.log(`🎙️ [DEEPGRAM] VAD: Speech started detected`)
-        
-        if (isPlayingAudio) {
-          interruptCurrentAudio()
-        }
-
-        resetSilenceTimer()
-        isSpeaking = true
-
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "speech_started",
-              timestamp: data.timestamp,
-              channel: data.channel,
-              session_id: sessionId,
-              agent: agentConfig?.agentName || "Unknown",
-              message: "Speech activity detected by VAD",
-            }),
-          )
-        }
-
-        vadState.totalSpeechEvents++
-      } else if (data.type === "UtteranceEnd") {
-        console.log(`🎙️ [DEEPGRAM] VAD: Utterance end detected`)
-
-        if (isSpeaking) {
-          isSpeaking = false
-          startSilenceTimer()
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: "utterance_end",
-                session_id: sessionId,
-                agent: agentConfig?.agentName || "Unknown",
-                accumulated_transcript: currentTranscript,
-                message: "End of speech utterance detected",
-              }),
-            )
-          }
-        }
-        vadState.totalUtteranceEnds++
-      } else if (data.type === "Metadata") {
-        console.log(`📊 [DEEPGRAM] Metadata received:`)
-        console.log(`   - Request ID: ${data.request_id}`)
-        console.log(`   - Model Info: ${JSON.stringify(data.model_info)}`)
-      }
     }
 
     // Send audio to Deepgram
     const sendAudioToDeepgram = async (audioData) => {
       if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
-        console.log("⚠️ [DEEPGRAM] Connection not ready, skipping audio chunk")
         return false
       }
 
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
-
-        if (buffer.length >= MIN_CHUNK_SIZE) {
-          const deepgramSendTime = Date.now()
-          deepgramWs._lastSendTime = deepgramSendTime
+        if (buffer.length >= 320) {
           deepgramWs.send(buffer)
-          console.log(`🎵 [DEEPGRAM] Audio sent: ${buffer.length} bytes`)
           return true
         }
         return false
       } catch (error) {
-        console.log("❌ [DEEPGRAM] Error sending audio:", error.message)
-
-        if (error.message.includes("connection") || error.message.includes("CLOSED")) {
-          console.log("🔄 [DEEPGRAM] Attempting reconnection...")
-          connectToDeepgram().catch((err) => {
-            console.log("❌ [DEEPGRAM] Reconnection failed:", err.message)
-          })
-        }
+        console.error("❌ [DEEPGRAM] Send error:", error.message)
         return false
       }
     }
@@ -607,8 +556,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
       silenceTimeout = setTimeout(() => {
         vadState.silenceDuration = Date.now() - vadState.lastUtteranceEnd
-        console.log(`🔕 [VAD] ${SILENCE_DURATION}ms silence detected`)
-        console.log(`   - Processing transcript: "${currentTranscript}"`)
         handleSilenceDetected()
       }, SILENCE_DURATION)
     }
@@ -623,77 +570,47 @@ const setupUnifiedVoiceServer = (wss) => {
         vadState.lastSpeechStarted = Date.now()
         vadState.speechActive = true
       }
-
-      if (vadState.lastSpeechStarted) {
-        vadState.speechDuration = Date.now() - vadState.lastSpeechStarted
-      }
     }
 
     const handleSilenceDetected = async () => {
       if (currentTranscript.trim() && !isProcessingOpenAI) {
-        console.log(`🔕 [SILENCE] Processing complete utterance: "${currentTranscript}"`)
         addToTextQueue(currentTranscript.trim(), "complete_utterance")
         currentTranscript = ""
       }
     }
 
-    // OpenAI Integration with Agent Context
+    // OpenAI Integration
     const sendToOpenAI = async (userMessage) => {
       if (isProcessingOpenAI || !apiKeys.openai || !userMessage.trim()) {
-        console.log(
-          `⚠️ [OPENAI] Skipping request - Processing: ${isProcessingOpenAI}, API Key: ${!!apiKeys.openai}, Message: "${userMessage}"`,
-        )
         return null
       }
 
       isProcessingOpenAI = true
-      console.log(`🤖 [OPENAI] Sending request for agent ${agentConfig?.agentName || 'Unknown'}:`)
-      console.log(`   - Message: "${userMessage}"`)
-      console.log(`   - Session ID: ${sessionId}`)
-
-      const openaiStartTime = Date.now()
 
       try {
-        const apiUrl = "https://api.openai.com/v1/chat/completions"
-
         fullConversationHistory.push({
           role: "user",
           content: userMessage,
         })
 
-        // Use agent's configured LLM model or fallback to default
-        const llmModel = agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini"
-        
-        // Build system prompt with agent context
-        const agentSystemPrompt = systemPrompt || `You are ${agentConfig?.agentName || 'an AI assistant'}, a helpful voice assistant for telephonic conversations. 
-        ${agentConfig?.description || ''} 
-        
-        Your personality is ${agentConfig?.personality || 'formal'}. 
-        ${agentConfig?.contextMemory || ''} 
-        ${agentConfig?.brandInfo || ''} 
-        
-        Keep responses very short and conversational, maximum 2-3 sentences. You're speaking to someone over the phone so be natural and brief. 
-        Respond in ${agentConfig?.language === "hi" ? "Hindi" : agentConfig?.language || "Hindi"}.`
+        const systemPrompt = agentConfig?.systemPrompt || 
+          `You are ${agentConfig?.agentName || 'an AI assistant'}, a helpful voice assistant. 
+          ${agentConfig?.description || ''} 
+          Your personality is ${agentConfig?.personality || 'formal'}. 
+          Keep responses very short and conversational for phone calls.
+          Respond in ${agentConfig?.language === "hi" ? "Hindi" : agentConfig?.language || "Hindi"}.`
 
         const requestBody = {
-          model: llmModel,
+          model: "gpt-4o-mini",
           messages: [
-            {
-              role: "system",
-              content: agentSystemPrompt
-            },
+            { role: "system", content: systemPrompt },
             ...fullConversationHistory.slice(-10)
           ],
           max_tokens: 150,
           temperature: 0.5,
         }
 
-        console.log(`🤖 [OPENAI] Making API request with agent context...`)
-        console.log(`   - Model: ${llmModel}`)
-        console.log(`   - Agent: ${agentConfig?.agentName || 'Unknown'}`)
-        console.log(`   - Personality: ${agentConfig?.personality || 'formal'}`)
-        
-        const response = await fetch(apiUrl, {
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: { 
             "Content-Type": "application/json",
@@ -702,111 +619,40 @@ const setupUnifiedVoiceServer = (wss) => {
           body: JSON.stringify(requestBody),
         })
 
-        const openaiEndTime = Date.now()
-        console.log(`[OPENAI] API call duration: ${openaiEndTime - openaiStartTime} ms`)
-
         if (!response.ok) {
-          const errorText = await response.text()
-          console.log(`❌ [OPENAI] API error: ${response.status} - ${errorText}`)
+          console.error(`❌ [OPENAI] API error: ${response.status}`)
           return null
         }
 
         const data = await response.json()
-        console.log(`✅ [OPENAI] API response received`)
 
         if (data.choices && data.choices[0] && data.choices[0].message) {
           const openaiResponse = data.choices[0].message.content
-
-          console.log(`🤖 [OPENAI] Response: "${openaiResponse}"`)
 
           fullConversationHistory.push({
             role: "assistant",
             content: openaiResponse,
           })
 
-          // Update usage statistics
-          await updateApiKeyUsage("openai")
-
           return openaiResponse
         }
 
         return null
       } catch (error) {
-        console.log(`❌ [OPENAI] API error: ${error.message}`)
+        console.error(`❌ [OPENAI] Error: ${error.message}`)
         return null
       } finally {
         isProcessingOpenAI = false
       }
     }
 
-        // TTS Synthesis with Sarvam or using pre-generated audio
-    const synthesizeAndSendResponse = async (text) => {
-      if (!text.trim()) {
-        console.log(`[TTS] Skipping synthesis - Empty text`)
-        return
-      }
-
-      // Check if this is the first message and we have pre-generated audio
-      if (!connectionGreetingSent && greetingAudio && 
-          text === agentConfig?.firstMessage) {
-        console.log(`🎵 [AGENT] Using pre-generated greeting audio`)
-        
-        try {
-          const pythonBytesString = bufferToPythonBytesString(greetingAudio)
-          
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: 1,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: agentConfig?.audioMetadata?.sampleRate || 22050,
-              channels: agentConfig?.audioMetadata?.channels || 1,
-              sample_width: 2,
-              is_streaming: false,
-              format: agentConfig?.audioMetadata?.format || "mp3",
-            },
-            type: "ai_response",
-          }
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            ws.send(JSON.stringify({
-              type: "ai_response_complete",
-              session_id: sessionId,
-              total_chunks: 1,
-            }))
-            console.log(`✅ [AGENT] Pre-generated audio sent successfully`)
-          }
-          
-          connectionGreetingSent = true
-          return
-        } catch (error) {
-          console.log(`❌ [AGENT] Error using pre-generated audio: ${error.message}`)
-          // Fall through to regular TTS synthesis
-        }
-      }
-
-      // Use agent's configured TTS provider
-      const ttsProvider = agentConfig?.ttsSelection || "sarvam"
-      
-      if (ttsProvider === "sarvam" && apiKeys.sarvam) {
-        await synthesizeWithSarvam(text)
-      } else {
-        console.log(`❌ [TTS] No available TTS provider configured`)
-      }
-    }
-
     // Sarvam TTS Synthesis
     const synthesizeWithSarvam = async (text) => {
-      if (!apiKeys.sarvam) {
-        console.log(`[SARVAM] Skipping synthesis - No API key`)
+      if (!apiKeys.sarvam || !text.trim()) {
         return
       }
 
-      const sarvamStartTime = Date.now()
-
       try {
-        // Use agent's configured voice selection
         const voice = agentConfig?.voiceSelection || "anushka"
         const lang = agentConfig?.language === "hi" ? "hi-IN" : "hi-IN"
 
@@ -822,8 +668,6 @@ const setupUnifiedVoiceServer = (wss) => {
           model: "bulbul:v2"
         }
 
-        console.log("[SARVAM] TTS Request for agent", agentConfig?.agentName, ":", requestBody)
-
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
           method: "POST",
           headers: {
@@ -833,28 +677,13 @@ const setupUnifiedVoiceServer = (wss) => {
           body: JSON.stringify(requestBody),
         })
 
-        const sarvamEndTime = Date.now()
-        console.log(`[SARVAM] TTS API call duration: ${sarvamEndTime - sarvamStartTime} ms`)
-
         if (!response.ok) {
-          const errorText = await response.text()
-          let errorData
-          try {
-            errorData = JSON.parse(errorText)
-          } catch {
-            errorData = { error: errorText }
-          }
-          console.error("[SARVAM] API Error:", {
-            status: response.status,
-            error: errorData.error || "Unknown error",
-            requestBody,
-          })
-          throw new Error(`Sarvam AI API error: ${response.status} - ${errorData.error || "Unknown error"}`)
+          throw new Error(`Sarvam API error: ${response.status}`)
         }
 
         const responseData = await response.json()
         if (!responseData.audios || responseData.audios.length === 0) {
-          throw new Error("No audio data received from Sarvam AI")
+          throw new Error("No audio data received")
         }
 
         const audioBase64 = responseData.audios[0]
@@ -882,36 +711,14 @@ const setupUnifiedVoiceServer = (wss) => {
             session_id: sessionId,
             total_chunks: 1,
           }))
-          console.log(`[SARVAM] Audio sent to client (${audioBuffer.length} bytes)`)
         }
 
-        // Update usage statistics
-        await updateApiKeyUsage("sarvam")
-
       } catch (error) {
-        console.log(`[SARVAM] TTS error: ${error.message}`)
+        console.error(`❌ [SARVAM] Error: ${error.message}`)
       }
     }
 
-    // Update API key usage statistics
-    const updateApiKeyUsage = async (provider) => {
-      try {
-        await ApiKey.updateOne(
-          { tenantId, provider, isActive: true },
-          { 
-            $inc: { 
-              "usage.totalRequests": 1,
-              "usage.monthlyUsage": 1 
-            },
-            $set: { "usage.lastUsed": new Date() }
-          }
-        )
-      } catch (error) {
-        console.log(`❌ Error updating usage for ${provider}:`, error.message)
-      }
-    }
-
-    // Utility functions
+    // Utility function
     const bufferToPythonBytesString = (buffer) => {
       let result = "b'"
       for (let i = 0; i < buffer.length; i++) {
@@ -926,41 +733,6 @@ const setupUnifiedVoiceServer = (wss) => {
       return result
     }
 
-    const sendGreeting = async () => {
-      if (connectionGreetingSent || !sessionId) {
-        console.log(`⚠️ [GREETING] Skipping greeting - Already sent or no session`)
-        return
-      }
-
-      // Use agent's first message if available
-      const greetingText = agentConfig?.firstMessage || 
-        "नमस्कार! मैं आपकी किस प्रकार मदद कर सकता हूँ?"
-
-      console.log(`👋 [GREETING] Sending greeting for agent ${agentConfig?.agentName}: "${greetingText}"`)
-
-      try {
-        greetingInProgress = true
-        await new Promise(resolve => setTimeout(resolve, 1000))
-        await synthesizeAndSendResponse(greetingText)
-        connectionGreetingSent = true
-        greetingInProgress = false
-        console.log(`✅ [GREETING] Greeting sent successfully!`)
-      } catch (error) {
-        console.log(`❌ [GREETING] Failed to send greeting: ${error.message}`)
-        connectionGreetingSent = true
-        greetingInProgress = false
-        
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: "greeting_fallback",
-            session_id: sessionId,
-            message: greetingText,
-            error: error.message
-          }))
-        }
-      }
-    }
-
     // WebSocket message handling
     ws.on("message", async (message) => {
       try {
@@ -972,7 +744,7 @@ const setupUnifiedVoiceServer = (wss) => {
           try {
             data = JSON.parse(message)
           } catch (parseError) {
-            console.log("❌ Failed to parse JSON:", parseError.message)
+            console.error("❌ Failed to parse JSON:", parseError.message)
             return
           }
         } else if (message instanceof Buffer) {
@@ -989,78 +761,38 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         }
 
-        // --- Immediate DID number check and greeting audio send ---
-        if (isTextMessage && data && data.event === "start" && data.Destination) {
-          // Find agent by DID number
-          const agent = await ReadOnlyAgentProfile.findOne({ didNumber: data.Destination })
-          if (agent && agent.audioBytes && agent.audioBytes.length > 0) {
-            // Send the audio file immediately
-            const pythonBytesString = bufferToPythonBytesString(agent.audioBytes)
-            const audioResponse = {
-              data: {
-                session_id: data.session_id,
-                count: 1,
-                audio_bytes_to_play: pythonBytesString,
-                sample_rate: agent.audioMetadata?.sampleRate || 22050,
-                channels: agent.audioMetadata?.channels || 1,
-                sample_width: 2,
-                is_streaming: false,
-                format: agent.audioMetadata?.format || "mp3",
-              },
-              type: "ai_response",
-            }
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(audioResponse))
-              ws.send(JSON.stringify({
-                type: "ai_response_complete",
-                session_id: data.session_id,
-                total_chunks: 1,
-              }))
-            }
-            // Optionally: return here if you want to skip further processing
-            // return;
-          }
-          // Continue with the rest of your normal flow if needed
-        }
-
         if (isTextMessage && data) {
-          console.log(`📨 [MESSAGE] Received control message:`, data)
+          console.log(`📨 [MESSAGE] Received:`, data)
 
           if (data.event === "start" && data.session_id) {
             sessionId = data.session_id
-            audioChunkCount = 0
-            currentTranscript = ""
-            isSpeaking = false
-            fullConversationHistory = []
-            textProcessingQueue = []
-            isProcessingQueue = false
-            isPlayingAudio = false
-            shouldInterruptAudio = false
-            greetingInProgress = false
+            destinationNumber = data.Destination
+            sourceNumber = data.Source
 
             console.log(`✅ [SESSION] SIP Call Started:`)
             console.log(`   - Session ID: ${sessionId}`)
-            console.log(`   - Language: ${language}`)
+            console.log(`   - Source: ${sourceNumber}`)
+            console.log(`   - Destination (DID): ${destinationNumber}`)
 
-            // Load agent configuration first
-            const agentLoaded = await loadAgentConfig()
-            if (!agentLoaded) {
-              console.log(`❌ [SESSION] Cannot start session - Agent not configured`)
+            // Fast agent lookup by DID
+            const agent = await loadAgentByDID(destinationNumber)
+            if (!agent) {
+              console.error(`❌ [SESSION] No agent found for DID: ${destinationNumber}`)
               ws.send(JSON.stringify({
                 type: "error",
-                message: "Agent configuration not found",
+                message: `No agent configured for DID: ${destinationNumber}`,
                 session_id: sessionId
               }))
               return
             }
 
-            // Then load API keys
-            const keysLoaded = await loadApiKeys()
+            // Load API keys for the tenant
+            const keysLoaded = await loadApiKeysForTenant(tenantId)
             if (!keysLoaded) {
-              console.log(`❌ [SESSION] Cannot start session - API keys not available`)
+              console.error(`❌ [SESSION] API keys not available for tenant: ${tenantId}`)
               ws.send(JSON.stringify({
                 type: "error",
-                message: "API keys not configured for this tenant",
+                message: "API keys not configured",
                 session_id: sessionId
               }))
               return
@@ -1068,52 +800,42 @@ const setupUnifiedVoiceServer = (wss) => {
 
             // Send session started confirmation
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "session_started",
-                  session_id: sessionId,
-                  language: agentConfig?.language || language,
-                  agent: agentConfig?.agentName || "Unknown",
-                  message: "SIP call started, establishing persistent connection.",
-                }),
-              )
-            }
-
-            // Connect to Deepgram for the session
-            try {
-              await connectToDeepgram()
-              console.log(`✅ [SESSION] Persistent Deepgram connection established for session ${sessionId}`)
-            } catch (error) {
-              console.log(`❌ [SESSION] Failed to connect to Deepgram: ${error.message}`)
               ws.send(JSON.stringify({
-                type: "error",
+                type: "session_started",
                 session_id: sessionId,
-                message: "Failed to connect to speech recognition service"
+                agent: agentConfig.agentName,
+                did_number: destinationNumber,
+                tenant_id: tenantId,
+                message: "Agent matched and ready",
               }))
             }
 
-            // Send greeting after connection is established
+            // Connect to Deepgram
+            try {
+              await connectToDeepgram()
+              console.log(`✅ [SESSION] Deepgram connected for ${agentConfig.agentName}`)
+            } catch (error) {
+              console.error(`❌ [SESSION] Deepgram connection failed: ${error.message}`)
+            }
+
+            // Send fast greeting
             setTimeout(() => {
-              sendGreeting()
-            }, 2000)
+              sendFastGreeting()
+            }, 500) // Reduced delay for faster response
+
           } else if (data.type === "synthesize") {
-            console.log(`🔊 [MESSAGE] TTS synthesis request: "${data.text}"`)
             if (data.session_id) {
               sessionId = data.session_id
             }
-            await synthesizeAndSendResponse(data.text)
+            await synthesizeWithSarvam(data.text)
           } else if (data.data && data.data.hangup === "true") {
-            console.log(`📞 [SESSION] Hangup request received for session ${sessionId}`)
+            console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
             
-            // Close Deepgram connection
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              console.log(`🎙️ [DEEPGRAM] Closing persistent connection due to hangup`)
               deepgramWs.close(1000, "Call ended")
             }
             
-            // Close TTS connection
             if (currentTTSSocket) {
-              console.log(`🛑 [SARVAM] Closing TTS connection due to hangup`)
               currentTTSSocket.close()
             }
             
@@ -1121,53 +843,40 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         } else {
           // Handle audio data
-          console.log(`🎵 [AUDIO] Received audio buffer size: ${message.length} bytes`)
-          
           if (isPlayingAudio && !greetingInProgress) {
             interruptCurrentAudio()
-          } else if (isPlayingAudio && greetingInProgress) {
-            console.log("🛡️ [AUDIO] Audio interruption blocked - greeting protection active")
           }
 
           if (deepgramConnected && deepgramReady) {
             await sendAudioToDeepgram(message)
-          } else {
-            console.log(`⚠️ [AUDIO] Audio received but Deepgram not connected`)
           }
         }
       } catch (error) {
-        console.log(`❌ [MESSAGE] Error processing message: ${error.message}`)
+        console.error(`❌ [MESSAGE] Processing error: ${error.message}`)
       }
     })
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log(`🔗 [SESSION] Unified voice connection closed for session ${sessionId}`)
-      console.log(`📊 [SESSION] Final statistics:`)
-      console.log(`   - Tenant ID: ${tenantId}`)
-      console.log(`   - Agent: ${agentConfig?.agentName || "Unknown"}`)
-      console.log(`   - Session ID: ${sessionId || "Not set"}`)
-      console.log(`   - Audio chunks processed: ${audioChunkCount}`)
-      console.log(`   - Conversation history: ${fullConversationHistory.length} messages`)
-      console.log(`📊 [VAD] Final VAD statistics:`)
-      console.log(`   - Speech events detected: ${vadState.totalSpeechEvents}`)
-      console.log(`   - Utterance ends detected: ${vadState.totalUtteranceEnds}`)
+      console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
+      console.log(`📊 [STATS] Agent: ${agentConfig?.agentName || "Unknown"}, DID: ${destinationNumber}, Tenant: ${tenantId}`)
 
-      // Close Deepgram connection
+      // Cleanup connections
       if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-        console.log(`🎙️ [DEEPGRAM] Closing persistent connection for session ${sessionId}`)
         deepgramWs.close(1000, "Session ended")
       }
 
-      // Close TTS connection
       if (currentTTSSocket) {
-        console.log(`🛑 [SARVAM] Closing TTS connection for session ${sessionId}`)
         currentTTSSocket.close()
       }
 
-      // Cleanup
+      // Reset state
       resetSilenceTimer()
       sessionId = null
+      destinationNumber = null
+      sourceNumber = null
+      tenantId = null
+      agentConfig = null
       audioChunkCount = 0
       deepgramReady = false
       deepgramConnected = false
@@ -1180,27 +889,17 @@ const setupUnifiedVoiceServer = (wss) => {
       fullConversationHistory = []
       textProcessingQueue = []
       isProcessingQueue = false
-      vadState = {
-        speechActive: false,
-        lastSpeechStarted: null,
-        lastUtteranceEnd: null,
-        speechDuration: 0,
-        silenceDuration: 0,
-        totalSpeechEvents: 0,
-        totalUtteranceEnds: 0,
-      }
     })
 
     ws.on("error", (error) => {
-      console.log(`❌ [SESSION] WebSocket connection error: ${error.message}`)
+      console.error(`❌ [SESSION] WebSocket error: ${error.message}`)
       
       if (currentTTSSocket) {
-        console.log(`🛑 [SARVAM] Closing TTS connection due to error`)
         currentTTSSocket.close()
       }
     })
 
-    console.log(`✅ [SESSION] WebSocket connection ready, waiting for SIP 'start' event`)
+    console.log(`✅ [SESSION] WebSocket ready, waiting for SIP start event`)
   })
 }
 
