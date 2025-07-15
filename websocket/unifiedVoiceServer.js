@@ -2,7 +2,7 @@ const WebSocket = require("ws")
 const mongoose = require("mongoose")
 const ApiKey = require("../models/ApiKey")
 const Agent = require("../models/AgentProfile") // Import the Agent model
-const connectDB = require("./config/db")
+const connectDB = require("../config/db")
 connectDB()
 
 const fetch = globalThis.fetch || require("node-fetch")
