@@ -1,11 +1,7 @@
 const WebSocket = require("ws")
-const FormData = require("form-data")
-const fs = require("fs")
-const path = require("path")
-const { SarvamAIClient } = require("sarvamai")
 const mongoose = require("mongoose")
 const ApiKey = require("../models/ApiKey")
-const Tenant = require("../models/Tenant")
+const Agent = require("../models/AgentProfile") // Import the Agent model
 
 const fetch = globalThis.fetch || require("node-fetch")
 
@@ -14,97 +10,8 @@ if (!fetch) {
   process.exit(1)
 }
 
-// Agent Schema - Optimized for DID matching
-const agentSchema = new mongoose.Schema({
-  // Tenant Information
-  tenantId: { type: String, required: true, index: true },
-
-  // Personal Information
-  agentName: { type: String, required: true },
-  description: { type: String, required: true },
-  category: { type: String },
-  personality: {
-    type: String,
-    enum: ["formal", "informal", "friendly", "flirty", "disciplined"],
-    default: "formal",
-  },
-  language: { type: String, default: "en" },
-
-  // System Information
-  firstMessage: { type: String, required: true },
-  systemPrompt: { type: String, required: true },
-  sttSelection: {
-    type: String,
-    enum: ["deepgram", "whisper", "google", "azure", "aws"],
-    default: "deepgram",
-  },
-  ttsSelection: {
-    type: String,
-    enum: ["sarvam", "elevenlabs", "openai", "google", "azure", "aws"],
-    default: "sarvam",
-  },
-  llmSelection: {
-    type: String,
-    enum: ["openai", "anthropic", "google", "azure"],
-    default: "openai",
-  },
-  voiceSelection: {
-    type: String,
-    enum: [
-      "default",
-      "male-professional",
-      "female-professional", 
-      "male-friendly",
-      "female-friendly",
-      "neutral",
-      "abhilash",
-      "anushka",
-    ],
-    default: "default",
-  },
-  contextMemory: { type: String },
-  brandInfo: { type: String },
-
-  // Telephony - DID number is key for matching
-  didNumber: { type: String, required: true, index: true },
-  serviceProvider: {
-    type: String,
-    enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
-  },
-
-  // Pre-generated audio storage for fast response
-  audioFile: { type: String },
-  audioBytes: { type: Buffer },
-  audioMetadata: {
-    format: { type: String, default: "mp3" },
-    sampleRate: { type: Number, default: 22050 },
-    channels: { type: Number, default: 1 },
-    size: { type: Number },
-    generatedAt: { type: Date },
-    language: { type: String, default: "en" },
-    speaker: { type: String },
-    provider: { type: String, default: "sarvam" },
-  },
-
-  // Timestamps
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-})
-
-// Compound indexes for fast DID lookup
-agentSchema.index({ tenantId: 1, didNumber: 1 }, { unique: true })
-agentSchema.index({ didNumber: 1 }) // Fast DID lookup across all tenants
-
-agentSchema.pre("save", function (next) {
-  this.updatedAt = Date.now()
-  next()
-})
-
-const Agent = mongoose.model("Agent", agentSchema)
-
-
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 Unified Voice WebSocket server initialized with DID-based Agent Matching")
+  console.log("🚀 Unified Voice WebSocket server initialized with Direct DID Matching")
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 New unified voice connection established")
@@ -121,10 +28,12 @@ const setupUnifiedVoiceServer = (wss) => {
     let sourceNumber = null
     let tenantId = null
     let agentConfig = null
-    let apiKeys = {
+
+    // API keys cache
+    const apiKeys = {
       deepgram: null,
       sarvam: null,
-      openai: null
+      openai: null,
     }
 
     // Connection state
@@ -133,7 +42,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramConnected = false
     let reconnectAttempts = 0
     const MAX_RECONNECT_ATTEMPTS = 5
-    let reconnectDelay = 1000
+    const reconnectDelay = 1000
 
     // Audio and conversation state
     let audioChunkCount = 0
@@ -155,7 +64,7 @@ const setupUnifiedVoiceServer = (wss) => {
     let greetingInProgress = false
 
     // VAD state
-    let vadState = {
+    const vadState = {
       speechActive: false,
       lastSpeechStarted: null,
       lastUtteranceEnd: null,
@@ -165,16 +74,14 @@ const setupUnifiedVoiceServer = (wss) => {
       totalUtteranceEnds: 0,
     }
 
-    // Fast DID-based agent lookup
-    const loadAgentByDID = async (didNumber) => {
+    // Fast DID-based agent lookup with immediate audio response
+    const loadAgentByDIDAndSendGreeting = async (didNumber) => {
       try {
         console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: ${didNumber}`)
-        
         const startTime = Date.now()
-        
-        // Direct DID lookup - fastest method
+
+        // Direct DID lookup from AgentProfile collection
         const agent = await Agent.findOne({ didNumber: didNumber }).lean()
-        
         const lookupTime = Date.now() - startTime
         console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
 
@@ -183,7 +90,7 @@ const setupUnifiedVoiceServer = (wss) => {
           return null
         }
 
-        // Set tenant ID from found agent
+        // Set session variables
         tenantId = agent.tenantId
         agentConfig = agent
 
@@ -192,8 +99,13 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - Tenant ID: ${agent.tenantId}`)
         console.log(`   - DID Number: ${agent.didNumber}`)
         console.log(`   - Language: ${agent.language}`)
-        console.log(`   - TTS Provider: ${agent.ttsSelection}`)
-        console.log(`   - Pre-generated Audio: ${agent.audioBytes ? '✅ Available' : '❌ Not Available'}`)
+        console.log(`   - First Message: ${agent.firstMessage}`)
+        console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
+
+        // IMMEDIATELY send greeting if audio bytes are available
+        if (agent.audioBytes && agent.audioBytes.length > 0) {
+          await sendImmediateGreeting(agent)
+        }
 
         return agent
       } catch (error) {
@@ -202,24 +114,69 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Fast API keys loading
+    // Send immediate greeting with pre-generated audio bytes
+    const sendImmediateGreeting = async (agent) => {
+      if (connectionGreetingSent || !sessionId) {
+        return
+      }
+
+      console.log(`🚀 [IMMEDIATE_GREETING] Sending for agent: ${agent.agentName}`)
+      
+      try {
+        greetingInProgress = true
+        
+        const audioBuffer = agent.audioBytes
+        const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+
+        const audioResponse = {
+          data: {
+            session_id: sessionId,
+            count: 1,
+            audio_bytes_to_play: pythonBytesString,
+            sample_rate: agent.audioMetadata?.sampleRate || 22050,
+            channels: agent.audioMetadata?.channels || 1,
+            sample_width: 2,
+            is_streaming: false,
+            format: agent.audioMetadata?.format || "mp3",
+          },
+          type: "ai_response",
+        }
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(audioResponse))
+          ws.send(JSON.stringify({
+            type: "ai_response_complete",
+            session_id: sessionId,
+            total_chunks: 1,
+          }))
+          console.log(`✅ [IMMEDIATE_GREETING] Audio bytes sent successfully (${audioBuffer.length} bytes)`)
+        }
+
+        connectionGreetingSent = true
+        greetingInProgress = false
+        isPlayingAudio = true
+
+        // Set a timeout to reset playing state
+        setTimeout(() => {
+          isPlayingAudio = false
+        }, 3000) // Assume 3 seconds for greeting playback
+
+      } catch (error) {
+        console.error(`❌ [IMMEDIATE_GREETING] Error: ${error.message}`)
+        greetingInProgress = false
+      }
+    }
+
+    // Load API keys for the tenant
     const loadApiKeysForTenant = async (tenantId) => {
       try {
         console.log(`🔑 [API_KEYS] Loading keys for tenant: ${tenantId}`)
-        
         const startTime = Date.now()
-        
-        // Check tenant status first
-        const tenant = await Tenant.findOne({ tenantId, status: "active" }).lean()
-        if (!tenant) {
-          console.error(`❌ [API_KEYS] Tenant not found or inactive: ${tenantId}`)
-          return false
-        }
 
         // Load all active API keys for tenant
-        const keys = await ApiKey.find({ 
-          tenantId, 
-          isActive: true 
+        const keys = await ApiKey.find({
+          tenantId,
+          isActive: true,
         }).lean()
 
         const loadTime = Date.now() - startTime
@@ -233,33 +190,36 @@ const setupUnifiedVoiceServer = (wss) => {
         // Decrypt and assign API keys
         for (const keyDoc of keys) {
           const decryptedKey = ApiKey.decryptKey(keyDoc.encryptedKey)
-          
+
           switch (keyDoc.provider) {
             case "deepgram":
               apiKeys.deepgram = decryptedKey
+              console.log(`✅ [API_KEYS] Deepgram key loaded`)
               break
             case "sarvam":
               apiKeys.sarvam = decryptedKey
+              console.log(`✅ [API_KEYS] Sarvam key loaded`)
               break
             case "openai":
               apiKeys.openai = decryptedKey
+              console.log(`✅ [API_KEYS] OpenAI key loaded`)
               break
           }
 
           // Update usage statistics asynchronously
           ApiKey.updateOne(
             { _id: keyDoc._id },
-            { 
+            {
               $inc: { "usage.totalRequests": 1 },
-              $set: { "usage.lastUsed": new Date() }
-            }
+              $set: { "usage.lastUsed": new Date() },
+            },
           ).exec()
         }
 
-        console.log(`🔑 [API_KEYS] Loaded for ${tenantId}:`)
-        console.log(`   - Deepgram: ${apiKeys.deepgram ? "✅" : "❌"}`)
-        console.log(`   - Sarvam: ${apiKeys.sarvam ? "✅" : "❌"}`)
-        console.log(`   - OpenAI: ${apiKeys.openai ? "✅" : "❌"}`)
+        console.log(`🔑 [API_KEYS] Providers ready:`)
+        console.log(`   - Deepgram (STT): ${apiKeys.deepgram ? "✅" : "❌"}`)
+        console.log(`   - Sarvam (TTS): ${apiKeys.sarvam ? "✅" : "❌"}`)
+        console.log(`   - OpenAI (LLM): ${apiKeys.openai ? "✅" : "❌"}`)
 
         return true
       } catch (error) {
@@ -268,23 +228,105 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Fast greeting with pre-generated audio
-    const sendFastGreeting = async () => {
+    // Generate and save audio bytes for agents without pre-generated audio
+    const generateAndSaveAudioBytes = async (text, agentId) => {
+      try {
+        console.log(`🎵 [AUDIO_GEN] Generating audio bytes for: "${text}"`)
+
+        if (!apiKeys.sarvam) {
+          throw new Error("Sarvam API key not available")
+        }
+
+        const requestBody = {
+          inputs: [text],
+          target_language_code: agentConfig?.language === "hi" ? "hi-IN" : "hi-IN",
+          speaker: agentConfig?.voiceSelection || "anushka",
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 22050,
+          enable_preprocessing: true,
+          model: "bulbul:v2",
+        }
+
+        const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "API-Subscription-Key": apiKeys.sarvam,
+          },
+          body: JSON.stringify(requestBody),
+        })
+
+        if (!response.ok) {
+          throw new Error(`Sarvam API error: ${response.status}`)
+        }
+
+        const responseData = await response.json()
+        if (!responseData.audios || responseData.audios.length === 0) {
+          throw new Error("No audio data received")
+        }
+
+        const audioBase64 = responseData.audios[0]
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+
+        // Save audio bytes to database
+        await Agent.updateOne(
+          { _id: agentId },
+          {
+            audioBytes: audioBuffer,
+            audioMetadata: {
+              format: "mp3",
+              sampleRate: 22050,
+              channels: 1,
+              size: audioBuffer.length,
+              generatedAt: new Date(),
+              language: agentConfig?.language || "hi",
+              speaker: agentConfig?.voiceSelection || "anushka",
+              provider: "sarvam",
+            },
+          },
+        )
+
+        console.log(`✅ [AUDIO_GEN] Audio bytes saved to database: ${audioBuffer.length} bytes`)
+
+        // Update agent config with new audio
+        agentConfig.audioBytes = audioBuffer
+        agentConfig.audioMetadata = {
+          format: "mp3",
+          sampleRate: 22050,
+          channels: 1,
+          size: audioBuffer.length,
+          generatedAt: new Date(),
+          language: agentConfig?.language || "hi",
+          speaker: agentConfig?.voiceSelection || "anushka",
+          provider: "sarvam",
+        }
+
+        return audioBuffer
+      } catch (error) {
+        console.error(`❌ [AUDIO_GEN] Error: ${error.message}`)
+        return null
+      }
+    }
+
+    // Fallback greeting for agents without pre-generated audio
+    const sendFallbackGreeting = async () => {
       if (connectionGreetingSent || !sessionId || !agentConfig) {
         return
       }
 
-      console.log(`🚀 [FAST_GREETING] Sending for agent: ${agentConfig.agentName}`)
-      
+      console.log(`🔄 [FALLBACK_GREETING] Generating for agent: ${agentConfig.agentName}`)
+
       try {
         greetingInProgress = true
-        
-        // Use pre-generated audio if available
-        if (agentConfig.audioBytes && agentConfig.audioBytes.length > 0) {
-          console.log(`⚡ [FAST_GREETING] Using pre-generated audio (${agentConfig.audioBytes.length} bytes)`)
-          
-          const pythonBytesString = bufferToPythonBytesString(agentConfig.audioBytes)
-          
+
+        // Generate and save audio bytes
+        const audioBuffer = await generateAndSaveAudioBytes(agentConfig.firstMessage, agentConfig._id)
+
+        if (audioBuffer) {
+          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+
           const audioResponse = {
             data: {
               session_id: sessionId,
@@ -306,28 +348,31 @@ const setupUnifiedVoiceServer = (wss) => {
               session_id: sessionId,
               total_chunks: 1,
             }))
-            console.log(`✅ [FAST_GREETING] Pre-generated audio sent successfully`)
+            console.log(`✅ [FALLBACK_GREETING] Audio bytes sent successfully (${audioBuffer.length} bytes)`)
           }
         } else {
-          // Fallback to real-time synthesis
-          console.log(`🔄 [FAST_GREETING] Generating audio in real-time`)
-          await synthesizeWithSarvam(agentConfig.firstMessage)
+          throw new Error("Failed to generate audio")
         }
-        
+
         connectionGreetingSent = true
         greetingInProgress = false
-        
+        isPlayingAudio = true
+
+        setTimeout(() => {
+          isPlayingAudio = false
+        }, 3000)
+
       } catch (error) {
-        console.error(`❌ [FAST_GREETING] Error: ${error.message}`)
+        console.error(`❌ [FALLBACK_GREETING] Error: ${error.message}`)
         greetingInProgress = false
-        
-        // Send fallback text response
+
+        // Send text fallback
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
             type: "greeting_fallback",
             session_id: sessionId,
             message: agentConfig.firstMessage,
-            error: error.message
+            error: error.message,
           }))
         }
       }
@@ -352,8 +397,8 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
 
-          deepgramWs = new WebSocket(deepgramUrl.toString(), { 
-            headers: { Authorization: `Token ${apiKeys.deepgram}` } 
+          deepgramWs = new WebSocket(deepgramUrl.toString(), {
+            headers: { Authorization: `Token ${apiKeys.deepgram}` },
           })
           deepgramWs.binaryType = "arraybuffer"
 
@@ -472,7 +517,7 @@ const setupUnifiedVoiceServer = (wss) => {
       shouldInterruptAudio = true
       isPlayingAudio = false
       audioQueue = []
-      
+
       if (currentTTSSocket) {
         try {
           currentTTSSocket.close()
@@ -593,28 +638,26 @@ const setupUnifiedVoiceServer = (wss) => {
           content: userMessage,
         })
 
-        const systemPrompt = agentConfig?.systemPrompt || 
-          `You are ${agentConfig?.agentName || 'an AI assistant'}, a helpful voice assistant. 
-          ${agentConfig?.description || ''} 
-          Your personality is ${agentConfig?.personality || 'formal'}. 
+        const systemPrompt =
+          agentConfig?.systemPrompt ||
+          `You are ${agentConfig?.agentName || "an AI assistant"}, a helpful voice assistant. 
+          ${agentConfig?.description || ""} 
+          Your personality is ${agentConfig?.personality || "formal"}. 
           Keep responses very short and conversational for phone calls.
           Respond in ${agentConfig?.language === "hi" ? "Hindi" : agentConfig?.language || "Hindi"}.`
 
         const requestBody = {
           model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...fullConversationHistory.slice(-10)
-          ],
+          messages: [{ role: "system", content: systemPrompt }, ...fullConversationHistory.slice(-10)],
           max_tokens: 150,
           temperature: 0.5,
         }
 
         const response = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
-          headers: { 
+          headers: {
             "Content-Type": "application/json",
-            "Authorization": `Bearer ${apiKeys.openai}`
+            Authorization: `Bearer ${apiKeys.openai}`,
           },
           body: JSON.stringify(requestBody),
         })
@@ -665,7 +708,7 @@ const setupUnifiedVoiceServer = (wss) => {
           loudness: 1.0,
           speech_sample_rate: 22050,
           enable_preprocessing: true,
-          model: "bulbul:v2"
+          model: "bulbul:v2",
         }
 
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -687,7 +730,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         const audioBase64 = responseData.audios[0]
-        const audioBuffer = Buffer.from(audioBase64, 'base64')
+        const audioBuffer = Buffer.from(audioBase64, "base64")
         const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
         const audioResponse = {
@@ -711,7 +754,13 @@ const setupUnifiedVoiceServer = (wss) => {
             session_id: sessionId,
             total_chunks: 1,
           }))
+          console.log(`✅ [SARVAM] Audio bytes sent (${audioBuffer.length} bytes)`)
         }
+
+        isPlayingAudio = true
+        setTimeout(() => {
+          isPlayingAudio = false
+        }, 3000)
 
       } catch (error) {
         console.error(`❌ [SARVAM] Error: ${error.message}`)
@@ -774,26 +823,26 @@ const setupUnifiedVoiceServer = (wss) => {
             console.log(`   - Source: ${sourceNumber}`)
             console.log(`   - Destination (DID): ${destinationNumber}`)
 
-            // Fast agent lookup by DID
-            const agent = await loadAgentByDID(destinationNumber)
+            // Fast agent lookup by DID and immediate greeting
+            const agent = await loadAgentByDIDAndSendGreeting(destinationNumber)
             if (!agent) {
               console.error(`❌ [SESSION] No agent found for DID: ${destinationNumber}`)
               ws.send(JSON.stringify({
                 type: "error",
                 message: `No agent configured for DID: ${destinationNumber}`,
-                session_id: sessionId
+                session_id: sessionId,
               }))
               return
             }
 
-            // Load API keys for the tenant
+            // Load API keys
             const keysLoaded = await loadApiKeysForTenant(tenantId)
             if (!keysLoaded) {
               console.error(`❌ [SESSION] API keys not available for tenant: ${tenantId}`)
               ws.send(JSON.stringify({
                 type: "error",
-                message: "API keys not configured",
-                session_id: sessionId
+                message: "API keys not configured for tenant",
+                session_id: sessionId,
               }))
               return
             }
@@ -806,7 +855,12 @@ const setupUnifiedVoiceServer = (wss) => {
                 agent: agentConfig.agentName,
                 did_number: destinationNumber,
                 tenant_id: tenantId,
-                message: "Agent matched and ready",
+                providers: {
+                  stt: agentConfig.sttSelection || "deepgram",
+                  tts: agentConfig.ttsSelection || "sarvam",
+                  llm: agentConfig.llmSelection || "openai",
+                },
+                message: "Agent matched and greeting sent",
               }))
             }
 
@@ -818,11 +872,10 @@ const setupUnifiedVoiceServer = (wss) => {
               console.error(`❌ [SESSION] Deepgram connection failed: ${error.message}`)
             }
 
-            // Send fast greeting
-            setTimeout(() => {
-              sendFastGreeting()
-            }, 500) // Reduced delay for faster response
-
+            // If no pre-generated audio was available, send fallback greeting
+            if (!connectionGreetingSent) {
+              await sendFallbackGreeting()
+            }
           } else if (data.type === "synthesize") {
             if (data.session_id) {
               sessionId = data.session_id
@@ -830,15 +883,15 @@ const setupUnifiedVoiceServer = (wss) => {
             await synthesizeWithSarvam(data.text)
           } else if (data.data && data.data.hangup === "true") {
             console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
-            
+
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
               deepgramWs.close(1000, "Call ended")
             }
-            
+
             if (currentTTSSocket) {
               currentTTSSocket.close()
             }
-            
+
             ws.close(1000, "Hangup requested")
           }
         } else {
@@ -859,7 +912,9 @@ const setupUnifiedVoiceServer = (wss) => {
     // Connection cleanup
     ws.on("close", () => {
       console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
-      console.log(`📊 [STATS] Agent: ${agentConfig?.agentName || "Unknown"}, DID: ${destinationNumber}, Tenant: ${tenantId}`)
+      console.log(
+        `📊 [STATS] Agent: ${agentConfig?.agentName || "Unknown"}, DID: ${destinationNumber}, Tenant: ${tenantId}`
+      )
 
       // Cleanup connections
       if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
@@ -893,7 +948,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
     ws.on("error", (error) => {
       console.error(`❌ [SESSION] WebSocket error: ${error.message}`)
-      
+
       if (currentTTSSocket) {
         currentTTSSocket.close()
       }
