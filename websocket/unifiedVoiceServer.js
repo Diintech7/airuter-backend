@@ -75,99 +75,104 @@ const setupUnifiedVoiceServer = (wss) => {
     }
 
     // Fast DID-based agent lookup with immediate audio response
-    const loadAgentByDIDAndSendGreeting = async (didNumber) => {
-      try {
-        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: "${didNumber}"`)
-        console.log(`🔍 [AGENT_LOOKUP] DID type: ${typeof didNumber}`)
-        console.log(`🔍 [AGENT_LOOKUP] DID length: ${didNumber.length}`)
+    // Simple and reliable DID lookup function
+const loadAgentByDIDAndSendGreeting = async (didNumber) => {
+  try {
+    console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: "${didNumber}"`)
+    console.log(`🔍 [AGENT_LOOKUP] DID type: ${typeof didNumber}, length: ${didNumber.length}`)
+    
+    const startTime = Date.now()
+
+    // Clean the DID number
+    const cleanDID = String(didNumber).trim()
+    console.log(`🔍 [AGENT_LOOKUP] Clean DID: "${cleanDID}"`)
+
+    // First, try exact match
+    let agent = await Agent.findOne({ didNumber: cleanDID }).lean()
+    
+    if (!agent) {
+      console.log(`🔍 [AGENT_LOOKUP] Exact match failed. Debugging database contents...`)
+      
+      // Get all agents for debugging
+      const allAgents = await Agent.find({}).lean()
+      console.log(`🔍 [AGENT_LOOKUP] Total agents in database: ${allAgents.length}`)
+      
+      // Manual search and detailed comparison
+      for (let i = 0; i < allAgents.length; i++) {
+        const a = allAgents[i]
+        console.log(`   ${i + 1}. Agent: "${a.agentName}" - DID: "${a.didNumber}"`)
         
-        const startTime = Date.now()
-    
-        // Clean and normalize the DID number
-        const cleanDID = String(didNumber).trim()
-        console.log(`🔍 [AGENT_LOOKUP] Clean DID: "${cleanDID}"`)
-    
-        // First, let's try exact match
-        let agent = await Agent.findOne({ didNumber: cleanDID }).lean()
-        
-        if (!agent) {
-          console.log(`🔍 [AGENT_LOOKUP] Exact match failed, trying case-insensitive search...`)
+        if (a.didNumber) {
+          const dbDID = String(a.didNumber).trim()
+          console.log(`      Comparing: "${dbDID}" === "${cleanDID}" ? ${dbDID === cleanDID}`)
           
-          // Try case-insensitive search (though numbers shouldn't need this)
-          agent = await Agent.findOne({ 
-            didNumber: { $regex: new RegExp(`^${cleanDID}$`, 'i') } 
-          }).lean()
-        }
-    
-        if (!agent) {
-          console.log(`🔍 [AGENT_LOOKUP] Case-insensitive failed, trying flexible search...`)
+          // Check lengths
+          console.log(`      Lengths: ${dbDID.length} vs ${cleanDID.length}`)
           
-          // Try more flexible search - remove any non-digit characters and compare
-          const digitsOnly = cleanDID.replace(/\D/g, '')
-          console.log(`🔍 [AGENT_LOOKUP] Digits only: "${digitsOnly}"`)
-          
-          agent = await Agent.findOne({
-            $expr: {
-              $eq: [
-                { $replaceAll: { input: "$didNumber", find: { $regex: "[^0-9]" }, replacement: "" } },
-                digitsOnly
-              ]
+          // Check character codes if lengths match
+          if (dbDID.length === cleanDID.length) {
+            let allMatch = true
+            for (let j = 0; j < dbDID.length; j++) {
+              if (dbDID.charCodeAt(j) !== cleanDID.charCodeAt(j)) {
+                console.log(`      Char ${j}: "${dbDID[j]}" (${dbDID.charCodeAt(j)}) vs "${cleanDID[j]}" (${cleanDID.charCodeAt(j)})`)
+                allMatch = false
+              }
             }
-          }).lean()
-        }
-    
-        if (!agent) {
-          console.log(`🔍 [AGENT_LOOKUP] All searches failed. Let's see what's in the database...`)
-          
-          // Debug: Show all agents and their DID numbers
-          const allAgents = await Agent.find({}, { didNumber: 1, agentName: 1 }).lean()
-          console.log(`🔍 [AGENT_LOOKUP] All agents in database:`)
-          allAgents.forEach((a, index) => {
-            console.log(`   ${index + 1}. Agent: "${a.agentName}" - DID: "${a.didNumber}" (type: ${typeof a.didNumber}, length: ${a.didNumber ? a.didNumber.length : 'null'})`)
-          })
-          
-          // Try finding by partial match
-          agent = await Agent.findOne({
-            didNumber: { $regex: cleanDID }
-          }).lean()
-          
-          if (agent) {
-            console.log(`🔍 [AGENT_LOOKUP] Found with partial match: "${agent.didNumber}"`)
+            
+            if (allMatch) {
+              console.log(`✅ [AGENT_LOOKUP] Manual match found: ${a.agentName}`)
+              agent = a
+              break
+            }
           }
         }
-    
-        const lookupTime = Date.now() - startTime
-        console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
-    
-        if (!agent) {
-          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${cleanDID}`)
-          return null
+      }
+      
+      // If still no match, try case-insensitive
+      if (!agent) {
+        console.log(`🔍 [AGENT_LOOKUP] Trying case-insensitive match...`)
+        agent = await Agent.findOne({ 
+          didNumber: { $regex: `^${cleanDID}$`, $options: 'i' } 
+        }).lean()
+        
+        if (agent) {
+          console.log(`✅ [AGENT_LOOKUP] Case-insensitive match found: ${agent.agentName}`)
         }
-    
-        // Set session variables
-        tenantId = agent.tenantId
-        agentConfig = agent
-    
-        console.log(`✅ [AGENT_LOOKUP] Agent found:`)
-        console.log(`   - Agent Name: ${agent.agentName}`)
-        console.log(`   - Tenant ID: ${agent.tenantId}`)
-        console.log(`   - DID Number: ${agent.didNumber}`)
-        console.log(`   - Language: ${agent.language}`)
-        console.log(`   - First Message: ${agent.firstMessage}`)
-        console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
-    
-        // IMMEDIATELY send greeting if audio bytes are available
-        if (agent.audioBytes && agent.audioBytes.length > 0) {
-          await sendImmediateGreeting(agent)
-        }
-    
-        return agent
-      } catch (error) {
-        console.error(`❌ [AGENT_LOOKUP] Error: ${error.message}`)
-        console.error(`❌ [AGENT_LOOKUP] Stack: ${error.stack}`)
-        return null
       }
     }
+
+    const lookupTime = Date.now() - startTime
+    console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
+
+    if (!agent) {
+      console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${cleanDID}`)
+      return null
+    }
+
+    // Set session variables
+    tenantId = agent.tenantId
+    agentConfig = agent
+
+    console.log(`✅ [AGENT_LOOKUP] Agent found:`)
+    console.log(`   - Agent Name: ${agent.agentName}`)
+    console.log(`   - Tenant ID: ${agent.tenantId}`)
+    console.log(`   - DID Number: ${agent.didNumber}`)
+    console.log(`   - Language: ${agent.language}`)
+    console.log(`   - First Message: ${agent.firstMessage}`)
+    console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
+
+    // IMMEDIATELY send greeting if audio bytes are available
+    if (agent.audioBytes && agent.audioBytes.length > 0) {
+      await sendImmediateGreeting(agent)
+    }
+
+    return agent
+  } catch (error) {
+    console.error(`❌ [AGENT_LOOKUP] Error: ${error.message}`)
+    console.error(`❌ [AGENT_LOOKUP] Stack: ${error.stack}`)
+    return null
+  }
+}
 
     // Send immediate greeting with pre-generated audio bytes
     const sendImmediateGreeting = async (agent) => {
