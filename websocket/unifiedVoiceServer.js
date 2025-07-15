@@ -44,16 +44,13 @@ if (!fetch) {
   process.exit(1)
 }
 
-// Compound index for tenant + agent name uniqueness
-agentSchema.index({ tenantId: 1, agentName: 1 }, { unique: true })
-
 // Update the updatedAt field before saving
-agentSchema.pre("save", function (next) {
+agentProfileSchema.pre("save", function (next) {
   this.updatedAt = Date.now()
   next()
 })
 
-const Agent = mongoose.model("AgentProfile", agentSchema)
+const Agent = mongoose.model("AgentProfile", agentProfileSchema)
 
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Agent Integration")
