@@ -12,115 +12,60 @@ if (!fetch) {
   process.exit(1)
 }
 
-// Language detection and mapping
-const SUPPORTED_LANGUAGES = {
+// Helper to normalize DID (pad with leading zeros to 11 digits, trim whitespace)
+function normalizeDID(did) {
+  let str = String(did).trim();
+  str = str.replace(/\D/g, "");
+  return str.padStart(11, '0');
+}
+
+// Language detection mapping
+const LANGUAGE_MAPPING = {
   'hi': 'hi-IN',
   'en': 'en-US',
-  'hi-IN': 'hi-IN',
-  'en-US': 'en-US',
   'bn': 'bn-IN',
   'te': 'te-IN',
-  'ml': 'ml-IN',
   'ta': 'ta-IN',
-  'kn': 'kn-IN',
-  'gu': 'gu-IN',
   'mr': 'mr-IN',
-  'or': 'or-IN',
+  'gu': 'gu-IN',
+  'kn': 'kn-IN',
+  'ml': 'ml-IN',
   'pa': 'pa-IN',
+  'or': 'or-IN',
+  'as': 'as-IN',
   'ur': 'ur-IN'
-}
+};
 
-const LANGUAGE_NAMES = {
-  'hi': 'Hindi',
-  'en': 'English',
-  'hi-IN': 'Hindi',
-  'en-US': 'English',
-  'bn': 'Bengali',
-  'te': 'Telugu',
-  'ml': 'Malayalam',
-  'ta': 'Tamil',
-  'kn': 'Kannada',
-  'gu': 'Gujarati',
-  'mr': 'Marathi',
-  'or': 'Odia',
-  'pa': 'Punjabi',
-  'ur': 'Urdu'
-}
+// Get supported Sarvam language code
+const getSarvamLanguage = (detectedLang, defaultLang = 'hi') => {
+  const lang = detectedLang?.toLowerCase() || defaultLang;
+  return LANGUAGE_MAPPING[lang] || LANGUAGE_MAPPING[defaultLang] || 'hi-IN';
+};
 
-// Helper to normalize DID
-function normalizeDID(did) {
-  let str = String(did).trim()
-  str = str.replace(/\D/g, "")
-  return str.padStart(11, '0')
-}
-
-// Language detection function
-function detectLanguage(text) {
-  if (!text || text.trim().length === 0) return null
-  
-  const textLower = text.toLowerCase()
-  
-  // Hindi patterns
-  const hindiPatterns = [
-    /[\u0900-\u097F]/,  // Devanagari script
-    /\b(मैं|आप|हम|तुम|यह|वह|कैसे|कहाँ|कब|क्या|हाँ|नहीं|जी|नमस्ते|धन्यवाद)\b/,
-    /\b(hai|hoon|hain|kya|kaise|kahan|kab|nahin|nahi|ji|namaste|dhanyawad)\b/
-  ]
-  
-  // English patterns
-  const englishPatterns = [
-    /\b(i|you|we|they|this|that|how|where|when|what|yes|no|hello|thank|thanks)\b/,
-    /^[a-zA-Z0-9\s.,!?'"()-]+$/
-  ]
-  
-  // Bengali patterns
-  const bengaliPatterns = [
-    /[\u0980-\u09FF]/,  // Bengali script
-    /\b(আমি|আপনি|আমরা|তুমি|এই|সেই|কিভাবে|কোথায়|কখন|কি|হ্যাঁ|না|নমস্কার|ধন্যবাদ)\b/
-  ]
-  
-  // Check for Hindi
-  if (hindiPatterns.some(pattern => pattern.test(textLower))) {
-    return 'hi-IN'
-  }
-  
-  // Check for Bengali
-  if (bengaliPatterns.some(pattern => pattern.test(textLower))) {
-    return 'bn-IN'
-  }
-  
-  // Check for English
-  if (englishPatterns.some(pattern => pattern.test(textLower))) {
-    return 'en-US'
-  }
-  
-  // Default to Hindi if no clear detection
-  return 'hi-IN'
-}
-
-// Get appropriate voice for language
-function getVoiceForLanguage(language, agentVoice = 'anushka') {
-  const voiceMap = {
-    'hi-IN': ['anushka', 'meera', 'pavithra', 'maitreyi', 'diya', 'maya', 'manisha', 'vidya', 'arya'],
-    'en-US': ['female-professional', 'male-professional', 'female-friendly', 'male-friendly'],
-    'bn-IN': ['anushka', 'meera'], // Bengali support with available voices
-    'te-IN': ['pavithra', 'maitreyi'],
-    'ml-IN': ['meera', 'pavithra'],
-    'ta-IN': ['diya', 'maya'],
-    'kn-IN': ['manisha', 'vidya'],
-    'gu-IN': ['arya', 'anushka'],
-    'mr-IN': ['maitreyi', 'pavithra'],
-    'or-IN': ['meera', 'diya'],
-    'pa-IN': ['anushka', 'maya'],
-    'ur-IN': ['anushka', 'meera']
-  }
-  
-  const availableVoices = voiceMap[language] || voiceMap['hi-IN']
-  return availableVoices.includes(agentVoice) ? agentVoice : availableVoices[0]
-}
+// Get Deepgram language code
+const getDeepgramLanguage = (detectedLang, defaultLang = 'hi') => {
+  const lang = detectedLang?.toLowerCase() || defaultLang;
+  // Deepgram uses different format
+  const deepgramMapping = {
+    'hi': 'hi',
+    'en': 'en-US',
+    'bn': 'bn',
+    'te': 'te',
+    'ta': 'ta',
+    'mr': 'mr',
+    'gu': 'gu',
+    'kn': 'kn',
+    'ml': 'ml',
+    'pa': 'pa',
+    'or': 'or',
+    'as': 'as',
+    'ur': 'ur'
+  };
+  return deepgramMapping[lang] || deepgramMapping[defaultLang] || 'hi';
+};
 
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 Enhanced Unified Voice WebSocket server initialized with Dynamic Language Detection")
+  console.log("🚀 Unified Voice WebSocket server initialized with Dynamic Language Detection")
 
   wss.on("connection", (ws, req) => {
     console.log("🔗 New unified voice connection established")
@@ -137,8 +82,8 @@ const setupUnifiedVoiceServer = (wss) => {
     let sourceNumber = null
     let tenantId = null
     let agentConfig = null
-    let currentLanguage = null // Dynamic language tracking
-    let detectedLanguage = null
+    let currentLanguage = null // Track current conversation language
+    let detectedLanguage = null // Track detected language from user input
 
     // API keys cache
     const apiKeys = {
@@ -188,29 +133,28 @@ const setupUnifiedVoiceServer = (wss) => {
     // Fast DID-based agent lookup with immediate audio response
     const loadAgentByDIDAndSendGreeting = async (didNumber) => {
       try {
-        const originalDid = didNumber
-        const normalizedDid = normalizeDID(didNumber)
+        const originalDid = didNumber;
+        const normalizedDid = normalizeDID(didNumber);
         console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID:`, {
           originalDid,
           normalizedDid,
           type: typeof didNumber
-        })
-        const startTime = Date.now()
+        });
+        const startTime = Date.now();
 
-        // Direct DID lookup from AgentProfile collection
-        const agent = await Agent.findOne({ didNumber: normalizedDid })
-        const lookupTime = Date.now() - startTime
-        console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
+        const agent = await Agent.findOne({ didNumber: normalizedDid });
+        const lookupTime = Date.now() - startTime;
+        console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`);
 
         if (!agent) {
-          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${normalizedDid}`)
-          return null
+          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${normalizedDid}`);
+          return null;
         }
 
         // Set session variables
         tenantId = agent.tenantId
         agentConfig = agent
-        currentLanguage = agent.language || 'hi-IN' // Set default language from agent profile
+        currentLanguage = agent.language || 'hi' // Set default language from agent profile
         detectedLanguage = currentLanguage
 
         console.log(`✅ [AGENT_LOOKUP] Agent found:`)
@@ -219,6 +163,7 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - DID Number: ${agent.didNumber}`)
         console.log(`   - Default Language: ${currentLanguage}`)
         console.log(`   - Personality: ${agent.personality}`)
+        console.log(`   - Category: ${agent.category}`)
         console.log(`   - Voice Selection: ${agent.voiceSelection}`)
         console.log(`   - First Message: ${agent.firstMessage}`)
         console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
@@ -259,7 +204,6 @@ const setupUnifiedVoiceServer = (wss) => {
             sample_width: 2,
             is_streaming: false,
             format: agent.audioMetadata?.format || "mp3",
-            language: currentLanguage,
           },
           type: "ai_response",
         }
@@ -307,7 +251,6 @@ const setupUnifiedVoiceServer = (wss) => {
           return false
         }
 
-        // Decrypt and assign API keys
         for (const keyDoc of keys) {
           const decryptedKey = ApiKey.decryptKey(keyDoc.encryptedKey)
 
@@ -326,7 +269,6 @@ const setupUnifiedVoiceServer = (wss) => {
               break
           }
 
-          // Update usage statistics asynchronously
           ApiKey.updateOne(
             { _id: keyDoc._id },
             {
@@ -348,24 +290,74 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Generate and save audio bytes for agents without pre-generated audio
-    const generateAndSaveAudioBytes = async (text, agentId, useCurrentLanguage = false) => {
+    // Language detection using OpenAI
+    const detectLanguage = async (text) => {
       try {
-        const targetLanguage = useCurrentLanguage ? currentLanguage : (agentConfig?.language || 'hi-IN')
-        const voice = getVoiceForLanguage(targetLanguage, agentConfig?.voiceSelection)
-        
-        console.log(`🎵 [AUDIO_GEN] Generating audio bytes for: "${text}"`)
-        console.log(`   - Language: ${targetLanguage}`)
-        console.log(`   - Voice: ${voice}`)
+        if (!apiKeys.openai || !text.trim()) {
+          return currentLanguage || 'hi'
+        }
+
+        const requestBody = {
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: `You are a language detector. Detect the language of the given text and respond with just the language code (hi for Hindi, en for English, bn for Bengali, te for Telugu, ta for Tamil, mr for Marathi, gu for Gujarati, kn for Kannada, ml for Malayalam, pa for Punjabi, or for Odia, as for Assamese, ur for Urdu). If you're unsure or the text is mixed, respond with the dominant language. Only respond with the language code, nothing else.`
+            },
+            {
+              role: "user",
+              content: text
+            }
+          ],
+          max_tokens: 10,
+          temperature: 0.1,
+        }
+
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKeys.openai}`,
+          },
+          body: JSON.stringify(requestBody),
+        })
+
+        if (!response.ok) {
+          console.error(`❌ [LANGUAGE_DETECT] OpenAI API error: ${response.status}`)
+          return currentLanguage || 'hi'
+        }
+
+        const data = await response.json()
+        if (data.choices && data.choices[0] && data.choices[0].message) {
+          const detectedLang = data.choices[0].message.content.trim().toLowerCase()
+          console.log(`🌐 [LANGUAGE_DETECT] Detected: ${detectedLang} from text: "${text}"`)
+          return detectedLang
+        }
+
+        return currentLanguage || 'hi'
+      } catch (error) {
+        console.error(`❌ [LANGUAGE_DETECT] Error: ${error.message}`)
+        return currentLanguage || 'hi'
+      }
+    }
+
+    // Generate and save audio bytes for agents without pre-generated audio
+    const generateAndSaveAudioBytes = async (text, agentId, targetLanguage = null) => {
+      try {
+        const useLanguage = targetLanguage || currentLanguage || 'hi'
+        console.log(`🎵 [AUDIO_GEN] Generating audio bytes for: "${text}" in language: ${useLanguage}`)
 
         if (!apiKeys.sarvam) {
           throw new Error("Sarvam API key not available")
         }
 
+        const sarvamLanguage = getSarvamLanguage(useLanguage)
+        const voiceSelection = agentConfig?.voiceSelection || "anushka"
+
         const requestBody = {
           inputs: [text],
-          target_language_code: targetLanguage,
-          speaker: voice,
+          target_language_code: sarvamLanguage,
+          speaker: voiceSelection,
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
@@ -374,7 +366,11 @@ const setupUnifiedVoiceServer = (wss) => {
           model: "bulbul:v2",
         }
 
-        console.log(`🎵 [AUDIO_GEN] Request body:`, requestBody)
+        console.log(`🎵 [AUDIO_GEN] Sarvam request:`, {
+          target_language_code: sarvamLanguage,
+          speaker: voiceSelection,
+          text_length: text.length
+        })
 
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
           method: "POST",
@@ -387,20 +383,20 @@ const setupUnifiedVoiceServer = (wss) => {
 
         if (!response.ok) {
           const errorText = await response.text()
-          console.error(`❌ [AUDIO_GEN] Sarvam API error: ${response.status} - ${errorText}`)
-          throw new Error(`Sarvam API error: ${response.status} - ${errorText}`)
+          console.error(`❌ [AUDIO_GEN] Sarvam API error: ${response.status}`, errorText)
+          throw new Error(`Sarvam API error: ${response.status}`)
         }
 
         const responseData = await response.json()
         if (!responseData.audios || responseData.audios.length === 0) {
-          throw new Error("No audio data received from Sarvam API")
+          throw new Error("No audio data received")
         }
 
         const audioBase64 = responseData.audios[0]
         const audioBuffer = Buffer.from(audioBase64, "base64")
 
-        // Save audio bytes to database only if it's the first message
-        if (!useCurrentLanguage) {
+        // Save audio bytes to database if this is for the first message
+        if (agentId && !agentConfig.audioBytes) {
           await Agent.updateOne(
             { _id: agentId },
             {
@@ -411,13 +407,27 @@ const setupUnifiedVoiceServer = (wss) => {
                 channels: 1,
                 size: audioBuffer.length,
                 generatedAt: new Date(),
-                language: targetLanguage,
-                speaker: voice,
+                language: useLanguage,
+                speaker: voiceSelection,
                 provider: "sarvam",
               },
             },
           )
+
           console.log(`✅ [AUDIO_GEN] Audio bytes saved to database: ${audioBuffer.length} bytes`)
+
+          // Update agent config with new audio
+          agentConfig.audioBytes = audioBuffer
+          agentConfig.audioMetadata = {
+            format: "mp3",
+            sampleRate: 22050,
+            channels: 1,
+            size: audioBuffer.length,
+            generatedAt: new Date(),
+            language: useLanguage,
+            speaker: voiceSelection,
+            provider: "sarvam",
+          }
         }
 
         return audioBuffer
@@ -438,7 +448,7 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         greetingInProgress = true
 
-        const audioBuffer = await generateAndSaveAudioBytes(agentConfig.firstMessage, agentConfig._id, false)
+        const audioBuffer = await generateAndSaveAudioBytes(agentConfig.firstMessage, agentConfig._id, currentLanguage)
 
         if (audioBuffer) {
           const pythonBytesString = bufferToPythonBytesString(audioBuffer)
@@ -448,12 +458,11 @@ const setupUnifiedVoiceServer = (wss) => {
               session_id: sessionId,
               count: 1,
               audio_bytes_to_play: pythonBytesString,
-              sample_rate: 22050,
-              channels: 1,
+              sample_rate: agentConfig.audioMetadata?.sampleRate || 22050,
+              channels: agentConfig.audioMetadata?.channels || 1,
               sample_width: 2,
               is_streaming: false,
-              format: "mp3",
-              language: currentLanguage,
+              format: agentConfig.audioMetadata?.format || "mp3",
             },
             type: "ai_response",
           }
@@ -483,7 +492,6 @@ const setupUnifiedVoiceServer = (wss) => {
         console.error(`❌ [FALLBACK_GREETING] Error: ${error.message}`)
         greetingInProgress = false
 
-        // Send text fallback
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify({
             type: "greeting_fallback",
@@ -495,7 +503,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Optimized Deepgram connection with language support
+    // Optimized Deepgram connection with dynamic language
     const connectToDeepgram = async () => {
       return new Promise((resolve, reject) => {
         try {
@@ -504,17 +512,18 @@ const setupUnifiedVoiceServer = (wss) => {
             return
           }
 
+          const deepgramLanguage = getDeepgramLanguage(currentLanguage)
           const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen")
           deepgramUrl.searchParams.append("sample_rate", "8000")
           deepgramUrl.searchParams.append("channels", "1")
           deepgramUrl.searchParams.append("encoding", "linear16")
           deepgramUrl.searchParams.append("model", "nova-2")
-          deepgramUrl.searchParams.append("language", currentLanguage || "hi-IN")
+          deepgramUrl.searchParams.append("language", deepgramLanguage)
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
 
-          console.log(`🎙️ [DEEPGRAM] Connecting with language: ${currentLanguage}`)
+          console.log(`🎤 [DEEPGRAM] Connecting with language: ${deepgramLanguage}`)
 
           deepgramWs = new WebSocket(deepgramUrl.toString(), {
             headers: { Authorization: `Token ${apiKeys.deepgram}` },
@@ -531,7 +540,7 @@ const setupUnifiedVoiceServer = (wss) => {
             deepgramReady = true
             deepgramConnected = true
             reconnectAttempts = 0
-            console.log(`✅ [DEEPGRAM] Connected and ready with language: ${currentLanguage}`)
+            console.log(`✅ [DEEPGRAM] Connected and ready with language: ${deepgramLanguage}`)
             resolve()
           }
 
@@ -577,7 +586,7 @@ const setupUnifiedVoiceServer = (wss) => {
       })
     }
 
-    // Enhanced Deepgram response handler with language detection
+    // Handle Deepgram responses
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const channel = data.channel
@@ -585,19 +594,8 @@ const setupUnifiedVoiceServer = (wss) => {
           const transcript = channel.alternatives[0].transcript
           const confidence = channel.alternatives[0].confidence
           const is_final = data.is_final
-          const detectedLang = data.channel?.detected_language
 
           if (transcript && transcript.trim()) {
-            // Detect language from transcript
-            const languageFromText = detectLanguage(transcript)
-            
-            // Update current language if detection is confident
-            if (languageFromText && languageFromText !== currentLanguage) {
-              console.log(`🌐 [LANG_DETECT] Language switched from ${currentLanguage} to ${languageFromText}`)
-              currentLanguage = languageFromText
-              detectedLanguage = languageFromText
-            }
-
             resetSilenceTimer()
 
             if (is_final) {
@@ -612,7 +610,6 @@ const setupUnifiedVoiceServer = (wss) => {
                   confidence: confidence,
                   is_final: true,
                   language: currentLanguage,
-                  detected_language: detectedLang,
                   accumulated: currentTranscript,
                   agent: agentConfig?.agentName,
                 }))
@@ -659,7 +656,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Text processing queue
+    // Text processing queue with language detection
     const addToTextQueue = (text, type = "transcript") => {
       const queueItem = {
         id: Date.now() + Math.random(),
@@ -667,11 +664,10 @@ const setupUnifiedVoiceServer = (wss) => {
         type: type,
         timestamp: new Date().toISOString(),
         processed: false,
-        language: currentLanguage,
       }
 
       textProcessingQueue.push(queueItem)
-      console.log(`📝 [QUEUE] Added: "${queueItem.text}" (${textProcessingQueue.length} items) - Lang: ${currentLanguage}`)
+      console.log(`📝 [QUEUE] Added: "${queueItem.text}" (${textProcessingQueue.length} items)`)
 
       if (!isProcessingQueue) {
         processTextQueue()
@@ -690,9 +686,16 @@ const setupUnifiedVoiceServer = (wss) => {
 
         try {
           if (queueItem.text && queueItem.text.length > 0) {
-            const openaiResponse = await sendToOpenAI(queueItem.text, queueItem.language)
+            // Detect language first
+            const newDetectedLanguage = await detectLanguage(queueItem.text)
+            if (newDetectedLanguage !== detectedLanguage) {
+              detectedLanguage = newDetectedLanguage
+              console.log(`🌐 [LANGUAGE_SWITCH] Language changed to: ${detectedLanguage}`)
+            }
+
+            const openaiResponse = await sendToOpenAI(queueItem.text)
             if (openaiResponse) {
-              await synthesizeWithSarvam(openaiResponse, queueItem.language)
+              await synthesizeWithSarvam(openaiResponse, detectedLanguage)
             }
           }
           queueItem.processed = true
@@ -756,8 +759,8 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Enhanced OpenAI Integration with dynamic language support
-    const sendToOpenAI = async (userMessage, messageLanguage = null) => {
+    // Enhanced OpenAI Integration with agent profile fields
+    const sendToOpenAI = async (userMessage) => {
       if (isProcessingOpenAI || !apiKeys.openai || !userMessage.trim()) {
         return null
       }
@@ -765,388 +768,358 @@ const setupUnifiedVoiceServer = (wss) => {
       isProcessingOpenAI = true
 
       try {
-        const effectiveLanguage = messageLanguage || currentLanguage || agentConfig?.language || 'hi-IN'
-        const languageName = LANGUAGE_NAMES[effectiveLanguage] || 'Hindi'
-        
         fullConversationHistory.push({
           role: "user",
           content: userMessage,
-          language: effectiveLanguage,
         })
 
         // Enhanced system prompt with all agent profile fields
-        const systemPrompt = `You are ${agentConfig?.agentName || "an AI assistant"}, a helpful voice assistant.
+        const systemPrompt = `You are ${agentConfig?.agentName || "an AI assistant"}, a ${agentConfig?.category || "helpful"} voice assistant.
 
-        AGENT PROFILE:
-        - Name: ${agentConfig?.agentName}
-        - Description: ${agentConfig?.description || "A helpful AI assistant"}
-        - Category: ${agentConfig?.category || "General"}
-        - Personality: ${agentConfig?.personality || "formal"}
-        - Default Language: ${agentConfig?.language || "hi-IN"}
-        - Current Language: ${effectiveLanguage} (${languageName})
-        - Brand Information: ${agentConfig?.brandInfo || ""}
-        - Context Memory: ${agentConfig?.contextMemory || ""}
-        
-        PERSONALITY TRAITS:
-        ${agentConfig?.personality === 'formal' ? '- Maintain a professional and respectful tone\n- Use formal language and proper grammar\n- Be courteous and helpful' : ''}
-        ${agentConfig?.personality === 'informal' ? '- Use casual, relaxed language\n- Be friendly and approachable\n- Keep conversation light and easy' : ''}
-        ${agentConfig?.personality === 'friendly' ? '- Be warm and welcoming\n- Show genuine interest in helping\n- Use encouraging and positive language' : ''}
-        ${agentConfig?.personality === 'flirty' ? '- Be playful and charming\n- Use light humor appropriately\n- Be engaging and charismatic' : ''}
-        ${agentConfig?.personality === 'disciplined' ? '- Be direct and to the point\n- Focus on efficiency and results\n- Maintain clear boundaries' : ''}
-        
-        RESPONSE GUIDELINES:
-        - Respond in ${languageName} (${effectiveLanguage}) unless user requests otherwise
-        - Keep responses short and conversational for phone calls (1-2 sentences max)
-        - Adapt to the user's language and tone
-        - Incorporate brand information when relevant
-        - Maintain context from previous interactions
-        - ${agentConfig?.systemPrompt || "Be helpful and provide accurate information"}`
-        
-                const requestBody = {
-                  model: "gpt-4",
-                  messages: [
-                    { role: "system", content: systemPrompt },
-                    ...fullConversationHistory.slice(-10).map(msg => ({
-                      role: msg.role,
-                      content: msg.content
-                    }))
-                  ],
-                  max_tokens: 150,
-                  temperature: 0.5,
-                }
-        
-                console.log(`🧠 [OPENAI] Request body:`, {
-                  model: requestBody.model,
-                  temperature: requestBody.temperature,
-                  language: effectiveLanguage,
-                  systemPrompt: systemPrompt.substring(0, 100) + "...",
-                  messageCount: requestBody.messages.length
-                })
-        
-                const response = await fetch("https://api.openai.com/v1/chat/completions", {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${apiKeys.openai}`,
-                  },
-                  body: JSON.stringify(requestBody),
-                })
-        
-                if (!response.ok) {
-                  const errorText = await response.text()
-                  console.error(`❌ [OPENAI] API error: ${response.status} - ${errorText}`)
-                  return null
-                }
-        
-                const data = await response.json()
-        
-                if (data.choices && data.choices[0] && data.choices[0].message) {
-                  const openaiResponse = data.choices[0].message.content
-        
-                  fullConversationHistory.push({
-                    role: "assistant",
-                    content: openaiResponse,
-                    language: effectiveLanguage,
-                  })
-        
-                  console.log(`🧠 [OPENAI] Response (${effectiveLanguage}): ${openaiResponse.substring(0, 100)}...`)
-                  return openaiResponse
-                }
-        
-                return null
-              } catch (error) {
-                console.error(`❌ [OPENAI] Error: ${error.message}`)
-                return null
-              } finally {
-                isProcessingOpenAI = false
-              }
-            }
-        
-            // Enhanced Sarvam TTS Synthesis with language support
-            const synthesizeWithSarvam = async (text, language = null) => {
-              if (!apiKeys.sarvam || !text.trim()) {
-                return
-              }
-        
-              try {
-                const targetLanguage = language || currentLanguage || agentConfig?.language || 'hi-IN'
-                const voice = getVoiceForLanguage(targetLanguage, agentConfig?.voiceSelection)
-                
-                console.log(`🎵 [SARVAM] Requesting TTS for: "${text.substring(0, 50)}..."`)
-                console.log(`   - Language: ${targetLanguage}`)
-                console.log(`   - Voice: ${voice}`)
-        
-                const requestBody = {
-                  inputs: [text],
-                  target_language_code: targetLanguage,
-                  speaker: voice,
-                  pitch: 0,
-                  pace: 1.0,
-                  loudness: 1.0,
-                  speech_sample_rate: 22050,
-                  enable_preprocessing: true,
-                  model: "bulbul:v2",
-                }
-        
-                const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    "API-Subscription-Key": apiKeys.sarvam,
-                  },
-                  body: JSON.stringify(requestBody),
-                })
-        
-                if (!response.ok) {
-                  const errorText = await response.text()
-                  console.error(`❌ [SARVAM] API error: ${response.status} - ${errorText}`)
-                  throw new Error(`Sarvam API error: ${response.status} - ${errorText}`)
-                }
-        
-                const responseData = await response.json()
-                if (!responseData.audios || responseData.audios.length === 0) {
-                  throw new Error("No audio data received from Sarvam API")
-                }
-        
-                const audioBase64 = responseData.audios[0]
-                const audioBuffer = Buffer.from(audioBase64, "base64")
-                const pythonBytesString = bufferToPythonBytesString(audioBuffer)
-        
-                const audioResponse = {
-                  data: {
-                    session_id: sessionId,
-                    count: 1,
-                    audio_bytes_to_play: pythonBytesString,
-                    sample_rate: 22050,
-                    channels: 1,
-                    sample_width: 2,
-                    is_streaming: false,
-                    format: "mp3",
-                    language: targetLanguage,
-                    voice: voice,
-                  },
-                  type: "ai_response",
-                }
-        
-                if (ws.readyState === WebSocket.OPEN) {
-                  ws.send(JSON.stringify(audioResponse))
-                  ws.send(JSON.stringify({
-                    type: "ai_response_complete",
-                    session_id: sessionId,
-                    total_chunks: 1,
-                  }))
-                  console.log(`✅ [SARVAM] Audio bytes sent (${audioBuffer.length} bytes)`)
-                }
-        
-                isPlayingAudio = true
-                setTimeout(() => {
-                  isPlayingAudio = false
-                }, 3000)
-        
-              } catch (error) {
-                console.error(`❌ [SARVAM] Error: ${error.message}`)
-                
-                // Fallback to default language if current language fails
-                if (language && language !== agentConfig?.language) {
-                  console.log(`🔄 [SARVAM] Trying fallback to default language: ${agentConfig?.language}`)
-                  await synthesizeWithSarvam(text, agentConfig?.language)
-                }
-              }
-            }
-        
-            // Utility function
-            const bufferToPythonBytesString = (buffer) => {
-              let result = "b'"
-              for (let i = 0; i < buffer.length; i++) {
-                const byte = buffer[i]
-                if (byte >= 32 && byte <= 126 && byte !== 92 && byte !== 39) {
-                  result += String.fromCharCode(byte)
-                } else {
-                  result += "\\x" + byte.toString(16).padStart(2, "0")
-                }
-              }
-              result += "'"
-              return result
-            }
-        
-            // WebSocket message handling
-            ws.on("message", async (message) => {
-              try {
-                let isTextMessage = false
-                let data = null
-        
-                if (typeof message === "string") {
-                  isTextMessage = true
-                  try {
-                    data = JSON.parse(message)
-                  } catch (parseError) {
-                    console.error("❌ Failed to parse JSON:", parseError.message)
-                    return
-                  }
-                } else if (message instanceof Buffer) {
-                  try {
-                    const messageStr = message.toString("utf8")
-                    if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
-                      data = JSON.parse(messageStr)
-                      isTextMessage = true
-                    } else {
-                      isTextMessage = false
-                    }
-                  } catch (parseError) {
-                    isTextMessage = false
-                  }
-                }
-        
-                if (isTextMessage && data) {
-                  console.log(`📨 [MESSAGE] Received:`, data)
-        
-                  if (data.event === "start" && data.session_id) {
-                    sessionId = data.session_id
-                    destinationNumber = data.Destination
-                    sourceNumber = data.Source
-        
-                    console.log(`✅ [SESSION] SIP Call Started:`)
-                    console.log(`   - Session ID: ${sessionId}`)
-                    console.log(`   - Source: ${sourceNumber}`)
-                    console.log(`   - Destination (DID): ${destinationNumber}`)
-        
-                    // Fast agent lookup by DID and immediate greeting
-                    const agent = await loadAgentByDIDAndSendGreeting(destinationNumber)
-                    if (!agent) {
-                      console.error(`❌ [SESSION] No agent found for DID: ${destinationNumber}`)
-                      ws.send(JSON.stringify({
-                        type: "error",
-                        message: `No agent configured for DID: ${destinationNumber}`,
-                        session_id: sessionId,
-                      }))
-                      return
-                    }
-        
-                    // Load API keys
-                    const keysLoaded = await loadApiKeysForTenant(tenantId)
-                    if (!keysLoaded) {
-                      console.error(`❌ [SESSION] API keys not available for tenant: ${tenantId}`)
-                      ws.send(JSON.stringify({
-                        type: "error",
-                        message: "API keys not configured for tenant",
-                        session_id: sessionId,
-                      }))
-                      return
-                    }
-        
-                    // Send session started confirmation
-                    if (ws.readyState === WebSocket.OPEN) {
-                      ws.send(JSON.stringify({
-                        type: "session_started",
-                        session_id: sessionId,
-                        agent: agentConfig.agentName,
-                        did_number: destinationNumber,
-                        tenant_id: tenantId,
-                        language: currentLanguage,
-                        providers: {
-                          stt: agentConfig.sttSelection || "deepgram",
-                          tts: agentConfig.ttsSelection || "sarvam",
-                          llm: agentConfig.llmSelection || "openai",
-                        },
-                        message: "Agent matched and greeting sent",
-                      }))
-                    }
-        
-                    // Connect to Deepgram
-                    try {
-                      await connectToDeepgram()
-                      console.log(`✅ [SESSION] Deepgram connected for ${agentConfig.agentName}`)
-                    } catch (error) {
-                      console.error(`❌ [SESSION] Deepgram connection failed: ${error.message}`)
-                    }
-        
-                    // If no pre-generated audio was available, send fallback greeting
-                    if (!connectionGreetingSent) {
-                      await sendFallbackGreeting()
-                    }
-                  } else if (data.type === "synthesize") {
-                    if (data.session_id) {
-                      sessionId = data.session_id
-                    }
-                    await synthesizeWithSarvam(data.text, data.language)
-                  } else if (data.data && data.data.hangup === "true") {
-                    console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
-        
-                    if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-                      deepgramWs.close(1000, "Call ended")
-                    }
-        
-                    if (currentTTSSocket) {
-                      currentTTSSocket.close()
-                    }
-        
-                    ws.close(1000, "Hangup requested")
-                  }
-                } else {
-                  // Handle audio data
-                  if (isPlayingAudio && !greetingInProgress) {
-                    interruptCurrentAudio()
-                  }
-        
-                  if (deepgramConnected && deepgramReady) {
-                    await sendAudioToDeepgram(message)
-                  }
-                }
-              } catch (error) {
-                console.error(`❌ [MESSAGE] Processing error: ${error.message}`)
-              }
-            })
-        
-            // Connection cleanup
-            ws.on("close", () => {
-              console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
-              console.log(
-                `📊 [STATS] Agent: ${agentConfig?.agentName || "Unknown"}, DID: ${destinationNumber}, Tenant: ${tenantId}`
-              )
-              console.log(`🌐 [LANGUAGE] Final conversation language: ${currentLanguage}`)
-        
-              // Cleanup connections
-              if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-                deepgramWs.close(1000, "Session ended")
-              }
-        
-              if (currentTTSSocket) {
-                currentTTSSocket.close()
-              }
-        
-              // Reset state
-              resetSilenceTimer()
-              sessionId = null
-              destinationNumber = null
-              sourceNumber = null
-              tenantId = null
-              agentConfig = null
-              currentLanguage = null
-              detectedLanguage = null
-              audioChunkCount = 0
-              deepgramReady = false
-              deepgramConnected = false
-              connectionGreetingSent = false
-              currentTranscript = ""
-              isSpeaking = false
-              isPlayingAudio = false
-              shouldInterruptAudio = false
-              greetingInProgress = false
-              fullConversationHistory = []
-              textProcessingQueue = []
-              isProcessingQueue = false
-            })
-        
-            ws.on("error", (error) => {
-              console.error(`❌ [SESSION] WebSocket error: ${error.message}`)
-        
-              if (currentTTSSocket) {
-                currentTTSSocket.close()
-              }
-            })
-        
-            console.log(`✅ [SESSION] WebSocket ready, waiting for SIP start event`)
-          })
+AGENT PROFILE:
+- Name: ${agentConfig?.agentName || "Assistant"}
+- Description: ${agentConfig?.description || "A helpful AI assistant"}
+- Category: ${agentConfig?.category || "General"}
+- Personality: ${agentConfig?.personality || "formal"} (be ${agentConfig?.personality || "formal"} in your responses)
+- Brand Info: ${agentConfig?.brandInfo || "No specific brand information"}
+- Context Memory: ${agentConfig?.contextMemory || "No additional context"}
+
+LANGUAGE INSTRUCTIONS:
+- Default language: ${currentLanguage || agentConfig?.language || "hi"}
+- Current user language: ${detectedLanguage || currentLanguage || "hi"}
+- Always respond in the same language the user is speaking
+- If user speaks in ${detectedLanguage}, respond in ${detectedLanguage}
+- Maintain your personality and characteristics regardless of language
+
+RESPONSE GUIDELINES:
+- Keep responses very short and conversational for phone calls (1-2 sentences max)
+- Match the user's language exactly
+- Be ${agentConfig?.personality || "formal"} in your tone
+- Stay in character as ${agentConfig?.agentName || "Assistant"}
+- Consider the context: ${agentConfig?.contextMemory || "general conversation"}
+
+Remember: You are a ${agentConfig?.category || "general"} assistant with a ${agentConfig?.personality || "formal"} personality. Always respond in the user's detected language: ${detectedLanguage || currentLanguage || "hi"}.`
+
+        const requestBody = {
+          model: agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini",
+          messages: [
+            { role: "system", content: systemPrompt },
+            ...fullConversationHistory.slice(-10)
+          ],
+          max_tokens: 150,
+          temperature: agentConfig?.personality === "formal" ? 0.3 : 0.7,
         }
-        
-        module.exports = { setupUnifiedVoiceServer }
+
+        console.log(`🤖 [OPENAI] Sending request with:`)
+        console.log(`   - Language: ${detectedLanguage || currentLanguage}`)
+        console.log(`   - Personality: ${agentConfig?.personality || "formal"}`)
+        console.log(`   - Model: ${requestBody.model}`)
+
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKeys.openai}`,
+          },
+          body: JSON.stringify(requestBody),
+        })
+
+        if (!response.ok) {
+          console.error(`❌ [OPENAI] API error: ${response.status}`)
+          return null
+        }
+
+        const data = await response.json()
+
+        if (data.choices && data.choices[0] && data.choices[0].message) {
+          const openaiResponse = data.choices[0].message.content
+
+          fullConversationHistory.push({
+            role: "assistant",
+            content: openaiResponse,
+          })
+
+          return openaiResponse
+        }
+
+        return null
+      } catch (error) {
+        console.error(`❌ [OPENAI] Error: ${error.message}`)
+        return null
+      } finally {
+        isProcessingOpenAI = false
+      }
+    }
+
+    // Enhanced Sarvam TTS Synthesis with dynamic language
+    const synthesizeWithSarvam = async (text, targetLanguage = null) => {
+      if (!apiKeys.sarvam || !text.trim()) {
+        return
+      }
+
+      try {
+        const useLanguage = targetLanguage || currentLanguage || 'hi'
+        const voice = agentConfig?.voiceSelection || "anushka"
+        const sarvamLanguage = getSarvamLanguage(useLanguage)
+
+        console.log(`🎵 [SARVAM] Generating TTS for: "${text}"`)
+        console.log(`   - Language: ${sarvamLanguage}`)
+        console.log(`   - Voice: ${voice}`)
+        console.log(`   - Agent: ${agentConfig?.agentName}`)
+
+        const requestBody = {
+          inputs: [text],
+          target_language_code: sarvamLanguage,
+          speaker: voice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 22050,
+          enable_preprocessing: true,
+          model: "bulbul:v2",
+        }
+
+        const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "API-Subscription-Key": apiKeys.sarvam,
+          },
+          body: JSON.stringify(requestBody),
+        })
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          console.error(`❌ [SARVAM] API error: ${response.status}`, errorText)
+          throw new Error(`Sarvam API error: ${response.status}`)
+        }
+
+        const responseData = await response.json()
+        if (!responseData.audios || responseData.audios.length === 0) {
+          throw new Error("No audio data received")
+        }
+
+        const audioBase64 = responseData.audios[0]
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+        const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+
+        const audioResponse = {
+          data: {
+            session_id: sessionId,
+            count: 1,
+            audio_bytes_to_play: pythonBytesString,
+            sample_rate: 22050,
+            channels: 1,
+            sample_width: 2,
+            is_streaming: false,
+            format: "mp3",
+          },
+          type: "ai_response",
+        }
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(audioResponse))
+          ws.send(JSON.stringify({
+            type: "ai_response_complete",
+            session_id: sessionId,
+            total_chunks: 1,
+          }))
+          console.log(`✅ [SARVAM] Audio bytes sent (${audioBuffer.length} bytes)`)
+        }
+
+        isPlayingAudio = true
+        setTimeout(() => {
+          isPlayingAudio = false
+        }, 3000)
+
+      } catch (error) {
+        console.error(`❌ [SARVAM] Error: ${error.message}`)
+      }
+    }
+
+    // Utility function
+    const bufferToPythonBytesString = (buffer) => {
+      let result = "b'"
+      for (let i = 0; i < buffer.length; i++) {
+        const byte = buffer[i]
+        if (byte >= 32 && byte <= 126 && byte !== 92 && byte !== 39) {
+          result += String.fromCharCode(byte)
+        } else {
+          result += "\\x" + byte.toString(16).padStart(2, "0")
+        }
+      }
+      result += "'"
+      return result
+    }
+
+    // WebSocket message handling
+    ws.on("message", async (message) => {
+      try {
+        let isTextMessage = false
+        let data = null
+
+        if (typeof message === "string") {
+          isTextMessage = true
+          try {
+            data = JSON.parse(message)
+          } catch (parseError) {
+            console.error("❌ Failed to parse JSON:", parseError.message)
+            return
+          }
+        } else if (message instanceof Buffer) {
+          try {
+            const messageStr = message.toString("utf8")
+            if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
+              data = JSON.parse(messageStr)
+              isTextMessage = true
+            } else {
+              isTextMessage = false
+            }
+          } catch (parseError) {
+            isTextMessage = false
+          }
+        }
+
+        if (isTextMessage && data) {
+          console.log(`📨 [MESSAGE] Received:`, data)
+
+          if (data.event === "start" && data.session_id) {
+            sessionId = data.session_id
+            destinationNumber = data.Destination
+            sourceNumber = data.Source
+
+            console.log(`✅ [SESSION] SIP Call Started:`)
+            console.log(`   - Session ID: ${sessionId}`)
+            console.log(`   - Source: ${sourceNumber}`)
+            console.log(`   - Destination (DID): ${destinationNumber}`)
+
+            const agent = await loadAgentByDIDAndSendGreeting(destinationNumber)
+            if (!agent) {
+              console.error(`❌ [SESSION] No agent found for DID: ${destinationNumber}`)
+              ws.send(JSON.stringify({
+                type: "error",
+                message: `No agent configured for DID: ${destinationNumber}`,
+                session_id: sessionId,
+              }))
+              return
+            }
+
+            const keysLoaded = await loadApiKeysForTenant(tenantId)
+            if (!keysLoaded) {
+              console.error(`❌ [SESSION] API keys not available for tenant: ${tenantId}`)
+              ws.send(JSON.stringify({
+                type: "error",
+                message: "API keys not configured for tenant",
+                session_id: sessionId,
+              }))
+              return
+            }
+
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({
+                type: "session_started",
+                session_id: sessionId,
+                agent: agentConfig.agentName,
+                did_number: destinationNumber,
+                tenant_id: tenantId,
+                providers: {
+                  stt: agentConfig.sttSelection || "deepgram",
+                  tts: agentConfig.ttsSelection || "sarvam",
+                  llm: agentConfig.llmSelection || "openai",
+                },
+                message: "Agent matched and greeting sent",
+              }))
+            }
+
+            try {
+              await connectToDeepgram()
+              console.log(`✅ [SESSION] Deepgram connected for ${agentConfig.agentName}`)
+            } catch (error) {
+              console.error(`❌ [SESSION] Deepgram connection failed: ${error.message}`)
+            }
+
+            if (!connectionGreetingSent) {
+              await sendFallbackGreeting()
+            }
+          } else if (data.type === "synthesize") {
+            if (data.session_id) {
+              sessionId = data.session_id
+            }
+            await synthesizeWithSarvam(data.text, data.language || currentLanguage)
+          } else if (data.data && data.data.hangup === "true") {
+            console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
+
+            if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+              deepgramWs.close(1000, "Call ended")
+            }
+
+            if (currentTTSSocket) {
+              currentTTSSocket.close()
+            }
+
+            ws.close(1000, "Hangup requested")
+          }
+        } else {
+          if (isPlayingAudio && !greetingInProgress) {
+            interruptCurrentAudio()
+          }
+
+          if (deepgramConnected && deepgramReady) {
+            await sendAudioToDeepgram(message)
+          }
+        }
+      } catch (error) {
+        console.error(`❌ [MESSAGE] Processing error: ${error.message}`)
+      }
+    })
+
+    // Connection cleanup
+    ws.on("close", () => {
+      console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
+      console.log(
+        `📊 [STATS] Agent: ${agentConfig?.agentName || "Unknown"}, DID: ${destinationNumber}, Tenant: ${tenantId}`
+      )
+
+      if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
+        deepgramWs.close(1000, "Session ended")
+      }
+
+      if (currentTTSSocket) {
+        currentTTSSocket.close()
+      }
+
+      resetSilenceTimer()
+      sessionId = null
+      destinationNumber = null
+      sourceNumber = null
+      tenantId = null
+      agentConfig = null
+      currentLanguage = null
+      detectedLanguage = null
+      audioChunkCount = 0
+      deepgramReady = false
+      deepgramConnected = false
+      connectionGreetingSent = false
+      currentTranscript = ""
+      isSpeaking = false
+      isPlayingAudio = false
+      shouldInterruptAudio = false
+      greetingInProgress = false
+      fullConversationHistory = []
+      textProcessingQueue = []
+      isProcessingQueue = false
+    })
+
+    ws.on("error", (error) => {
+      console.error(`❌ [SESSION] WebSocket error: ${error.message}`)
+
+      if (currentTTSSocket) {
+        currentTTSSocket.close()
+      }
+    })
+
+    console.log(`✅ [SESSION] WebSocket ready, waiting for SIP start event`)
+  })
+}
+
+module.exports = { setupUnifiedVoiceServer }
