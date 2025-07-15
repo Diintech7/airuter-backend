@@ -84,6 +84,13 @@ const setupUnifiedVoiceServer = (wss) => {
         didNumber = String(didNumber)
         console.log('[DEBUG] didNumber as string:', didNumber)
 
+        // Debug: Print all DIDs and their types before lookup
+        const allAgents = await Agent.find({}, { didNumber: 1, agentName: 1, _id: 0 })
+        console.log('[DEBUG] All agent DIDs in DB:')
+        allAgents.forEach(agent => {
+          console.log(`  - Agent: ${agent.agentName}, DID: ${agent.didNumber}, Type: ${typeof agent.didNumber}`)
+        })
+
         // Direct DID lookup from AgentProfile collection
         const agent = await Agent.findOne({ didNumber: didNumber })
         const lookupTime = Date.now() - startTime
