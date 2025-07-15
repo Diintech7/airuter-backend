@@ -7,89 +7,23 @@ const mongoose = require("mongoose")
 const ApiKey = require("../models/ApiKey")
 const Tenant = require("../models/Tenant")
 
+// --- Read-only DB connection for Agent reads ---
+const readOnlyDbUri = process.env.READ_ONLY_MONGODB_URI
+const readOnlyConnection = mongoose.createConnection(readOnlyDbUri, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+  readPreference: 'secondaryPreferred',
+})
+const AgentModel = require("../models/AgentProfile")
+const agentSchema = AgentModel.schema
+const ReadOnlyAgent = readOnlyConnection.model("Agent", agentSchema)
+
 const fetch = globalThis.fetch || require("node-fetch")
 
 if (!fetch) {
   console.error("❌ Fetch not available. Please use Node.js 18+ or install node-fetch@2")
   process.exit(1)
 }
-
-// Agent Schema - Import the schema from your models
-const agentSchema = new mongoose.Schema({
-  // Tenant Information
-  tenantId: { type: String, required: true, index: true },
-
-  // Personal Information
-  agentName: { type: String, required: true },
-  description: { type: String, required: true },
-  category: { type: String },
-  personality: {
-    type: String,
-    enum: ["formal", "informal", "friendly", "flirty", "disciplined"],
-    default: "formal",
-  },
-  language: { type: String, default: "en" },
-
-  // System Information
-  firstMessage: { type: String, required: true },
-  systemPrompt: { type: String, required: true },
-  sttSelection: {
-    type: String,
-    enum: ["deepgram", "whisper", "google", "azure", "aws"],
-    default: "deepgram",
-  },
-  ttsSelection: {
-    type: String,
-    enum: ["sarvam", "elevenlabs", "openai", "google", "azure", "aws"],
-    default: "sarvam",
-  },
-  llmSelection: {
-    type: String,
-    enum: ["openai", "anthropic", "google", "azure"],
-    default: "openai",
-  },
-  voiceSelection: {
-    type: String,
-    enum: [
-      "default",
-      "male-professional",
-      "female-professional",
-      "male-friendly",
-      "female-friendly",
-      "neutral",
-      "abhilash",
-      "anushka",
-    ],
-    default: "default",
-  },
-  contextMemory: { type: String },
-  brandInfo: { type: String },
-
-  // Telephony
-  didNumber: { type: String },
-  serviceProvider: {
-    type: String,
-    enum: ["twilio", "vonage", "plivo", "bandwidth", "other"],
-  },
-
-  // Audio storage
-  audioFile: { type: String },
-  audioBytes: { type: Buffer },
-  audioMetadata: {
-    format: { type: String, default: "mp3" },
-    sampleRate: { type: Number, default: 22050 },
-    channels: { type: Number, default: 1 },
-    size: { type: Number },
-    generatedAt: { type: Date },
-    language: { type: String, default: "en" },
-    speaker: { type: String },
-    provider: { type: String, default: "sarvam" },
-  },
-
-  // Timestamps
-  createdAt: { type: Date, default: Date.now },
-  updatedAt: { type: Date, default: Date.now },
-})
 
 // Compound index for tenant + agent name uniqueness
 agentSchema.index({ tenantId: 1, agentName: 1 }, { unique: true })
@@ -162,19 +96,19 @@ const setupUnifiedVoiceServer = (wss) => {
         
         // Try to find by agent ID first
         if (agentId) {
-          agent = await Agent.findOne({ _id: agentId, tenantId })
+          agent = await ReadOnlyAgent.findOne({ _id: agentId, tenantId })
           console.log(`🔍 Searching by Agent ID: ${agentId}`)
         }
         
         // If not found by ID, try by agent name
         if (!agent && agentName) {
-          agent = await Agent.findOne({ agentName, tenantId })
+          agent = await ReadOnlyAgent.findOne({ agentName, tenantId })
           console.log(`🔍 Searching by Agent Name: ${agentName}`)
         }
         
         // If still not found, get the first agent for the tenant
         if (!agent) {
-          agent = await Agent.findOne({ tenantId }).sort({ createdAt: -1 })
+          agent = await ReadOnlyAgent.findOne({ tenantId }).sort({ createdAt: -1 })
           console.log(`🔍 Using first available agent for tenant: ${tenantId}`)
         }
 
