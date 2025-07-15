@@ -74,188 +74,26 @@ const setupUnifiedVoiceServer = (wss) => {
       totalUtteranceEnds: 0,
     }
 
+    // Fast DID-based agent lookup with immediate audio response
     const loadAgentByDIDAndSendGreeting = async (didNumber) => {
       try {
-        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: "${didNumber}"`)
-        console.log(`🔍 [AGENT_LOOKUP] DID type: ${typeof didNumber}, length: ${didNumber.length}`)
-        
+        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: ${didNumber}`)
         const startTime = Date.now()
-    
-        // Clean the DID number
-        const cleanDID = String(didNumber).trim()
-        console.log(`🔍 [AGENT_LOOKUP] Clean DID: "${cleanDID}"`)
-    
-        // Debug database connection
-        console.log(`🔍 [DB_DEBUG] Mongoose connection state: ${mongoose.connection.readyState}`)
-        console.log(`🔍 [DB_DEBUG] Database name: ${mongoose.connection.db?.databaseName}`)
-        console.log(`🔍 [DB_DEBUG] Collection name: ${Agent.collection.name}`)
-    
-        // Check if Agent model is properly imported
-        if (!Agent) {
-          console.error(`❌ [AGENT_LOOKUP] Agent model is not imported properly`)
-          return null
-        }
-    
-        // Get collection stats
-        try {
-          const stats = await Agent.collection.stats()
-          console.log(`🔍 [DB_DEBUG] Collection stats:`, {
-            count: stats.count,
-            size: stats.size,
-            avgObjSize: stats.avgObjSize
-          })
-        } catch (statsError) {
-          console.log(`🔍 [DB_DEBUG] Could not get collection stats: ${statsError.message}`)
-        }
-    
-        // Try to get total count first
-        const totalCount = await Agent.countDocuments({})
-        console.log(`🔍 [DB_DEBUG] Total agents in collection: ${totalCount}`)
-    
-        // If no agents, check if we're connected to the right database
-        if (totalCount === 0) {
-          console.log(`🔍 [DB_DEBUG] No agents found. Checking database connection...`)
-          
-          // List all collections in the database
-          try {
-            const collections = await mongoose.connection.db.listCollections().toArray()
-            console.log(`🔍 [DB_DEBUG] Available collections:`, collections.map(c => c.name))
-            
-            // Check if agentprofiles collection exists with different name
-            const agentCollections = collections.filter(c => 
-              c.name.toLowerCase().includes('agent') || 
-              c.name.toLowerCase().includes('profile')
-            )
-            console.log(`🔍 [DB_DEBUG] Agent-related collections:`, agentCollections.map(c => c.name))
-            
-            // Try to find documents in the actual collection
-            for (const collection of agentCollections) {
-              const count = await mongoose.connection.db.collection(collection.name).countDocuments()
-              console.log(`🔍 [DB_DEBUG] ${collection.name} has ${count} documents`)
-            }
-          } catch (collectionsError) {
-            console.log(`🔍 [DB_DEBUG] Could not list collections: ${collectionsError.message}`)
-          }
-        }
-    
-        // First, try exact match
-        let agent = await Agent.findOne({ didNumber: cleanDID }).lean()
-        
-        if (!agent) {
-          console.log(`🔍 [AGENT_LOOKUP] Exact match failed. Debugging database contents...`)
-          
-          // Get all agents for debugging (limit to first 10 to avoid overwhelming logs)
-          const allAgents = await Agent.find({}).limit(10).lean()
-          console.log(`🔍 [AGENT_LOOKUP] First 10 agents in database: ${allAgents.length}`)
-          
-          // Manual search and detailed comparison
-          for (let i = 0; i < allAgents.length; i++) {
-            const a = allAgents[i]
-            console.log(`   ${i + 1}. Agent: "${a.agentName}" - DID: "${a.didNumber}" - Tenant: "${a.tenantId}"`)
-            
-            if (a.didNumber) {
-              const dbDID = String(a.didNumber).trim()
-              console.log(`      Comparing: "${dbDID}" === "${cleanDID}" ? ${dbDID === cleanDID}`)
-              
-              // Check lengths
-              console.log(`      Lengths: ${dbDID.length} vs ${cleanDID.length}`)
-              
-              // Check character codes if lengths match
-              if (dbDID.length === cleanDID.length) {
-                let allMatch = true
-                for (let j = 0; j < dbDID.length; j++) {
-                  if (dbDID.charCodeAt(j) !== cleanDID.charCodeAt(j)) {
-                    console.log(`      Char ${j}: "${dbDID[j]}" (${dbDID.charCodeAt(j)}) vs "${cleanDID[j]}" (${cleanDID.charCodeAt(j)})`)
-                    allMatch = false
-                  }
-                }
-                
-                if (allMatch) {
-                  console.log(`✅ [AGENT_LOOKUP] Manual match found: ${a.agentName}`)
-                  agent = a
-                  break
-                }
-              }
-            }
-          }
-          
-          // If still no match, try case-insensitive
-          if (!agent) {
-            console.log(`🔍 [AGENT_LOOKUP] Trying case-insensitive match...`)
-            agent = await Agent.findOne({ 
-              didNumber: { $regex: `^${cleanDID}$`, $options: 'i' } 
-            }).lean()
-            
-            if (agent) {
-              console.log(`✅ [AGENT_LOOKUP] Case-insensitive match found: ${agent.agentName}`)
-            }
-          }
-    
-          // If still no match, try partial matches
-          if (!agent) {
-            console.log(`🔍 [AGENT_LOOKUP] Trying partial matches...`)
-            
-            // Try without leading zeros
-            const cleanDIDWithoutLeadingZeros = cleanDID.replace(/^0+/, '')
-            console.log(`🔍 [AGENT_LOOKUP] Trying without leading zeros: "${cleanDIDWithoutLeadingZeros}"`)
-            
-            agent = await Agent.findOne({ didNumber: cleanDIDWithoutLeadingZeros }).lean()
-            
-            if (!agent) {
-              // Try with different formatting
-              const variations = [
-                cleanDID,
-                cleanDIDWithoutLeadingZeros,
-                '+91' + cleanDID,
-                '+91' + cleanDIDWithoutLeadingZeros,
-                cleanDID.replace(/^0/, '+91'),
-                cleanDID.substring(1), // Remove first digit
-              ]
-              
-              for (const variation of variations) {
-                console.log(`🔍 [AGENT_LOOKUP] Trying variation: "${variation}"`)
-                agent = await Agent.findOne({ didNumber: variation }).lean()
-                if (agent) {
-                  console.log(`✅ [AGENT_LOOKUP] Match found with variation: ${variation}`)
-                  break
-                }
-              }
-            }
-          }
-    
-          // If still no match, try contains search
-          if (!agent) {
-            console.log(`🔍 [AGENT_LOOKUP] Trying contains search...`)
-            agent = await Agent.findOne({ 
-              didNumber: { $regex: cleanDID, $options: 'i' } 
-            }).lean()
-            
-            if (agent) {
-              console.log(`✅ [AGENT_LOOKUP] Contains match found: ${agent.agentName}`)
-            }
-          }
-        }
-    
+
+        // Direct DID lookup from AgentProfile collection
+        const agent = await Agent.findOne({ didNumber: didNumber })
         const lookupTime = Date.now() - startTime
         console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
-    
+
         if (!agent) {
-          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${cleanDID}`)
-          
-          // Final debugging: show all DIDs in database
-          console.log(`🔍 [FINAL_DEBUG] All DIDs in database:`)
-          const allDIDs = await Agent.find({}, { didNumber: 1, agentName: 1 }).lean()
-          allDIDs.forEach((a, index) => {
-            console.log(`   ${index + 1}. "${a.didNumber}" (${a.agentName})`)
-          })
-          
+          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${didNumber}`)
           return null
         }
-    
+
         // Set session variables
         tenantId = agent.tenantId
         agentConfig = agent
-    
+
         console.log(`✅ [AGENT_LOOKUP] Agent found:`)
         console.log(`   - Agent Name: ${agent.agentName}`)
         console.log(`   - Tenant ID: ${agent.tenantId}`)
@@ -263,16 +101,15 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - Language: ${agent.language}`)
         console.log(`   - First Message: ${agent.firstMessage}`)
         console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
-    
+
         // IMMEDIATELY send greeting if audio bytes are available
         if (agent.audioBytes && agent.audioBytes.length > 0) {
           await sendImmediateGreeting(agent)
         }
-    
+
         return agent
       } catch (error) {
         console.error(`❌ [AGENT_LOOKUP] Error: ${error.message}`)
-        console.error(`❌ [AGENT_LOOKUP] Stack: ${error.stack}`)
         return null
       }
     }
