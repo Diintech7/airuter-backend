@@ -782,6 +782,21 @@ const setupUnifiedVoiceServer = (wss) => {
       return result
     }
 
+    // Utility: Display all DID numbers in the database at startup
+    const displayAllAgentDIDs = async () => {
+      try {
+        const agents = await Agent.find({}, { didNumber: 1, agentName: 1, _id: 0 })
+        console.log("[AGENT DIDs] All agent DID numbers in DB:")
+        agents.forEach(agent => {
+          console.log(`  - Agent: ${agent.agentName}, DID: ${agent.didNumber}`)
+        })
+      } catch (err) {
+        console.error("[AGENT DIDs] Error fetching agent DIDs:", err.message)
+      }
+    }
+
+    displayAllAgentDIDs()
+
     // WebSocket message handling
     ws.on("message", async (message) => {
       try {
