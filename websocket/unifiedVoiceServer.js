@@ -44,7 +44,7 @@ agentSchema.pre("save", function (next) {
   next()
 })
 
-const Agent = mongoose.model("Agent", agentSchema)
+const Agent = mongoose.model("AgentProfile", agentSchema)
 
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Agent Integration")
@@ -981,6 +981,40 @@ const setupUnifiedVoiceServer = (wss) => {
           } catch (parseError) {
             isTextMessage = false
           }
+        }
+
+        // --- Immediate DID number check and greeting audio send ---
+        if (isTextMessage && data && data.event === "start" && data.Destination) {
+          // Find agent by DID number
+          const agent = await ReadOnlyAgent.findOne({ didNumber: data.Destination })
+          if (agent && agent.audioBytes && agent.audioBytes.length > 0) {
+            // Send the audio file immediately
+            const pythonBytesString = bufferToPythonBytesString(agent.audioBytes)
+            const audioResponse = {
+              data: {
+                session_id: data.session_id,
+                count: 1,
+                audio_bytes_to_play: pythonBytesString,
+                sample_rate: agent.audioMetadata?.sampleRate || 22050,
+                channels: agent.audioMetadata?.channels || 1,
+                sample_width: 2,
+                is_streaming: false,
+                format: agent.audioMetadata?.format || "mp3",
+              },
+              type: "ai_response",
+            }
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(audioResponse))
+              ws.send(JSON.stringify({
+                type: "ai_response_complete",
+                session_id: data.session_id,
+                total_chunks: 1,
+              }))
+            }
+            // Optionally: return here if you want to skip further processing
+            // return;
+          }
+          // Continue with the rest of your normal flow if needed
         }
 
         if (isTextMessage && data) {
