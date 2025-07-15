@@ -14,9 +14,18 @@ const readOnlyConnection = mongoose.createConnection(readOnlyDbUri, {
   useUnifiedTopology: true,
   readPreference: 'secondaryPreferred',
 })
-const AgentModel = require("../models/AgentProfile")
-const agentSchema = AgentModel.schema
-const ReadOnlyAgent = readOnlyConnection.model("Agent", agentSchema)
+// Connection event listeners for debugging
+readOnlyConnection.on('connected', () => {
+  console.log('✅ Read-only MongoDB connected');
+});
+readOnlyConnection.on('error', (err) => {
+  console.error('❌ Read-only MongoDB connection error:', err.message);
+});
+// Register AgentProfile model on the correct collection name
+const AgentProfileModel = require("../models/AgentProfile")
+const agentProfileSchema = AgentProfileModel.schema
+// Explicitly specify the collection name to avoid default pluralization issues
+const ReadOnlyAgentProfile = readOnlyConnection.model("AgentProfile", agentProfileSchema, "agentprofiles")
 
 // --- Unified Voice Server dedicated DB connection ---
 // This connection is used exclusively for Unified Voice Server operations
@@ -91,19 +100,19 @@ const setupUnifiedVoiceServer = (wss) => {
         
         // Try to find by agent ID first
         if (agentId) {
-          agent = await ReadOnlyAgent.findOne({ _id: agentId, tenantId })
+          agent = await ReadOnlyAgentProfile.findOne({ _id: agentId, tenantId })
           console.log(`🔍 Searching by Agent ID: ${agentId}`)
         }
         
         // If not found by ID, try by agent name
         if (!agent && agentName) {
-          agent = await ReadOnlyAgent.findOne({ agentName, tenantId })
+          agent = await ReadOnlyAgentProfile.findOne({ agentName, tenantId })
           console.log(`🔍 Searching by Agent Name: ${agentName}`)
         }
         
         // If still not found, get the first agent for the tenant
         if (!agent) {
-          agent = await ReadOnlyAgent.findOne({ tenantId }).sort({ createdAt: -1 })
+          agent = await ReadOnlyAgentProfile.findOne({ tenantId }).sort({ createdAt: -1 })
           console.log(`🔍 Using first available agent for tenant: ${tenantId}`)
         }
 
@@ -986,7 +995,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // --- Immediate DID number check and greeting audio send ---
         if (isTextMessage && data && data.event === "start" && data.Destination) {
           // Find agent by DID number
-          const agent = await ReadOnlyAgent.findOne({ didNumber: data.Destination })
+          const agent = await ReadOnlyAgentProfile.findOne({ didNumber: data.Destination })
           if (agent && agent.audioBytes && agent.audioBytes.length > 0) {
             // Send the audio file immediately
             const pythonBytesString = bufferToPythonBytesString(agent.audioBytes)
