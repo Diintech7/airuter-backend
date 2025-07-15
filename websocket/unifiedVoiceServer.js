@@ -77,23 +77,77 @@ const setupUnifiedVoiceServer = (wss) => {
     // Fast DID-based agent lookup with immediate audio response
     const loadAgentByDIDAndSendGreeting = async (didNumber) => {
       try {
-        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: ${didNumber}`)
+        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: "${didNumber}"`)
+        console.log(`🔍 [AGENT_LOOKUP] DID type: ${typeof didNumber}`)
+        console.log(`🔍 [AGENT_LOOKUP] DID length: ${didNumber.length}`)
+        
         const startTime = Date.now()
-
-        // Direct DID lookup from AgentProfile collection
-        const agent = await Agent.findOne({ didNumber: didNumber }).lean()
+    
+        // Clean and normalize the DID number
+        const cleanDID = String(didNumber).trim()
+        console.log(`🔍 [AGENT_LOOKUP] Clean DID: "${cleanDID}"`)
+    
+        // First, let's try exact match
+        let agent = await Agent.findOne({ didNumber: cleanDID }).lean()
+        
+        if (!agent) {
+          console.log(`🔍 [AGENT_LOOKUP] Exact match failed, trying case-insensitive search...`)
+          
+          // Try case-insensitive search (though numbers shouldn't need this)
+          agent = await Agent.findOne({ 
+            didNumber: { $regex: new RegExp(`^${cleanDID}$`, 'i') } 
+          }).lean()
+        }
+    
+        if (!agent) {
+          console.log(`🔍 [AGENT_LOOKUP] Case-insensitive failed, trying flexible search...`)
+          
+          // Try more flexible search - remove any non-digit characters and compare
+          const digitsOnly = cleanDID.replace(/\D/g, '')
+          console.log(`🔍 [AGENT_LOOKUP] Digits only: "${digitsOnly}"`)
+          
+          agent = await Agent.findOne({
+            $expr: {
+              $eq: [
+                { $replaceAll: { input: "$didNumber", find: { $regex: "[^0-9]" }, replacement: "" } },
+                digitsOnly
+              ]
+            }
+          }).lean()
+        }
+    
+        if (!agent) {
+          console.log(`🔍 [AGENT_LOOKUP] All searches failed. Let's see what's in the database...`)
+          
+          // Debug: Show all agents and their DID numbers
+          const allAgents = await Agent.find({}, { didNumber: 1, agentName: 1 }).lean()
+          console.log(`🔍 [AGENT_LOOKUP] All agents in database:`)
+          allAgents.forEach((a, index) => {
+            console.log(`   ${index + 1}. Agent: "${a.agentName}" - DID: "${a.didNumber}" (type: ${typeof a.didNumber}, length: ${a.didNumber ? a.didNumber.length : 'null'})`)
+          })
+          
+          // Try finding by partial match
+          agent = await Agent.findOne({
+            didNumber: { $regex: cleanDID }
+          }).lean()
+          
+          if (agent) {
+            console.log(`🔍 [AGENT_LOOKUP] Found with partial match: "${agent.didNumber}"`)
+          }
+        }
+    
         const lookupTime = Date.now() - startTime
         console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
-
+    
         if (!agent) {
-          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${didNumber}`)
+          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${cleanDID}`)
           return null
         }
-
+    
         // Set session variables
         tenantId = agent.tenantId
         agentConfig = agent
-
+    
         console.log(`✅ [AGENT_LOOKUP] Agent found:`)
         console.log(`   - Agent Name: ${agent.agentName}`)
         console.log(`   - Tenant ID: ${agent.tenantId}`)
@@ -101,15 +155,16 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - Language: ${agent.language}`)
         console.log(`   - First Message: ${agent.firstMessage}`)
         console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
-
+    
         // IMMEDIATELY send greeting if audio bytes are available
         if (agent.audioBytes && agent.audioBytes.length > 0) {
           await sendImmediateGreeting(agent)
         }
-
+    
         return agent
       } catch (error) {
         console.error(`❌ [AGENT_LOOKUP] Error: ${error.message}`)
+        console.error(`❌ [AGENT_LOOKUP] Stack: ${error.stack}`)
         return null
       }
     }
