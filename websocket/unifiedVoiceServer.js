@@ -105,7 +105,7 @@ const Agent = mongoose.model("Agent", agentSchema)
 // Database connection
 const connectToDatabase = async () => {
   try {
-    const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/voice_server"
+    const mongoUri = process.env.MONGODB_URL"
     await mongoose.connect(mongoUri)
     console.log("✅ Connected to MongoDB")
   } catch (error) {
