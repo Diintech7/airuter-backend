@@ -36,6 +36,37 @@ const LANGUAGE_MAPPING = {
   'ur': 'ur-IN'
 };
 
+// FIXED: Valid Sarvam voice options
+const VALID_SARVAM_VOICES = [
+  'meera', 'pavithra', 'maitreyi', 'arvind', 'amol', 'amartya', 
+  'diya', 'neel', 'misha', 'vian', 'arjun', 'maya', 'anushka', 
+  'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh'
+];
+
+// FIXED: Voice mapping function to ensure valid voice selection
+const getValidSarvamVoice = (voiceSelection) => {
+  if (!voiceSelection || voiceSelection === 'default') {
+    return 'anushka'; // Default fallback
+  }
+  
+  // If it's already a valid Sarvam voice, return it
+  if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
+    return voiceSelection;
+  }
+  
+  // Map common voice selections to valid Sarvam voices
+  const voiceMapping = {
+    'male-professional': 'arvind',
+    'female-professional': 'anushka',
+    'male-friendly': 'amol',
+    'female-friendly': 'maya',
+    'neutral': 'anushka',
+    'default': 'anushka'
+  };
+  
+  return voiceMapping[voiceSelection] || 'anushka';
+};
+
 // Get supported Sarvam language code
 const getSarvamLanguage = (detectedLang, defaultLang = 'hi') => {
   const lang = detectedLang?.toLowerCase() || defaultLang;
@@ -130,7 +161,7 @@ const setupUnifiedVoiceServer = (wss) => {
       totalUtteranceEnds: 0,
     }
 
-    // Fast DID-based agent lookup with immediate audio response
+    // FIXED: Fast DID-based agent lookup with immediate response
     const loadAgentByDIDAndSendGreeting = async (didNumber) => {
       try {
         const originalDid = didNumber;
@@ -154,7 +185,7 @@ const setupUnifiedVoiceServer = (wss) => {
         // Set session variables
         tenantId = agent.tenantId
         agentConfig = agent
-        currentLanguage = agent.language || 'hi' // Set default language from agent profile
+        currentLanguage = agent.language || 'hi'
         detectedLanguage = currentLanguage
 
         console.log(`✅ [AGENT_LOOKUP] Agent found:`)
@@ -168,9 +199,15 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - First Message: ${agent.firstMessage}`)
         console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
 
-        // IMMEDIATELY send greeting if audio bytes are available
+        // FIXED: Immediate greeting with fallback
         if (agent.audioBytes && agent.audioBytes.length > 0) {
+          // Send pre-generated audio immediately
           await sendImmediateGreeting(agent)
+        } else {
+          // FIXED: Send text-based greeting immediately, then generate audio in background
+          await sendInstantTextGreeting(agent)
+          // Generate audio in background for next time
+          generateAudioInBackground(agent)
         }
 
         return agent
@@ -178,6 +215,203 @@ const setupUnifiedVoiceServer = (wss) => {
         console.error(`❌ [AGENT_LOOKUP] Error: ${error.message}`)
         return null
       }
+    }
+
+    // FIXED: Instant text greeting for agents without pre-generated audio
+    const sendInstantTextGreeting = async (agent) => {
+      if (connectionGreetingSent || !sessionId) {
+        return
+      }
+
+      console.log(`⚡ [INSTANT_GREETING] Sending text greeting for agent: ${agent.agentName}`)
+      
+      try {
+        // Send text greeting immediately
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({
+            type: "instant_text_greeting",
+            session_id: sessionId,
+            message: agent.firstMessage,
+            agent: agent.agentName,
+            timestamp: new Date().toISOString()
+          }))
+          console.log(`✅ [INSTANT_GREETING] Text greeting sent instantly`)
+        }
+
+        // Generate audio and send it
+        await generateAndSendGreetingAudio(agent)
+        connectionGreetingSent = true
+
+      } catch (error) {
+        console.error(`❌ [INSTANT_GREETING] Error: ${error.message}`)
+      }
+    }
+
+    // FIXED: Generate and send greeting audio quickly
+    const generateAndSendGreetingAudio = async (agent) => {
+      try {
+        console.log(`🎵 [GREETING_AUDIO] Generating for: "${agent.firstMessage}"`)
+        
+        const validVoice = getValidSarvamVoice(agent.voiceSelection)
+        const sarvamLanguage = getSarvamLanguage(currentLanguage)
+        
+        console.log(`🎵 [GREETING_AUDIO] Using voice: ${validVoice} (mapped from: ${agent.voiceSelection})`)
+        
+        if (!apiKeys.sarvam) {
+          throw new Error("Sarvam API key not available")
+        }
+
+        const requestBody = {
+          inputs: [agent.firstMessage],
+          target_language_code: sarvamLanguage,
+          speaker: validVoice,
+          pitch: 0,
+          pace: 1.0,
+          loudness: 1.0,
+          speech_sample_rate: 22050,
+          enable_preprocessing: true,
+          model: "bulbul:v2",
+        }
+
+        const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "API-Subscription-Key": apiKeys.sarvam,
+          },
+          body: JSON.stringify(requestBody),
+        })
+
+        if (!response.ok) {
+          const errorText = await response.text()
+          console.error(`❌ [GREETING_AUDIO] Sarvam API error: ${response.status}`, errorText)
+          throw new Error(`Sarvam API error: ${response.status}`)
+        }
+
+        const responseData = await response.json()
+        if (!responseData.audios || responseData.audios.length === 0) {
+          throw new Error("No audio data received")
+        }
+
+        const audioBase64 = responseData.audios[0]
+        const audioBuffer = Buffer.from(audioBase64, "base64")
+        const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+
+        // Send audio immediately
+        const audioResponse = {
+          data: {
+            session_id: sessionId,
+            count: 1,
+            audio_bytes_to_play: pythonBytesString,
+            sample_rate: 22050,
+            channels: 1,
+            sample_width: 2,
+            is_streaming: false,
+            format: "mp3",
+          },
+          type: "ai_response",
+        }
+
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(audioResponse))
+          ws.send(JSON.stringify({
+            type: "ai_response_complete",
+            session_id: sessionId,
+            total_chunks: 1,
+          }))
+          console.log(`✅ [GREETING_AUDIO] Audio sent (${audioBuffer.length} bytes)`)
+        }
+
+        isPlayingAudio = true
+        setTimeout(() => {
+          isPlayingAudio = false
+        }, 3000)
+
+        // Save audio for future use
+        await Agent.updateOne(
+          { _id: agent._id },
+          {
+            audioBytes: audioBuffer,
+            audioMetadata: {
+              format: "mp3",
+              sampleRate: 22050,
+              channels: 1,
+              size: audioBuffer.length,
+              generatedAt: new Date(),
+              language: currentLanguage,
+              speaker: validVoice,
+              provider: "sarvam",
+            },
+          },
+        )
+
+        console.log(`✅ [GREETING_AUDIO] Audio saved for future instant use`)
+
+      } catch (error) {
+        console.error(`❌ [GREETING_AUDIO] Error: ${error.message}`)
+      }
+    }
+
+    // Background audio generation for future use
+    const generateAudioInBackground = async (agent) => {
+      // Don't await this - let it run in background
+      setImmediate(async () => {
+        try {
+          console.log(`🔄 [BACKGROUND_AUDIO] Generating for future use: ${agent.agentName}`)
+          
+          const validVoice = getValidSarvamVoice(agent.voiceSelection)
+          const sarvamLanguage = getSarvamLanguage(currentLanguage)
+          
+          const requestBody = {
+            inputs: [agent.firstMessage],
+            target_language_code: sarvamLanguage,
+            speaker: validVoice,
+            pitch: 0,
+            pace: 1.0,
+            loudness: 1.0,
+            speech_sample_rate: 22050,
+            enable_preprocessing: true,
+            model: "bulbul:v2",
+          }
+
+          const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "API-Subscription-Key": apiKeys.sarvam,
+            },
+            body: JSON.stringify(requestBody),
+          })
+
+          if (response.ok) {
+            const responseData = await response.json()
+            if (responseData.audios && responseData.audios.length > 0) {
+              const audioBuffer = Buffer.from(responseData.audios[0], "base64")
+              
+              await Agent.updateOne(
+                { _id: agent._id },
+                {
+                  audioBytes: audioBuffer,
+                  audioMetadata: {
+                    format: "mp3",
+                    sampleRate: 22050,
+                    channels: 1,
+                    size: audioBuffer.length,
+                    generatedAt: new Date(),
+                    language: currentLanguage,
+                    speaker: validVoice,
+                    provider: "sarvam",
+                  },
+                },
+              )
+              
+              console.log(`✅ [BACKGROUND_AUDIO] Audio generated and saved for future use`)
+            }
+          }
+        } catch (error) {
+          console.error(`❌ [BACKGROUND_AUDIO] Error: ${error.message}`)
+        }
+      })
     }
 
     // Send immediate greeting with pre-generated audio bytes
@@ -341,7 +575,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Generate and save audio bytes for agents without pre-generated audio
+    // FIXED: Generate and save audio bytes with proper voice validation
     const generateAndSaveAudioBytes = async (text, agentId, targetLanguage = null) => {
       try {
         const useLanguage = targetLanguage || currentLanguage || 'hi'
@@ -352,12 +586,12 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         const sarvamLanguage = getSarvamLanguage(useLanguage)
-        const voiceSelection = agentConfig?.voiceSelection || "anushka"
+        const validVoice = getValidSarvamVoice(agentConfig?.voiceSelection)
 
         const requestBody = {
           inputs: [text],
           target_language_code: sarvamLanguage,
-          speaker: voiceSelection,
+          speaker: validVoice,
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
@@ -368,8 +602,9 @@ const setupUnifiedVoiceServer = (wss) => {
 
         console.log(`🎵 [AUDIO_GEN] Sarvam request:`, {
           target_language_code: sarvamLanguage,
-          speaker: voiceSelection,
-          text_length: text.length
+          speaker: validVoice,
+          text_length: text.length,
+          original_voice: agentConfig?.voiceSelection
         })
 
         const response = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -408,7 +643,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 size: audioBuffer.length,
                 generatedAt: new Date(),
                 language: useLanguage,
-                speaker: voiceSelection,
+                speaker: validVoice,
                 provider: "sarvam",
               },
             },
@@ -425,7 +660,7 @@ const setupUnifiedVoiceServer = (wss) => {
             size: audioBuffer.length,
             generatedAt: new Date(),
             language: useLanguage,
-            speaker: voiceSelection,
+            speaker: validVoice,
             provider: "sarvam",
           }
         }
@@ -434,72 +669,6 @@ const setupUnifiedVoiceServer = (wss) => {
       } catch (error) {
         console.error(`❌ [AUDIO_GEN] Error: ${error.message}`)
         return null
-      }
-    }
-
-    // Fallback greeting for agents without pre-generated audio
-    const sendFallbackGreeting = async () => {
-      if (connectionGreetingSent || !sessionId || !agentConfig) {
-        return
-      }
-
-      console.log(`🔄 [FALLBACK_GREETING] Generating for agent: ${agentConfig.agentName}`)
-
-      try {
-        greetingInProgress = true
-
-        const audioBuffer = await generateAndSaveAudioBytes(agentConfig.firstMessage, agentConfig._id, currentLanguage)
-
-        if (audioBuffer) {
-          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
-
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: 1,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: agentConfig.audioMetadata?.sampleRate || 22050,
-              channels: agentConfig.audioMetadata?.channels || 1,
-              sample_width: 2,
-              is_streaming: false,
-              format: agentConfig.audioMetadata?.format || "mp3",
-            },
-            type: "ai_response",
-          }
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            ws.send(JSON.stringify({
-              type: "ai_response_complete",
-              session_id: sessionId,
-              total_chunks: 1,
-            }))
-            console.log(`✅ [FALLBACK_GREETING] Audio bytes sent successfully (${audioBuffer.length} bytes)`)
-          }
-        } else {
-          throw new Error("Failed to generate audio")
-        }
-
-        connectionGreetingSent = true
-        greetingInProgress = false
-        isPlayingAudio = true
-
-        setTimeout(() => {
-          isPlayingAudio = false
-        }, 3000)
-
-      } catch (error) {
-        console.error(`❌ [FALLBACK_GREETING] Error: ${error.message}`)
-        greetingInProgress = false
-
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({
-            type: "greeting_fallback",
-            session_id: sessionId,
-            message: agentConfig.firstMessage,
-            error: error.message,
-          }))
-        }
       }
     }
 
@@ -796,9 +965,7 @@ RESPONSE GUIDELINES:
 - Match the user's language exactly
 - Be ${agentConfig?.personality || "formal"} in your tone
 - Stay in character as ${agentConfig?.agentName || "Assistant"}
-- Consider the context: ${agentConfig?.contextMemory || "general conversation"}
-
-Remember: You are a ${agentConfig?.category || "general"} assistant with a ${agentConfig?.personality || "formal"} personality. Always respond in the user's detected language: ${detectedLanguage || currentLanguage || "hi"}.`
+- Consider the context: ${agentConfig?.contextMemory || "general conversation"}`
 
         const requestBody = {
           model: agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini",
@@ -851,7 +1018,7 @@ Remember: You are a ${agentConfig?.category || "general"} assistant with a ${age
       }
     }
 
-    // Enhanced Sarvam TTS Synthesis with dynamic language
+    // FIXED: Enhanced Sarvam TTS Synthesis with proper voice validation
     const synthesizeWithSarvam = async (text, targetLanguage = null) => {
       if (!apiKeys.sarvam || !text.trim()) {
         return
@@ -859,18 +1026,18 @@ Remember: You are a ${agentConfig?.category || "general"} assistant with a ${age
 
       try {
         const useLanguage = targetLanguage || currentLanguage || 'hi'
-        const voice = agentConfig?.voiceSelection || "anushka"
+        const validVoice = getValidSarvamVoice(agentConfig?.voiceSelection)
         const sarvamLanguage = getSarvamLanguage(useLanguage)
 
         console.log(`🎵 [SARVAM] Generating TTS for: "${text}"`)
         console.log(`   - Language: ${sarvamLanguage}`)
-        console.log(`   - Voice: ${voice}`)
+        console.log(`   - Voice: ${validVoice} (mapped from: ${agentConfig?.voiceSelection || 'default'})`)
         console.log(`   - Agent: ${agentConfig?.agentName}`)
 
         const requestBody = {
           inputs: [text],
           target_language_code: sarvamLanguage,
-          speaker: voice,
+          speaker: validVoice,
           pitch: 0,
           pace: 1.0,
           loudness: 1.0,
@@ -1036,10 +1203,6 @@ Remember: You are a ${agentConfig?.category || "general"} assistant with a ${age
               console.log(`✅ [SESSION] Deepgram connected for ${agentConfig.agentName}`)
             } catch (error) {
               console.error(`❌ [SESSION] Deepgram connection failed: ${error.message}`)
-            }
-
-            if (!connectionGreetingSent) {
-              await sendFallbackGreeting()
             }
           } else if (data.type === "synthesize") {
             if (data.session_id) {
