@@ -81,6 +81,8 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: ${didNumber}`)
         const startTime = Date.now()
+        didNumber = str(didNumber)
+        console.log(didNumber)
 
         // Direct DID lookup from AgentProfile collection
         const agent = await Agent.findOne({ didNumber: didNumber })
