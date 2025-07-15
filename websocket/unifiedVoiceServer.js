@@ -18,6 +18,16 @@ const AgentModel = require("../models/AgentProfile")
 const agentSchema = AgentModel.schema
 const ReadOnlyAgent = readOnlyConnection.model("Agent", agentSchema)
 
+// --- Unified Voice Server dedicated DB connection ---
+// This connection is used exclusively for Unified Voice Server operations
+const unifiedVoiceDbUri = process.env.UNIFIED_VOICE_MONGODB_URI
+const unifiedVoiceDbConnection = mongoose.createConnection(unifiedVoiceDbUri, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true,
+})
+// Example: Register a model on this connection if needed
+// const SomeModel = unifiedVoiceDbConnection.model('SomeModel', someSchema)
+
 const fetch = globalThis.fetch || require("node-fetch")
 
 if (!fetch) {
@@ -35,21 +45,6 @@ agentSchema.pre("save", function (next) {
 })
 
 const Agent = mongoose.model("Agent", agentSchema)
-
-// Database connection
-const connectToDatabase = async () => {
-  try {
-    const mongoUri = process.env.MONGODB_URL
-    await mongoose.connect(mongoUri)
-    console.log("✅ Connected to MongoDB")
-  } catch (error) {
-    console.error("❌ MongoDB connection error:", error.message)
-    process.exit(1)
-  }
-}
-
-// Initialize database connection
-connectToDatabase()
 
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Agent Integration")
