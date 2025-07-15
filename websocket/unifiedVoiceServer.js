@@ -12,6 +12,15 @@ if (!fetch) {
   process.exit(1)
 }
 
+// Helper to normalize DID (pad with leading zeros to 11 digits, trim whitespace)
+function normalizeDID(did) {
+  let str = String(did).trim();
+  // Remove any non-digit characters (optional, if you want to be strict)
+  str = str.replace(/\D/g, "");
+  // Pad to 11 digits (adjust if your DIDs are a different length)
+  return str.padStart(11, '0');
+}
+
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Direct DID Matching")
 
@@ -79,26 +88,32 @@ const setupUnifiedVoiceServer = (wss) => {
     // Fast DID-based agent lookup with immediate audio response
     const loadAgentByDIDAndSendGreeting = async (didNumber) => {
       try {
-        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: ${didNumber}`)
-        const startTime = Date.now()
-        didNumber = String(didNumber)
-        console.log('[DEBUG] didNumber as string:', didNumber)
+        const originalDid = didNumber;
+        const normalizedDid = normalizeDID(didNumber);
+        console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID:`, {
+          originalDid,
+          normalizedDid,
+          type: typeof didNumber
+        });
+        const startTime = Date.now();
 
         // Debug: Print all DIDs and their types before lookup
-        const allAgents = await Agent.find({}, { didNumber: 1, agentName: 1, _id: 0 })
-        console.log('[DEBUG] All agent DIDs in DB:')
+        const allAgents = await Agent.find({}, { didNumber: 1, agentName: 1, _id: 0 });
+        console.log('[DEBUG] All agent DIDs in DB (normalized):');
         allAgents.forEach(agent => {
-          console.log(`  - Agent: ${agent.agentName}, DID: ${agent.didNumber}, Type: ${typeof agent.didNumber}`)
-        })
+          const dbDid = agent.didNumber;
+          const normalizedDbDid = normalizeDID(dbDid);
+          console.log(`  - Agent: ${agent.agentName}, DID: ${dbDid}, Normalized: ${normalizedDbDid}, Type: ${typeof dbDid}`);
+        });
 
-        // Direct DID lookup from AgentProfile collection
-        const agent = await Agent.findOne({ didNumber: didNumber })
-        const lookupTime = Date.now() - startTime
-        console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
+        // Direct DID lookup from AgentProfile collection (normalized)
+        const agent = await Agent.findOne({ didNumber: normalizedDid });
+        const lookupTime = Date.now() - startTime;
+        console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`);
 
         if (!agent) {
-          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${didNumber}`)
-          return null
+          console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${normalizedDid}`);
+          return null;
         }
 
         // Set session variables
