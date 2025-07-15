@@ -81,21 +81,74 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🔍 [AGENT_LOOKUP] Searching for agent with DID: ${didNumber}`)
         const startTime = Date.now()
-
+    
+        // Check database connection status
+        const dbStatus = mongoose.connection.readyState
+        const dbStatusMap = {
+          0: "disconnected",
+          1: "connected", 
+          2: "connecting",
+          3: "disconnecting"
+        }
+        
+        console.log(`🔌 [DB_STATUS] Database connection: ${dbStatusMap[dbStatus] || "unknown"}`)
+        
+        if (dbStatus !== 1) {
+          console.error(`❌ [DB_STATUS] Database not connected! Status: ${dbStatusMap[dbStatus]}`)
+          return null
+        }
+    
+        // Get total count of agents and DID numbers
+        try {
+          const totalAgents = await Agent.countDocuments()
+          const agentsWithDID = await Agent.countDocuments({ didNumber: { $exists: true, $ne: null, $ne: "" } })
+          const uniqueDIDs = await Agent.distinct("didNumber", { didNumber: { $exists: true, $ne: null, $ne: "" } })
+          
+          console.log(`📊 [DB_STATS] Database Statistics:`)
+          console.log(`   - Total Agents: ${totalAgents}`)
+          console.log(`   - Agents with DID: ${agentsWithDID}`)
+          console.log(`   - Unique DID Numbers: ${uniqueDIDs.length}`)
+          console.log(`   - Available DIDs: [${uniqueDIDs.join(", ")}]`)
+          
+          // Check if agents have pre-generated audio
+          const agentsWithAudio = await Agent.countDocuments({ 
+            audioBytes: { $exists: true, $ne: null },
+            "audioBytes.0": { $exists: true } // Check if buffer is not empty
+          })
+          console.log(`   - Agents with Pre-generated Audio: ${agentsWithAudio}`)
+          
+        } catch (statsError) {
+          console.error(`❌ [DB_STATS] Error getting database stats: ${statsError.message}`)
+        }
+    
         // Direct DID lookup from AgentProfile collection
         const agent = await Agent.findOne({ didNumber: didNumber })
         const lookupTime = Date.now() - startTime
         console.log(`⚡ [AGENT_LOOKUP] DID lookup completed in ${lookupTime}ms`)
-
+    
         if (!agent) {
           console.error(`❌ [AGENT_LOOKUP] No agent found for DID: ${didNumber}`)
+          
+          // Show similar DIDs for debugging
+          const similarDIDs = await Agent.find(
+            { didNumber: { $exists: true, $ne: null, $ne: "" } },
+            { didNumber: 1, agentName: 1, _id: 0 }
+          ).limit(10)
+          
+          if (similarDIDs.length > 0) {
+            console.log(`🔍 [AGENT_LOOKUP] Available DIDs in database:`)
+            similarDIDs.forEach(agent => {
+              console.log(`   - DID: ${agent.didNumber} → Agent: ${agent.agentName}`)
+            })
+          }
+          
           return null
         }
-
+    
         // Set session variables
         tenantId = agent.tenantId
         agentConfig = agent
-
+    
         console.log(`✅ [AGENT_LOOKUP] Agent found:`)
         console.log(`   - Agent Name: ${agent.agentName}`)
         console.log(`   - Tenant ID: ${agent.tenantId}`)
@@ -103,16 +156,140 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - Language: ${agent.language}`)
         console.log(`   - First Message: ${agent.firstMessage}`)
         console.log(`   - Pre-generated Audio: ${agent.audioBytes ? `✅ Available (${agent.audioBytes.length} bytes)` : "❌ Not Available"}`)
-
+        
+        // Additional agent details
+        console.log(`   - Voice Selection: ${agent.voiceSelection || "default"}`)
+        console.log(`   - TTS Provider: ${agent.ttsSelection || "sarvam"}`)
+        console.log(`   - STT Provider: ${agent.sttSelection || "deepgram"}`)
+        console.log(`   - LLM Provider: ${agent.llmSelection || "openai"}`)
+        console.log(`   - Personality: ${agent.personality || "formal"}`)
+        console.log(`   - Category: ${agent.category || "N/A"}`)
+        
+        // Audio metadata if available
+        if (agent.audioBytes && agent.audioMetadata) {
+          console.log(`   - Audio Metadata:`)
+          console.log(`     * Format: ${agent.audioMetadata.format || "unknown"}`)
+          console.log(`     * Sample Rate: ${agent.audioMetadata.sampleRate || "unknown"}`)
+          console.log(`     * Channels: ${agent.audioMetadata.channels || "unknown"}`)
+          console.log(`     * Generated At: ${agent.audioMetadata.generatedAt || "unknown"}`)
+          console.log(`     * Provider: ${agent.audioMetadata.provider || "unknown"}`)
+        }
+    
         // IMMEDIATELY send greeting if audio bytes are available
         if (agent.audioBytes && agent.audioBytes.length > 0) {
           await sendImmediateGreeting(agent)
         }
-
+    
         return agent
       } catch (error) {
         console.error(`❌ [AGENT_LOOKUP] Error: ${error.message}`)
+        console.error(`❌ [AGENT_LOOKUP] Stack trace: ${error.stack}`)
+        
+        // Check if it's a MongoDB connection error
+        if (error.name === 'MongoError' || error.name === 'MongooseError') {
+          console.error(`❌ [AGENT_LOOKUP] MongoDB connection issue detected`)
+          console.error(`❌ [AGENT_LOOKUP] Connection state: ${mongoose.connection.readyState}`)
+          console.error(`❌ [AGENT_LOOKUP] Connection host: ${mongoose.connection.host}`)
+          console.error(`❌ [AGENT_LOOKUP] Connection name: ${mongoose.connection.name}`)
+        }
+        
         return null
+      }
+    }
+    
+    // Additional helper function to test database connection
+    const testDatabaseConnection = async () => {
+      try {
+        console.log(`🔍 [DB_TEST] Testing database connection...`)
+        
+        const dbStatus = mongoose.connection.readyState
+        const dbStatusMap = {
+          0: "disconnected",
+          1: "connected", 
+          2: "connecting",
+          3: "disconnecting"
+        }
+        
+        console.log(`🔌 [DB_TEST] Connection Status: ${dbStatusMap[dbStatus]}`)
+        console.log(`🔌 [DB_TEST] Database Host: ${mongoose.connection.host || "unknown"}`)
+        console.log(`🔌 [DB_TEST] Database Name: ${mongoose.connection.name || "unknown"}`)
+        console.log(`🔌 [DB_TEST] Database Port: ${mongoose.connection.port || "unknown"}`)
+        
+        if (dbStatus === 1) {
+          // Test with a simple query
+          const testCount = await Agent.countDocuments()
+          console.log(`✅ [DB_TEST] Database connection successful! Total agents: ${testCount}`)
+          
+          // Test if we can access the collection
+          const collections = await mongoose.connection.db.listCollections().toArray()
+          const agentCollection = collections.find(col => col.name === 'agents')
+          
+          if (agentCollection) {
+            console.log(`✅ [DB_TEST] Agent collection exists`)
+          } else {
+            console.log(`❌ [DB_TEST] Agent collection not found`)
+            console.log(`📋 [DB_TEST] Available collections: ${collections.map(c => c.name).join(", ")}`)
+          }
+          
+          return true
+        } else {
+          console.error(`❌ [DB_TEST] Database not connected`)
+          return false
+        }
+        
+      } catch (error) {
+        console.error(`❌ [DB_TEST] Database test failed: ${error.message}`)
+        return false
+      }
+    }
+    
+    // Call this function when the server starts up
+    const initializeDatabaseStats = async () => {
+      console.log(`🚀 [INIT] Initializing database connection check...`)
+      
+      // Test database connection
+      const isConnected = await testDatabaseConnection()
+      
+      if (isConnected) {
+        try {
+          // Get comprehensive database stats
+          const totalAgents = await Agent.countDocuments()
+          const agentsWithDID = await Agent.countDocuments({ didNumber: { $exists: true, $ne: null, $ne: "" } })
+          const uniqueDIDs = await Agent.distinct("didNumber", { didNumber: { $exists: true, $ne: null, $ne: "" } })
+          const agentsWithAudio = await Agent.countDocuments({ 
+            audioBytes: { $exists: true, $ne: null },
+            "audioBytes.0": { $exists: true }
+          })
+          
+          const tenants = await Agent.distinct("tenantId")
+          const languages = await Agent.distinct("language")
+          const personalities = await Agent.distinct("personality")
+          
+          console.log(`📊 [INIT] Complete Database Statistics:`)
+          console.log(`   ═══════════════════════════════════════`)
+          console.log(`   📈 Total Agents: ${totalAgents}`)
+          console.log(`   📞 Agents with DID: ${agentsWithDID}`)
+          console.log(`   🔢 Unique DID Numbers: ${uniqueDIDs.length}`)
+          console.log(`   🎵 Agents with Audio: ${agentsWithAudio}`)
+          console.log(`   🏢 Unique Tenants: ${tenants.length}`)
+          console.log(`   🌐 Languages: ${languages.join(", ")}`)
+          console.log(`   🎭 Personalities: ${personalities.join(", ")}`)
+          console.log(`   ═══════════════════════════════════════`)
+          
+          if (uniqueDIDs.length > 0) {
+            console.log(`📱 [INIT] Available DID Numbers:`)
+            uniqueDIDs.forEach((did, index) => {
+              console.log(`   ${index + 1}. ${did}`)
+            })
+          } else {
+            console.log(`❌ [INIT] No DID numbers found in database`)
+          }
+          
+        } catch (error) {
+          console.error(`❌ [INIT] Error getting database statistics: ${error.message}`)
+        }
+      } else {
+        console.error(`❌ [INIT] Database connection failed - voice server may not work properly`)
       }
     }
 
