@@ -513,7 +513,6 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramUrl.searchParams.append("interim_results", "true")
           deepgramUrl.searchParams.append("smart_format", "true")
           deepgramUrl.searchParams.append("endpointing", "300")
-          deepgramUrl.searchParams.append("detect_language", "true")
 
           console.log(`🎙️ [DEEPGRAM] Connecting with language: ${currentLanguage}`)
 
