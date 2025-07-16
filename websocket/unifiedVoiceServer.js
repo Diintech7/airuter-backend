@@ -5,6 +5,10 @@ const Agent = require("../models/AgentProfile")
 const connectDB = require("../config/db")
 connectDB()
 
+// New imports for AI SDK
+import { streamText } from "ai" // [^5][^6]
+import { openai } from "@ai-sdk/openai" // [^5][^6]
+
 const fetch = globalThis.fetch || require("node-fetch")
 
 if (!fetch) {
@@ -26,92 +30,108 @@ const createTimer = (label) => {
       const duration = Date.now() - start
       console.log(`⏱️ [CHECKPOINT] ${label} - ${checkpointName}: ${duration}ms`)
       return duration
-    }
+    },
   }
 }
 
 // Helper to normalize DID (pad with leading zeros to 11 digits, trim whitespace)
 function normalizeDID(did) {
-  let str = String(did).trim();
-  str = str.replace(/\D/g, "");
-  return str.padStart(11, '0');
+  let str = String(did).trim()
+  str = str.replace(/\D/g, "")
+  return str.padStart(11, "0")
 }
 
 // Language detection mapping
 const LANGUAGE_MAPPING = {
-  'hi': 'hi-IN',
-  'en': 'en-US',
-  'bn': 'bn-IN',
-  'te': 'te-IN',
-  'ta': 'ta-IN',
-  'mr': 'mr-IN',
-  'gu': 'gu-IN',
-  'kn': 'kn-IN',
-  'ml': 'ml-IN',
-  'pa': 'pa-IN',
-  'or': 'or-IN',
-  'as': 'as-IN',
-  'ur': 'ur-IN'
-};
+  hi: "hi-IN",
+  en: "en-US",
+  bn: "bn-IN",
+  te: "te-IN",
+  ta: "ta-IN",
+  mr: "mr-IN",
+  gu: "gu-IN",
+  kn: "kn-IN",
+  ml: "ml-IN",
+  pa: "pa-IN",
+  or: "or-IN",
+  as: "as-IN",
+  ur: "ur-IN",
+}
 
 // FIXED: Valid Sarvam voice options
 const VALID_SARVAM_VOICES = [
-  'meera', 'pavithra', 'maitreyi', 'arvind', 'amol', 'amartya', 
-  'diya', 'neel', 'misha', 'vian', 'arjun', 'maya', 'anushka', 
-  'abhilash', 'manisha', 'vidya', 'arya', 'karun', 'hitesh'
-];
+  "meera",
+  "pavithra",
+  "maitreyi",
+  "arvind",
+  "amol",
+  "amartya",
+  "diya",
+  "neel",
+  "misha",
+  "vian",
+  "arjun",
+  "maya",
+  "anushka",
+  "abhilash",
+  "manisha",
+  "vidya",
+  "arya",
+  "karun",
+  "hitesh",
+]
 
 // FIXED: Voice mapping function to ensure valid voice selection
 const getValidSarvamVoice = (voiceSelection) => {
-  if (!voiceSelection || voiceSelection === 'default') {
-    return 'anushka'; // Default fallback
+  if (!voiceSelection || voiceSelection === "default") {
+    return "anushka" // Default fallback
   }
-  
+
   // If it's already a valid Sarvam voice, return it
   if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
-    return voiceSelection;
+    return voiceSelection
   }
-  
+
   // Map common voice selections to valid Sarvam voices
   const voiceMapping = {
-    'male-professional': 'arvind',
-    'female-professional': 'anushka',
-    'male-friendly': 'amol',
-    'female-friendly': 'maya',
-    'neutral': 'anushka',
-    'default': 'anushka'
-  };
-  
-  return voiceMapping[voiceSelection] || 'anushka';
-};
+    "male-professional": "arvind",
+    "female-professional": "anushka",
+    "male-friendly": "amol",
+    "female-friendly": "maya",
+    neutral: "anushka",
+    default: "anushka",
+  }
+
+  return voiceMapping[voiceSelection] || "anushka"
+}
 
 // Get supported Sarvam language code
-const getSarvamLanguage = (detectedLang, defaultLang = 'hi') => {
-  const lang = detectedLang?.toLowerCase() || defaultLang;
-  return LANGUAGE_MAPPING[lang] || LANGUAGE_MAPPING[defaultLang] || 'hi-IN';
-};
+const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  return LANGUAGE_MAPPING[lang] || LANGUAGE_MAPPING[defaultLang] || "hi-IN"
+}
 
 // Get Deepgram language code
-const getDeepgramLanguage = (detectedLang, defaultLang = 'hi') => {
-  const lang = detectedLang?.toLowerCase() || defaultLang;
+const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
   // Deepgram uses different format
   const deepgramMapping = {
-    'hi': 'hi',
-    'en': 'en-US',
-    'bn': 'bn',
-    'te': 'te',
-    'ta': 'ta',
-    'mr': 'mr',
-    'gu': 'gu',
-    'kn': 'kn',
-    'ml': 'ml',
-    'pa': 'pa',
-    'or': 'or',
-    'as': 'as',
-    'ur': 'ur'
-  };
-  return deepgramMapping[lang] || deepgramMapping[defaultLang] || 'hi';
-};
+    hi: "hi",
+    en: "en-US",
+    bn: "bn",
+    te: "te",
+    ta: "ta",
+    mr: "mr",
+    gu: "gu",
+    kn: "kn",
+    ml: "ml",
+    pa: "pa",
+    or: "or",
+    as: "as",
+    ur: "ur",
+  }
+  return deepgramMapping[lang] || deepgramMapping[defaultLang] || "hi"
+}
 
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Dynamic Language Detection")
@@ -154,19 +174,20 @@ const setupUnifiedVoiceServer = (wss) => {
     let connectionGreetingSent = false
     let textProcessingQueue = []
     let isProcessingQueue = false
-    let currentTranscript = ""
-    let isProcessingOpenAI = false
+    let currentTranscript = "" // Accumulates interim Deepgram transcripts
+    let isProcessingOpenAIStream = false // Renamed flag for streaming
     let fullConversationHistory = []
     let silenceTimeout = null
     const SILENCE_DURATION = 2000
     let isSpeaking = false
 
     // Audio streaming and interruption management
-    let currentTTSSocket = null
+    let currentTTSSocket = null // Not used for Sarvam direct API, but kept for consistency
     let isPlayingAudio = false
-    let audioQueue = []
+    let audioQueue = [] // To manage audio chunks for sequential playback
     let shouldInterruptAudio = false
     let greetingInProgress = false
+    let currentOpenAIResponseBuffer = "" // Buffer for accumulating OpenAI stream text
 
     // VAD state
     const vadState = {
@@ -182,32 +203,32 @@ const setupUnifiedVoiceServer = (wss) => {
     // INSTANT GREETING: Send audio bytes immediately when DID matches
     const sendInstantGreeting = async (didNumber) => {
       const overallTimer = createTimer("INSTANT_GREETING_TOTAL")
-      
+
       try {
         // Step 1: DID lookup
         const didTimer = createTimer("DID_LOOKUP")
-        const originalDid = didNumber;
-        const normalizedDid = normalizeDID(didNumber);
-        
+        const originalDid = didNumber
+        const normalizedDid = normalizeDID(didNumber)
+
         console.log(`🔍 [INSTANT_GREETING] DID lookup started:`, {
           originalDid,
           normalizedDid,
-          timestamp: new Date().toISOString()
-        });
+          timestamp: new Date().toISOString(),
+        })
 
-        const agent = await Agent.findOne({ didNumber: normalizedDid }).lean();
+        const agent = await Agent.findOne({ didNumber: normalizedDid }).lean()
         didTimer.end()
 
         if (!agent) {
           console.error(`❌ [INSTANT_GREETING] No agent found for DID: ${normalizedDid}`)
           overallTimer.end()
-          return null;
+          return null
         }
 
         // Set session variables immediately
         tenantId = agent.tenantId
         agentConfig = agent
-        currentLanguage = agent.language || 'hi'
+        currentLanguage = agent.language || "hi"
         detectedLanguage = currentLanguage
 
         console.log(`✅ [INSTANT_GREETING] Agent matched instantly:`)
@@ -219,10 +240,10 @@ const setupUnifiedVoiceServer = (wss) => {
         // Step 2: Send greeting immediately - NO WAITING
         if (agent.audioBytes && agent.audioBytes.length > 0) {
           const audioTimer = createTimer("INSTANT_AUDIO_SEND")
-          
+
           // Send audio bytes immediately
           const pythonBytesString = bufferToPythonBytesString(agent.audioBytes)
-          
+
           const audioResponse = {
             data: {
               session_id: sessionId,
@@ -239,27 +260,31 @@ const setupUnifiedVoiceServer = (wss) => {
 
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(audioResponse))
-            ws.send(JSON.stringify({
-              type: "ai_response_complete",
-              session_id: sessionId,
-              total_chunks: 1,
-            }))
+            ws.send(
+              JSON.stringify({
+                type: "ai_response_complete",
+                session_id: sessionId,
+                total_chunks: 1,
+              }),
+            )
             audioTimer.end()
             console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY`)
           }
         } else {
           // No pre-generated audio - send text immediately and generate audio in background
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({
-              type: "instant_text_greeting",
-              session_id: sessionId,
-              message: agent.firstMessage,
-              agent: agent.agentName,
-              timestamp: new Date().toISOString()
-            }))
+            ws.send(
+              JSON.stringify({
+                type: "instant_text_greeting",
+                session_id: sessionId,
+                message: agent.firstMessage,
+                agent: agent.agentName,
+                timestamp: new Date().toISOString(),
+              }),
+            )
             console.log(`📝 [INSTANT_GREETING] Text greeting sent instantly`)
           }
-          
+
           // Generate audio in background - don't wait for it
           generateGreetingAudioBackground(agent)
         }
@@ -268,13 +293,13 @@ const setupUnifiedVoiceServer = (wss) => {
         greetingInProgress = false
         isPlayingAudio = true
 
+        // This timeout is a heuristic. For actual audio completion, client feedback is better.
         setTimeout(() => {
           isPlayingAudio = false
         }, 3000)
 
         overallTimer.end()
         return agent
-
       } catch (error) {
         console.error(`❌ [INSTANT_GREETING] Error: ${error.message}`)
         overallTimer.end()
@@ -287,10 +312,10 @@ const setupUnifiedVoiceServer = (wss) => {
       // Don't await - run in background
       setImmediate(async () => {
         const timer = createTimer("BACKGROUND_AUDIO_GENERATION")
-        
+
         try {
           console.log(`🔄 [BACKGROUND_AUDIO] Starting generation for: ${agent.agentName}`)
-          
+
           // Load API keys first
           const keysLoaded = await loadApiKeysForTenant(agent.tenantId)
           if (!keysLoaded || !apiKeys.sarvam) {
@@ -301,9 +326,9 @@ const setupUnifiedVoiceServer = (wss) => {
 
           const validVoice = getValidSarvamVoice(agent.voiceSelection)
           const sarvamLanguage = getSarvamLanguage(currentLanguage)
-          
+
           const sarvamTimer = createTimer("SARVAM_TTS_BACKGROUND")
-          
+
           const requestBody = {
             inputs: [agent.firstMessage],
             target_language_code: sarvamLanguage,
@@ -350,11 +375,13 @@ const setupUnifiedVoiceServer = (wss) => {
 
               if (ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify(audioResponse))
-                ws.send(JSON.stringify({
-                  type: "ai_response_complete",
-                  session_id: sessionId,
-                  total_chunks: 1,
-                }))
+                ws.send(
+                  JSON.stringify({
+                    type: "ai_response_complete",
+                    session_id: sessionId,
+                    total_chunks: 1,
+                  }),
+                )
                 console.log(`🎵 [BACKGROUND_AUDIO] Audio generated and sent: ${audioBuffer.length} bytes`)
               }
 
@@ -375,7 +402,7 @@ const setupUnifiedVoiceServer = (wss) => {
                   },
                 },
               )
-              
+
               console.log(`✅ [BACKGROUND_AUDIO] Audio saved for future instant use`)
             }
           } else {
@@ -393,7 +420,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Load API keys for the tenant with timing
     const loadApiKeysForTenant = async (tenantId) => {
       const timer = createTimer("API_KEYS_LOAD")
-      
+
       try {
         console.log(`🔑 [API_KEYS] Loading keys for tenant: ${tenantId}`)
 
@@ -411,7 +438,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
 
         const decryptTimer = createTimer("API_KEYS_DECRYPT")
-        
+
         for (const keyDoc of keys) {
           const decryptedKey = ApiKey.decryptKey(keyDoc.encryptedKey)
 
@@ -458,67 +485,38 @@ const setupUnifiedVoiceServer = (wss) => {
     // Language detection using OpenAI with timing
     const detectLanguage = async (text) => {
       const timer = createTimer("LANGUAGE_DETECTION")
-      
+
       try {
         if (!apiKeys.openai || !text.trim()) {
           timer.end()
-          return currentLanguage || 'hi'
+          return currentLanguage || "hi"
         }
 
-        const requestBody = {
-          model: "gpt-4o-mini",
-          messages: [
-            {
-              role: "system",
-              content: `You are a language detector. Detect the language of the given text and respond with just the language code (hi for Hindi, en for English, bn for Bengali, te for Telugu, ta for Tamil, mr for Marathi, gu for Gujarati, kn for Kannada, ml for Malayalam, pa for Punjabi, or for Odia, as for Assamese, ur for Urdu). If you're unsure or the text is mixed, respond with the dominant language. Only respond with the language code, nothing else.`
-            },
-            {
-              role: "user",
-              content: text
-            }
-          ],
+        // Using AI SDK's streamText for consistency, though generateText is also suitable for single-shot detection.
+        const { text: detectedLangText } = await streamText({
+          // [^5][^6]
+          model: openai("gpt-4o-mini"),
+          system: `You are a language detector. Detect the language of the given text and respond with just the language code (hi for Hindi, en for English, bn for Bengali, te for Telugu, ta for Tamil, mr for Marathi, gu for Gujarati, kn for Kannada, ml for Malayalam, pa for Punjabi, or for Odia, as for Assamese, ur for Urdu). If you're unsure or the text is mixed, respond with the dominant language. Only respond with the language code, nothing else.`,
+          prompt: text,
           max_tokens: 10,
           temperature: 0.1,
-        }
-
-        const response = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKeys.openai}`,
-          },
-          body: JSON.stringify(requestBody),
         })
 
-        timer.checkpoint("OPENAI_RESPONSE_RECEIVED")
-
-        if (!response.ok) {
-          console.error(`❌ [LANGUAGE_DETECT] OpenAI API error: ${response.status}`)
-          timer.end()
-          return currentLanguage || 'hi'
-        }
-
-        const data = await response.json()
-        if (data.choices && data.choices[0] && data.choices[0].message) {
-          const detectedLang = data.choices[0].message.content.trim().toLowerCase()
-          console.log(`🌐 [LANGUAGE_DETECT] Detected: ${detectedLang} from text: "${text}"`)
-          timer.end()
-          return detectedLang
-        }
-
+        const detectedLang = detectedLangText.trim().toLowerCase()
+        console.log(`🌐 [LANGUAGE_DETECT] Detected: ${detectedLang} from text: "${text}"`)
         timer.end()
-        return currentLanguage || 'hi'
+        return detectedLang
       } catch (error) {
         console.error(`❌ [LANGUAGE_DETECT] Error: ${error.message}`)
         timer.end()
-        return currentLanguage || 'hi'
+        return currentLanguage || "hi"
       }
     }
 
     // Optimized Deepgram connection with timing
     const connectToDeepgram = async () => {
       const timer = createTimer("DEEPGRAM_CONNECTION")
-      
+
       return new Promise((resolve, reject) => {
         try {
           if (!apiKeys.deepgram) {
@@ -608,7 +606,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Handle Deepgram responses with timing
     const handleDeepgramResponse = async (data) => {
       const timer = createTimer("DEEPGRAM_RESPONSE_PROCESSING")
-      
+
       if (data.type === "Results") {
         const channel = data.channel
         if (channel && channel.alternatives && channel.alternatives.length > 0) {
@@ -624,18 +622,21 @@ const setupUnifiedVoiceServer = (wss) => {
             if (is_final) {
               currentTranscript += (currentTranscript ? " " : "") + transcript.trim()
               addToTextQueue(currentTranscript, "final_transcript")
+              currentTranscript = "" // FIXED: Clear currentTranscript after adding final to queue to prevent duplicates
               startSilenceTimer()
 
               if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                  type: "transcript",
-                  data: transcript,
-                  confidence: confidence,
-                  is_final: true,
-                  language: currentLanguage,
-                  accumulated: currentTranscript,
-                  agent: agentConfig?.agentName,
-                }))
+                ws.send(
+                  JSON.stringify({
+                    type: "transcript",
+                    data: transcript,
+                    confidence: confidence,
+                    is_final: true,
+                    language: currentLanguage,
+                    accumulated: currentTranscript, // This will be empty now, which is correct for a new utterance
+                    agent: agentConfig?.agentName,
+                  }),
+                )
               }
             }
             isSpeaking = true
@@ -657,7 +658,7 @@ const setupUnifiedVoiceServer = (wss) => {
         }
         vadState.totalUtteranceEnds++
       }
-      
+
       timer.end()
     }
 
@@ -671,8 +672,10 @@ const setupUnifiedVoiceServer = (wss) => {
       console.log("🛑 [AUDIO] Interrupting current audio playback")
       shouldInterruptAudio = true
       isPlayingAudio = false
-      audioQueue = []
+      audioQueue = [] // Clear audio queue on interruption
+      currentOpenAIResponseBuffer = "" // Clear any buffered OpenAI text
 
+      // No currentTTSSocket for Sarvam direct API, but good to keep for other TTS
       if (currentTTSSocket) {
         try {
           currentTTSSocket.close()
@@ -680,6 +683,10 @@ const setupUnifiedVoiceServer = (wss) => {
           console.error("❌ [AUDIO] Error closing TTS socket:", error.message)
         }
         currentTTSSocket = null
+      }
+      // Send a signal to client to stop playing if needed
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "audio_interrupted", session_id: sessionId }))
       }
     }
 
@@ -721,10 +728,8 @@ const setupUnifiedVoiceServer = (wss) => {
               console.log(`🌐 [LANGUAGE_SWITCH] Language changed to: ${detectedLanguage}`)
             }
 
-            const openaiResponse = await sendToOpenAI(queueItem.text)
-            if (openaiResponse) {
-              await synthesizeWithSarvam(openaiResponse, detectedLanguage)
-            }
+            // Send to OpenAI for streaming response
+            await sendToOpenAIStream(queueItem.text) // Changed to streaming function
           }
           queueItem.processed = true
         } catch (error) {
@@ -745,6 +750,7 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData)
         if (buffer.length >= 320) {
+          // Deepgram expects chunks of at least 320 bytes for 8kHz, 16-bit mono
           deepgramWs.send(buffer)
           return true
         }
@@ -783,20 +789,22 @@ const setupUnifiedVoiceServer = (wss) => {
 
     const handleSilenceDetected = async () => {
       console.log(`🔇 [SILENCE] Detected after ${vadState.silenceDuration}ms`)
-      if (currentTranscript.trim() && !isProcessingOpenAI) {
+      if (currentTranscript.trim() && !isProcessingOpenAIStream) {
+        // Check streaming flag
         addToTextQueue(currentTranscript.trim(), "complete_utterance")
         currentTranscript = ""
       }
     }
 
-    // Enhanced OpenAI Integration with timing
-    const sendToOpenAI = async (userMessage) => {
-      if (isProcessingOpenAI || !apiKeys.openai || !userMessage.trim()) {
+    // NEW: Enhanced OpenAI Integration with streaming (using AI SDK)
+    const sendToOpenAIStream = async (userMessage) => {
+      if (isProcessingOpenAIStream || !apiKeys.openai || !userMessage.trim()) {
         return null
       }
 
-      const timer = createTimer("OPENAI_PROCESSING")
-      isProcessingOpenAI = true
+      const timer = createTimer("OPENAI_PROCESSING_STREAM")
+      isProcessingOpenAIStream = true
+      currentOpenAIResponseBuffer = "" // Reset buffer for new response
 
       try {
         fullConversationHistory.push({
@@ -829,82 +837,105 @@ RESPONSE GUIDELINES:
 - Stay in character as ${agentConfig?.agentName || "Assistant"}
 - Consider the context: ${agentConfig?.contextMemory || "general conversation"}`
 
-        const requestBody = {
-          model: agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini",
-          messages: [
-            { role: "system", content: systemPrompt },
-            ...fullConversationHistory.slice(-10)
-          ],
-          max_tokens: 150,
-          temperature: agentConfig?.personality === "formal" ? 0.3 : 0.7,
-        }
-
-        console.log(`🤖 [OPENAI] Sending request with:`)
+        console.log(`🤖 [OPENAI] Sending streaming request with:`)
         console.log(`   - Language: ${detectedLanguage || currentLanguage}`)
         console.log(`   - Personality: ${agentConfig?.personality || "formal"}`)
-        console.log(`   - Model: ${requestBody.model}`)
+        console.log(`   - Model: ${agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini"}`)
 
-        const openaiTimer = createTimer("OPENAI_API_CALL")
-        const response = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${apiKeys.openai}`,
+        const openaiStreamTimer = createTimer("OPENAI_API_STREAM_CALL")
+        const result = await streamText({
+          // [^5][^6]
+          model: openai(agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini"),
+          messages: [{ role: "system", content: systemPrompt }, ...fullConversationHistory.slice(-10)],
+          max_tokens: 150,
+          temperature: agentConfig?.personality === "formal" ? 0.3 : 0.7,
+          onChunk: async ({ chunk }) => {
+            if (shouldInterruptAudio) {
+              console.log("🛑 [OPENAI_STREAM] Interrupted, stopping chunk processing.")
+              return // Stop processing chunks if interrupted
+            }
+            if (chunk.type === "text-delta") {
+              currentOpenAIResponseBuffer += chunk.text
+              // Process and synthesize text in chunks (e.g., by sentence)
+              await processOpenAIResponseChunk(currentOpenAIResponseBuffer, detectedLanguage)
+            }
           },
-          body: JSON.stringify(requestBody),
+          onFinish: ({ text, finishReason, usage }) => {
+            openaiStreamTimer.end()
+            console.log(`🤖 [OPENAI] Stream finished. Total response: "${text}"`)
+            // Ensure any remaining buffered text is processed
+            if (currentOpenAIResponseBuffer.length > 0) {
+              processOpenAIResponseChunk(currentOpenAIResponseBuffer, detectedLanguage, true) // Force process remaining
+            }
+            fullConversationHistory.push({
+              role: "assistant",
+              content: text, // Save the full response
+            })
+            isProcessingOpenAIStream = false
+            timer.end()
+          },
         })
-        openaiTimer.end()
 
-        if (!response.ok) {
-          console.error(`❌ [OPENAI] API error: ${response.status}`)
-          timer.end()
-          return null
-        }
-
-        const parseTimer = createTimer("OPENAI_RESPONSE_PARSE")
-        const data = await response.json()
-        parseTimer.end()
-
-        if (data.choices && data.choices[0] && data.choices[0].message) {
-          const openaiResponse = data.choices[0].message.content
-
-          fullConversationHistory.push({
-            role: "assistant",
-            content: openaiResponse,
-          })
-
-          console.log(`🤖 [OPENAI] Response received: "${openaiResponse}"`)
-          timer.end()
-          return openaiResponse
-        }
-
-        timer.end()
-        return null
+        // Await the full text to ensure onFinish is called and flag is reset.
+        await result.text
       } catch (error) {
-        console.error(`❌ [OPENAI] Error: ${error.message}`)
+        console.error(`❌ [OPENAI] Error during streaming: ${error.message}`)
         timer.end()
-        return null
       } finally {
-        isProcessingOpenAI = false
+        isProcessingOpenAIStream = false // Ensure flag is reset even on error
+      }
+    }
+
+    // NEW: Function to process OpenAI response chunks and send to Sarvam
+    const processOpenAIResponseChunk = async (buffer, language, force = false) => {
+      // Simple sentence splitting for demonstration. More robust NLP might be needed.
+      // Look for sentence-ending punctuation followed by a space or end of string.
+      const sentenceEndings = /[.!?]\s|\n/
+      let lastSentenceEndIndex = -1
+
+      // Find the last complete sentence in the buffer
+      let match
+      while ((match = sentenceEndings.exec(buffer)) !== null) {
+        lastSentenceEndIndex = match.index + match[0].length
+      }
+
+      if (lastSentenceEndIndex !== -1 || force) {
+        let textToSynthesize
+        if (lastSentenceEndIndex !== -1) {
+          textToSynthesize = buffer.substring(0, lastSentenceEndIndex).trim()
+          currentOpenAIResponseBuffer = buffer.substring(lastSentenceEndIndex)
+        } else if (force && buffer.length > 0) {
+          textToSynthesize = buffer.trim()
+          currentOpenAIResponseBuffer = "" // Clear buffer if forced
+        } else {
+          return // No complete sentence yet, and not forced
+        }
+
+        if (textToSynthesize.length > 0) {
+          console.log(`🎵 [SARVAM_CHUNK] Synthesizing chunk: "${textToSynthesize}"`)
+          await synthesizeWithSarvam(textToSynthesize, language)
+        }
       }
     }
 
     // Enhanced Sarvam TTS Synthesis with timing
     const synthesizeWithSarvam = async (text, targetLanguage = null) => {
-      if (!apiKeys.sarvam || !text.trim()) {
+      if (!apiKeys.sarvam || !text.trim() || shouldInterruptAudio) {
+        // Check interruption flag
+        console.log(`🛑 [SARVAM] Skipping synthesis due to interruption or empty text.`)
         return
       }
 
       const timer = createTimer("SARVAM_TTS_PROCESSING")
-      
+
       try {
-        const useLanguage = targetLanguage || currentLanguage || 'hi'
+        const useLanguage = targetLanguage || currentLanguage || "hi"
         const validVoice = getValidSarvamVoice(agentConfig?.voiceSelection)
         const sarvamLanguage = getSarvamLanguage(useLanguage)
 
         console.log(`🎵 [SARVAM] Generating TTS for: "${text}"`)
         console.log(`   - Language: ${sarvamLanguage}`)
-        console.log(`   - Voice: ${validVoice} (mapped from: ${agentConfig?.voiceSelection || 'default'})`)
+        console.log(`   - Voice: ${validVoice} (mapped from: ${agentConfig?.voiceSelection || "default"})`)
         console.log(`   - Agent: ${agentConfig?.agentName}`)
 
         const requestBody = {
@@ -948,15 +979,21 @@ RESPONSE GUIDELINES:
         const audioBuffer = Buffer.from(audioBase64, "base64")
         const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
+        // Check interruption flag again before sending
+        if (shouldInterruptAudio) {
+          console.log(`🛑 [SARVAM] Audio generated but not sent due to interruption.`)
+          return
+        }
+
         const audioResponse = {
           data: {
             session_id: sessionId,
-            count: 1,
+            count: 1, // This count might need to be dynamic if we send multiple chunks
             audio_bytes_to_play: pythonBytesString,
             sample_rate: 22050,
             channels: 1,
             sample_width: 2,
-            is_streaming: false,
+            is_streaming: false, // This is false because Sarvam sends full audio per request
             format: "mp3",
           },
           type: "ai_response",
@@ -964,15 +1001,21 @@ RESPONSE GUIDELINES:
 
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(audioResponse))
-          ws.send(JSON.stringify({
-            type: "ai_response_complete",
-            session_id: sessionId,
-            total_chunks: 1,
-          }))
+          // For true streaming, you might send a "chunk_complete" and a final "response_complete"
+          // For now, sending complete for each chunk.
+          ws.send(
+            JSON.stringify({
+              type: "ai_response_complete",
+              session_id: sessionId,
+              total_chunks: 1,
+            }),
+          )
           console.log(`✅ [SARVAM] Audio bytes sent (${audioBuffer.length} bytes)`)
         }
 
         isPlayingAudio = true
+        // This timeout is a heuristic. For actual audio completion, client feedback is better.
+        // For streaming, this needs to be managed per chunk or by client.
         setTimeout(() => {
           isPlayingAudio = false
         }, 3000)
@@ -1002,7 +1045,7 @@ RESPONSE GUIDELINES:
     // WebSocket message handling
     ws.on("message", async (message) => {
       const messageTimer = createTimer("MESSAGE_PROCESSING")
-      
+
       try {
         let isTextMessage = false
         let data = null
@@ -1047,11 +1090,13 @@ RESPONSE GUIDELINES:
             const agent = await sendInstantGreeting(destinationNumber)
             if (!agent) {
               console.error(`❌ [SESSION] No agent found for DID: ${destinationNumber}`)
-              ws.send(JSON.stringify({
-                type: "error",
-                message: `No agent configured for DID: ${destinationNumber}`,
-                session_id: sessionId,
-              }))
+              ws.send(
+                JSON.stringify({
+                  type: "error",
+                  message: `No agent configured for DID: ${destinationNumber}`,
+                  session_id: sessionId,
+                }),
+              )
               messageTimer.end()
               return
             }
@@ -1060,29 +1105,33 @@ RESPONSE GUIDELINES:
             const keysLoaded = await loadApiKeysForTenant(tenantId)
             if (!keysLoaded) {
               console.error(`❌ [SESSION] API keys not available for tenant: ${tenantId}`)
-              ws.send(JSON.stringify({
-                type: "error",
-                message: "API keys not configured for tenant",
-                session_id: sessionId,
-              }))
+              ws.send(
+                JSON.stringify({
+                  type: "error",
+                  message: "API keys not configured for tenant",
+                  session_id: sessionId,
+                }),
+              )
               messageTimer.end()
               return
             }
 
             if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: "session_started",
-                session_id: sessionId,
-                agent: agentConfig.agentName,
-                did_number: destinationNumber,
-                tenant_id: tenantId,
-                providers: {
-                  stt: agentConfig.sttSelection || "deepgram",
-                  tts: agentConfig.ttsSelection || "sarvam",
-                  llm: agentConfig.llmSelection || "openai",
-                },
-                message: "Agent matched and greeting sent",
-              }))
+              ws.send(
+                JSON.stringify({
+                  type: "session_started",
+                  session_id: sessionId,
+                  agent: agentConfig.agentName,
+                  did_number: destinationNumber,
+                  tenant_id: tenantId,
+                  providers: {
+                    stt: agentConfig.sttSelection || "deepgram",
+                    tts: agentConfig.ttsSelection || "sarvam",
+                    llm: agentConfig.llmSelection || "openai",
+                  },
+                  message: "Agent matched and greeting sent",
+                }),
+              )
             }
 
             // Connect to Deepgram in background
@@ -1096,6 +1145,7 @@ RESPONSE GUIDELINES:
             if (data.session_id) {
               sessionId = data.session_id
             }
+            // This path is for explicit synthesize requests, not for LLM responses
             await synthesizeWithSarvam(data.text, data.language || currentLanguage)
           } else if (data.data && data.data.hangup === "true") {
             console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
@@ -1111,6 +1161,7 @@ RESPONSE GUIDELINES:
             ws.close(1000, "Hangup requested")
           }
         } else {
+          // This is audio data
           if (isPlayingAudio && !greetingInProgress) {
             interruptCurrentAudio()
           }
@@ -1130,10 +1181,10 @@ RESPONSE GUIDELINES:
     // Connection cleanup
     ws.on("close", () => {
       const cleanupTimer = createTimer("SESSION_CLEANUP")
-      
+
       console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
       console.log(
-        `📊 [STATS] Agent: ${agentConfig?.agentName || "Unknown"}, DID: ${destinationNumber}, Tenant: ${tenantId}`
+        `📊 [STATS] Agent: ${agentConfig?.agentName || "Unknown"}, DID: ${destinationNumber}, Tenant: ${tenantId}`,
       )
 
       if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
@@ -1164,6 +1215,7 @@ RESPONSE GUIDELINES:
       fullConversationHistory = []
       textProcessingQueue = []
       isProcessingQueue = false
+      currentOpenAIResponseBuffer = "" // Reset buffer on close
 
       cleanupTimer.end()
     })
