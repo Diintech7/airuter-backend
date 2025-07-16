@@ -117,7 +117,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   // Deepgram uses different format
   const deepgramMapping = {
     hi: "hi",
-    en: "en-US",
+    en: "en-In",
     bn: "bn",
     te: "te",
     ta: "ta",
