@@ -318,9 +318,9 @@ const setupUnifiedVoiceServer = (wss) => {
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
-            speech_sample_rate: 22050,
-            enable_preprocessing: true,
-            model: "bulbul:v2",
+            speech_sample_rate: 16000,
+            enable_preprocessing: false,
+            model: "bulbul:v1",
           }
 
           const response = await fetch("https://api.sarvam.ai/text-to-speech", {
