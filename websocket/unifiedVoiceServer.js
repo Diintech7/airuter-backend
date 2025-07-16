@@ -1,16 +1,22 @@
-import WebSocket from "ws"
-import ApiKey from "../models/ApiKey"
-import Agent from "../models/AgentProfile"
+const WebSocket = require("ws")
+const ApiKey = require("../models/ApiKey")
+const Agent = require("../models/AgentProfile")
 
-// AI SDK imports
-import { streamText } from "ai" // [^5][^6]
-import { openai } from "@ai-sdk/openai" // [^5][^6]
+// IMPORTANT: The AI SDK (streamText, openai) uses ES Module syntax (import).
+// Mixing 'import' and 'require' directly in the same file is not supported
+// in standard Node.js environments without specific configurations (e.g.,
+// setting "type": "module" in package.json and using dynamic import() for CommonJS modules,
+// or using a transpiler like Babel).
+// If you wish to use streamText and openai, this file needs to be an ES Module,
+// meaning all 'require' statements below would also need to be converted to 'import'.
+// For now, these lines are commented out to avoid syntax errors if the file is CommonJS.
+// import { streamText } from "ai"
+// import { openai } from "@ai-sdk/openai"
 
-// Node.js 18+ has global fetch, so no need for node-fetch polyfill
-const fetch = globalThis.fetch
+const fetch = globalThis.fetch || require("node-fetch")
 
 if (!fetch) {
-  console.error("❌ Fetch not available. Please use Node.js 18+.")
+  console.error("❌ Fetch not available. Please use Node.js 18+ or install node-fetch@2")
   process.exit(1)
 }
 
@@ -131,7 +137,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   return deepgramMapping[lang] || deepgramMapping[defaultLang] || "hi"
 }
 
-export const setupUnifiedVoiceServer = (wss) => {
+const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Dynamic Language Detection")
 
   wss.on("connection", (ws, req) => {
@@ -490,17 +496,55 @@ export const setupUnifiedVoiceServer = (wss) => {
           return currentLanguage || "hi"
         }
 
-        // Using AI SDK's streamText for consistency, though generateText is also suitable for single-shot detection.
-        const { text: detectedLangText } = await streamText({
-          // [^5][^6]
-          model: openai("gpt-4o-mini"),
-          system: `You are a language detector. Detect the language of the given text and respond with just the language code (hi for Hindi, en for English, bn for Bengali, te for Telugu, ta for Tamil, mr for Marathi, gu for Gujarati, kn for Kannada, ml for Malayalam, pa for Punjabi, or for Odia, as for Assamese, ur for Urdu). If you're unsure or the text is mixed, respond with the dominant language. Only respond with the language code, nothing else.`,
-          prompt: text,
+        // Placeholder for AI SDK usage in CommonJS context
+        // To use streamText/openai here, this file must be an ES Module.
+        // const { text: detectedLangText } = await streamText({
+        //   model: openai("gpt-4o-mini"),
+        //   system: `You are a language detector. Detect the language of the given text...`,
+        //   prompt: text,
+        //   max_tokens: 10,
+        //   temperature: 0.1,
+        // })
+        // const detectedLang = detectedLangText.trim().toLowerCase()
+
+        // Fallback to direct fetch for language detection if not using AI SDK imports
+        const requestBody = {
+          model: "gpt-4o-mini",
+          messages: [
+            {
+              role: "system",
+              content: `You are a language detector. Detect the language of the given text and respond with just the language code (hi for Hindi, en for English, bn for Bengali, te for Telugu, ta for Tamil, mr for Marathi, gu for Gujarati, kn for Kannada, ml for Malayalam, pa for Punjabi, or for Odia, as for Assamese, ur for Urdu). If you're unsure or the text is mixed, respond with the dominant language. Only respond with the language code, nothing else.`,
+            },
+            {
+              role: "user",
+              content: text,
+            },
+          ],
           max_tokens: 10,
           temperature: 0.1,
+        }
+
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKeys.openai}`,
+          },
+          body: JSON.stringify(requestBody),
         })
 
-        const detectedLang = detectedLangText.trim().toLowerCase()
+        if (!response.ok) {
+          console.error(`❌ [LANGUAGE_DETECT] OpenAI API error: ${response.status}`)
+          timer.end()
+          return currentLanguage || "hi"
+        }
+
+        const data = await response.json()
+        let detectedLang = currentLanguage || "hi"
+        if (data.choices && data.choices[0] && data.choices[0].message) {
+          detectedLang = data.choices[0].message.content.trim().toLowerCase()
+        }
+
         console.log(`🌐 [LANGUAGE_DETECT] Detected: ${detectedLang} from text: "${text}"`)
         timer.end()
         return detectedLang
@@ -842,41 +886,78 @@ RESPONSE GUIDELINES:
         console.log(`   - Model: ${agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini"}`)
 
         const openaiStreamTimer = createTimer("OPENAI_API_STREAM_CALL")
-        const result = await streamText({
-          // [^5][^6]
-          model: openai(agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini"),
-          messages: [{ role: "system", content: systemPrompt }, ...fullConversationHistory.slice(-10)],
-          max_tokens: 150,
-          temperature: agentConfig?.personality === "formal" ? 0.3 : 0.7,
-          onChunk: async ({ chunk }) => {
-            if (shouldInterruptAudio) {
-              console.log("🛑 [OPENAI_STREAM] Interrupted, stopping chunk processing.")
-              return // Stop processing chunks if interrupted
-            }
-            if (chunk.type === "text-delta") {
-              currentOpenAIResponseBuffer += chunk.text
-              // Process and synthesize text in chunks (e.g., by sentence)
-              await processOpenAIResponseChunk(currentOpenAIResponseBuffer, detectedLanguage)
-            }
-          },
-          onFinish: ({ text, finishReason, usage }) => {
-            openaiStreamTimer.end()
-            console.log(`🤖 [OPENAI] Stream finished. Total response: "${text}"`)
-            // Ensure any remaining buffered text is processed
-            if (currentOpenAIResponseBuffer.length > 0) {
-              processOpenAIResponseChunk(currentOpenAIResponseBuffer, detectedLanguage, true) // Force process remaining
-            }
-            fullConversationHistory.push({
-              role: "assistant",
-              content: text, // Save the full response
-            })
-            isProcessingOpenAIStream = false
-            timer.end()
-          },
-        })
 
-        // Await the full text to ensure onFinish is called and flag is reset.
-        await result.text
+        // Placeholder for AI SDK streamText.
+        // If you want to use AI SDK's streamText here, this file must be an ES Module.
+        // Otherwise, you'll need to use a direct fetch to OpenAI's API for streaming.
+        // Example of direct fetch for streaming (more complex to handle chunks):
+        const response = await fetch("https://api.openai.com/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKeys.openai}`,
+          },
+          body: JSON.stringify({
+            model: agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini",
+            messages: [{ role: "system", content: systemPrompt }, ...fullConversationHistory.slice(-10)],
+            max_tokens: 150,
+            temperature: agentConfig?.personality === "formal" ? 0.3 : 0.7,
+            stream: true, // Request streaming from OpenAI
+          }),
+        })
+        openaiStreamTimer.end()
+
+        if (!response.ok) {
+          console.error(`❌ [OPENAI] API error: ${response.status}`)
+          timer.end()
+          return null
+        }
+
+        // Process streaming response manually if not using AI SDK's streamText
+        const reader = response.body.getReader()
+        const decoder = new TextDecoder("utf-8")
+        let fullResponseText = ""
+
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+
+          const chunk = decoder.decode(value, { stream: true })
+          // OpenAI streaming sends data in 'data: {json}\n\n' format
+          const lines = chunk.split("\n").filter((line) => line.trim() !== "")
+          for (const line of lines) {
+            if (line.startsWith("data: ")) {
+              const jsonStr = line.substring(6)
+              if (jsonStr === "[DONE]") {
+                break
+              }
+              try {
+                const data = JSON.parse(jsonStr)
+                const content = data.choices[0]?.delta?.content || ""
+                if (content) {
+                  currentOpenAIResponseBuffer += content
+                  await processOpenAIResponseChunk(currentOpenAIResponseBuffer, detectedLanguage)
+                }
+              } catch (parseError) {
+                console.error("❌ [OPENAI_STREAM_PARSE] Error parsing stream chunk:", parseError.message)
+              }
+            }
+          }
+        }
+
+        // Ensure any remaining buffered text is processed at the end of the stream
+        if (currentOpenAIResponseBuffer.length > 0) {
+          await processOpenAIResponseChunk(currentOpenAIResponseBuffer, detectedLanguage, true)
+        }
+
+        // This will be the full accumulated response from the stream
+        fullResponseText = currentOpenAIResponseBuffer // After final processing, buffer should be empty or contain last part
+        fullConversationHistory.push({
+          role: "assistant",
+          content: fullResponseText, // Save the full response
+        })
+        console.log(`🤖 [OPENAI] Stream finished. Total response: "${fullResponseText}"`)
+        timer.end()
       } catch (error) {
         console.error(`❌ [OPENAI] Error during streaming: ${error.message}`)
         timer.end()
@@ -1230,3 +1311,5 @@ RESPONSE GUIDELINES:
     console.log(`✅ [SESSION] WebSocket ready, waiting for SIP start event`)
   })
 }
+
+module.exports = { setupUnifiedVoiceServer }
