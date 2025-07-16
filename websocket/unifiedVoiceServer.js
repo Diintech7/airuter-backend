@@ -1,18 +1,16 @@
-const WebSocket = require("ws")
-const mongoose = require("mongoose")
-const ApiKey = require("../models/ApiKey")
-const Agent = require("../models/AgentProfile")
-const connectDB = require("../config/db")
-connectDB()
+import WebSocket from "ws"
+import ApiKey from "../models/ApiKey"
+import Agent from "../models/AgentProfile"
 
-// New imports for AI SDK
+// AI SDK imports
 import { streamText } from "ai" // [^5][^6]
 import { openai } from "@ai-sdk/openai" // [^5][^6]
 
-const fetch = globalThis.fetch || require("node-fetch")
+// Node.js 18+ has global fetch, so no need for node-fetch polyfill
+const fetch = globalThis.fetch
 
 if (!fetch) {
-  console.error("❌ Fetch not available. Please use Node.js 18+ or install node-fetch@2")
+  console.error("❌ Fetch not available. Please use Node.js 18+.")
   process.exit(1)
 }
 
@@ -117,7 +115,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   // Deepgram uses different format
   const deepgramMapping = {
     hi: "hi",
-    en: "en-In",
+    en: "en-US",
     bn: "bn",
     te: "te",
     ta: "ta",
@@ -133,7 +131,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   return deepgramMapping[lang] || deepgramMapping[defaultLang] || "hi"
 }
 
-const setupUnifiedVoiceServer = (wss) => {
+export const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Dynamic Language Detection")
 
   wss.on("connection", (ws, req) => {
@@ -804,6 +802,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
       const timer = createTimer("OPENAI_PROCESSING_STREAM")
       isProcessingOpenAIStream = true
+      shouldInterruptAudio = false // Reset interruption flag for new OpenAI response
       currentOpenAIResponseBuffer = "" // Reset buffer for new response
 
       try {
@@ -1231,5 +1230,3 @@ RESPONSE GUIDELINES:
     console.log(`✅ [SESSION] WebSocket ready, waiting for SIP start event`)
   })
 }
-
-module.exports = { setupUnifiedVoiceServer }
