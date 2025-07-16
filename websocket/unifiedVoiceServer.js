@@ -180,7 +180,7 @@ const setupUnifiedVoiceServer = (wss) => {
       totalUtteranceEnds: 0,
     }
 
-    // INSTANT GREETING: Send audio bytes immediately when DID matches
+    // INSTANT GREETING: Always send text greeting and generate audio in background
     const sendInstantGreeting = async (didNumber) => {
       const overallTimer = createTimer("INSTANT_GREETING_TOTAL")
 
@@ -212,61 +212,23 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - Agent Name: ${agent.agentName}`)
         console.log(`   - DID: ${agent.didNumber}`)
         console.log(`   - First Message: ${agent.firstMessage}`)
-        console.log(`   - Audio Available: ${agent.audioBytes ? `YES (${agent.audioBytes.length} bytes)` : "NO"}`)
 
-        // Step 2: Send greeting immediately - NO WAITING
-        if (agent.audioBytes && agent.audioBytes.length > 0) {
-          const audioTimer = createTimer("INSTANT_AUDIO_SEND")
-          greetingInProgress = true // Set flag
-
-          // Send audio bytes immediately
-          const pythonBytesString = bufferToPythonBytesString(agent.audioBytes)
-
-          const audioResponse = {
-            data: {
+        // Always send text greeting immediately
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "instant_text_greeting",
               session_id: sessionId,
-              count: 1,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: agent.audioMetadata?.sampleRate || 22050,
-              channels: 1,
-              sample_width: 2,
-              is_streaming: false,
-              format: agent.audioMetadata?.format || "mp3",
-            },
-            type: "ai_response",
-          }
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            ws.send(
-              JSON.stringify({
-                type: "ai_response_complete",
-                session_id: sessionId,
-                total_chunks: 1,
-              }),
-            )
-            audioTimer.end()
-            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY`)
-          }
-          greetingInProgress = false // Reset flag after sending
-        } else {
-          // No pre-generated audio - send text immediately and generate audio in background
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(
-              JSON.stringify({
-                type: "instant_text_greeting",
-                session_id: sessionId,
-                message: agent.firstMessage,
-                agent: agent.agentName,
-                timestamp: new Date().toISOString(),
-              }),
-            )
-            console.log(`📝 [INSTANT_GREETING] Text greeting sent instantly`)
-          }
-
-          // Generate audio in background - don't wait for it
-          generateGreetingAudioBackground(agent)
+              message: agent.firstMessage,
+              agent: agent.agentName,
+              timestamp: new Date().toISOString(),
+            }),
+          )
+          console.log(`📝 [INSTANT_GREETING] Text greeting sent instantly`)
         }
+
+        // Always generate audio in background - don't wait for it
+        generateGreetingAudioBackground(agent)
 
         connectionGreetingSent = true
         overallTimer.end()
@@ -358,7 +320,7 @@ const setupUnifiedVoiceServer = (wss) => {
                 console.log(`🎵 [BACKGROUND_AUDIO] Audio generated and sent: ${audioBuffer.length} bytes`)
               }
 
-              // Save for future use
+              // Save for future use (even if not used for instant greeting, it's good to cache)
               await Agent.updateOne(
                 { _id: agent._id },
                 {
@@ -376,10 +338,11 @@ const setupUnifiedVoiceServer = (wss) => {
                 },
               )
 
-              console.log(`✅ [BACKGROUND_AUDIO] Audio saved for future instant use`)
+              console.log(`✅ [BACKGROUND_AUDIO] Audio saved for future reference`)
             }
           } else {
-            console.error(`❌ [BACKGROUND_AUDIO] Sarvam API error: ${response.status}`)
+            const errorText = await response.text()
+            console.error(`❌ [BACKGROUND_AUDIO] Sarvam API error: ${response.status}`, errorText)
           }
 
           timer.end()
@@ -685,7 +648,7 @@ const setupUnifiedVoiceServer = (wss) => {
         isSpeaking = true
         userUtteranceBuffer = "" // Clear buffer on new speech start
       } else if (data.type === "UtteranceEnd") {
-        console.log(`🎤 [DEEPGRAM] Utterance ended`)
+        console.log(`🎤 [DEEPgram] Utterance ended`)
         if (isSpeaking) {
           isSpeaking = false
           // If there's accumulated speech that hasn't been finalized by Deepgram yet, process it
