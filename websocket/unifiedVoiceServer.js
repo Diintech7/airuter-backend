@@ -30,77 +30,6 @@ const createTimer = (label) => {
   }
 }
 
-// Helper to normalize DID (pad with leading zeros to 11 digits, trim whitespace)
-function normalizeDID(did) {
-  let str = String(did).trim()
-  str = str.replace(/\D/g, "")
-  return str.padStart(11, "0")
-}
-
-// Language detection mapping
-const LANGUAGE_MAPPING = {
-  hi: "hi-IN",
-  en: "en-US",
-  bn: "bn-IN",
-  te: "te-IN",
-  ta: "ta-IN",
-  mr: "mr-IN",
-  gu: "gu-IN",
-  kn: "kn-IN",
-  ml: "ml-IN",
-  pa: "pa-IN",
-  or: "or-IN",
-  as: "as-IN",
-  ur: "ur-IN",
-}
-
-// Valid Sarvam voice options
-const VALID_SARVAM_VOICES = [
-  "meera",
-  "pavithra",
-  "maitreyi",
-  "arvind",
-  "amol",
-  "amartya",
-  "diya",
-  "neel",
-  "misha",
-  "vian",
-  "arjun",
-  "maya",
-  "anushka",
-  "abhilash",
-  "manisha",
-  "vidya",
-  "arya",
-  "karun",
-  "hitesh",
-]
-
-// Voice mapping function to ensure valid voice selection
-const getValidSarvamVoice = (voiceSelection) => {
-  if (!voiceSelection || voiceSelection === "default") {
-    return "anushka" // Default fallback
-  }
-
-  // If it's already a valid Sarvam voice, return it
-  if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
-    return voiceSelection
-  }
-
-  // Map common voice selections to valid Sarvam voices
-  const voiceMapping = {
-    "male-professional": "arvind",
-    "female-professional": "anushka",
-    "male-friendly": "amol",
-    "female-friendly": "maya",
-    neutral: "anushka",
-    default: "anushka",
-  }
-
-  return voiceMapping[voiceSelection] || "anushka"
-}
-
 // Helper to split text into sentences for chunked TTS
 const splitIntoSentences = (text) => {
   // Basic sentence splitting, can be improved with a more robust NLP library if needed
@@ -108,13 +37,29 @@ const splitIntoSentences = (text) => {
   return text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text]
 }
 
-// Language mapping functions
-const getSarvamLanguage = (languageCode) => {
-  return LANGUAGE_MAPPING[languageCode] || languageCode
+// Get supported Sarvam language code
+const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  if (lang === "hi") return "hi" // Explicitly return 'hi' for Hindi as requested
+  if (lang === "en") return "en-US" // Sarvam typically uses en-US for English
+  // Default for other Indian languages, assuming they need -IN extension
+  return `${lang}-IN`
 }
 
-const getDeepgramLanguage = (languageCode) => {
-  return LANGUAGE_MAPPING[languageCode] || languageCode
+// Get Deepgram language code
+const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
+  const lang = detectedLang?.toLowerCase() || defaultLang
+  // Deepgram uses 'hi' for Hindi, 'en-US' for English
+  if (lang === "hi") return "hi"
+  if (lang === "en") return "en-US"
+  // For other Indian languages, Deepgram might use just the base code or specific variants.
+  return lang // Default to base code for others
+}
+
+// Function to get valid Sarvam voice
+const getValidSarvamVoice = (voiceSelection) => {
+  // Placeholder implementation, replace with actual logic
+  return voiceSelection || "defaultVoice"
 }
 
 const setupUnifiedVoiceServer = (wss) => {
@@ -184,22 +129,19 @@ const setupUnifiedVoiceServer = (wss) => {
       const overallTimer = createTimer("INSTANT_GREETING_TOTAL")
 
       try {
-        // Step 1: DID lookup
+        // Step 1: DID lookup - using didNumber directly
         const didTimer = createTimer("DID_LOOKUP")
-        const originalDid = didNumber
-        const normalizedDid = normalizeDID(didNumber)
 
         console.log(`🔍 [INSTANT_GREETING] DID lookup started:`, {
-          originalDid,
-          normalizedDid,
+          didNumber,
           timestamp: new Date().toISOString(),
         })
 
-        const agent = await Agent.findOne({ didNumber: normalizedDid }).lean()
+        const agent = await Agent.findOne({ didNumber: didNumber }).lean() // Use didNumber directly
         didTimer.end()
 
         if (!agent) {
-          console.error(`❌ [INSTANT_GREETING] No agent found for DID: ${normalizedDid}`)
+          console.error(`❌ [INSTANT_GREETING] No agent found for DID: ${didNumber}`)
           overallTimer.end()
           return null
         }
@@ -230,7 +172,7 @@ const setupUnifiedVoiceServer = (wss) => {
               count: 1,
               audio_bytes_to_play: pythonBytesString,
               sample_rate: agent.audioMetadata?.sampleRate || 22050,
-              channels: agent.audioMetadata?.channels || 1,
+              channels: 1,
               sample_width: 2,
               is_streaming: false,
               format: agent.audioMetadata?.format || "mp3",
