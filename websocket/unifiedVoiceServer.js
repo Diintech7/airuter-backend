@@ -265,8 +265,6 @@ const setupUnifiedVoiceServer = (wss) => {
               JSON.stringify({
                 type: "instant_text_greeting",
                 session_id: sessionId,
-                message: agent.firstMessage,
-                agent: agent.agentName,
                 timestamp: new Date().toISOString(),
               }),
             )
@@ -318,9 +316,9 @@ const setupUnifiedVoiceServer = (wss) => {
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
-            speech_sample_rate: 16000,
-            enable_preprocessing: false,
-            model: "bulbul:v1",
+            speech_sample_rate: 22050,
+            enable_preprocessing: true,
+            model: "bulbul:v2",
           }
 
           const response = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -676,7 +674,6 @@ const setupUnifiedVoiceServer = (wss) => {
                     confidence: confidence,
                     is_final: false,
                     language: currentLanguage,
-                    agent: agentConfig?.agentName,
                   }),
                 )
               }
@@ -1080,12 +1077,6 @@ RESPONSE GUIDELINES:
                   session_id: sessionId,
                   agent: agentConfig.agentName,
                   did_number: destinationNumber,
-                  tenant_id: tenantId,
-                  providers: {
-                    stt: agentConfig.sttSelection || "deepgram",
-                    tts: agentConfig.ttsSelection || "sarvam",
-                    llm: agentConfig.llmSelection || "openai",
-                  },
                   message: "Agent matched and greeting sent",
                 }),
               )
