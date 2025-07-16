@@ -1147,7 +1147,7 @@ RESPONSE GUIDELINES:
       connectionGreetingSent = false
       userUtteranceBuffer = "" // Clear buffer
       isSpeaking = false
-      shouldInterruptAudio = false
+      shouldInterruptAudio = true
       greetingInProgress = false
       fullConversationHistory = []
 
