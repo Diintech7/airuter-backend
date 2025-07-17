@@ -40,7 +40,7 @@ const splitIntoSentences = (text) => {
 // Language detection mapping (re-added for clarity and consistency)
 const LANGUAGE_MAPPING = {
   hi: "hi-IN", // Sarvam likely needs hi-IN
-  en: "en-US",
+  en: "en-IN",
   bn: "bn-IN",
   te: "te-IN",
   ta: "ta-IN",
@@ -64,9 +64,9 @@ const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
 // Get Deepgram language code
 const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang
-  // Deepgram uses 'hi' for Hindi, 'en-US' for English
+  // Deepgram uses 'hi' for Hindi, 'en-IN' for English
   if (lang === "hi") return "hi"
-  if (lang === "en") return "en-US"
+  if (lang === "en") return "en-IN"
   // For other Indian languages, Deepgram might use just the base code or specific variants.
   return lang // Default to base code for others
 }
