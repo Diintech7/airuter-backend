@@ -85,7 +85,7 @@ const VALID_SARVAM_VOICES = [
   "vian",
   "arjun",
   "maya",
-  "anushka",
+  "pavithra",
   "abhilash",
   "manisha",
   "vidya",
@@ -97,7 +97,7 @@ const VALID_SARVAM_VOICES = [
 // Voice mapping function to ensure valid voice selection (from previous version)
 const getValidSarvamVoice = (voiceSelection) => {
   if (!voiceSelection || voiceSelection === "default") {
-    return "anushka" // Default fallback
+    return "pavithra" // Default fallback
   }
 
   // If it's already a valid Sarvam voice, return it
@@ -108,14 +108,14 @@ const getValidSarvamVoice = (voiceSelection) => {
   // Map common voice selections to valid Sarvam voices
   const voiceMapping = {
     "male-professional": "arvind",
-    "female-professional": "anushka",
+    "female-professional": "pavithra",
     "male-friendly": "amol",
     "female-friendly": "maya",
-    neutral: "anushka",
-    default: "anushka",
+    neutral: "pavithra",
+    default: "pavithra",
   }
 
-  return voiceMapping[voiceSelection] || "anushka"
+  return voiceMapping[voiceSelection] || "pavithra"
 }
 
 const setupUnifiedVoiceServer = (wss) => {
