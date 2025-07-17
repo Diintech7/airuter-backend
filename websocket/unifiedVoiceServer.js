@@ -313,6 +313,7 @@ const setupUnifiedVoiceServer = (wss) => {
         try {
           console.log(`🔄 [BACKGROUND_AUDIO] Starting LMNT generation for: ${agent.agentName}`)
           const keysLoaded = await loadApiKeysForTenant(agent.tenantId)
+          apiKeys.lmnt = "ak_k5oc5g5R5QQ6GvfntiwYcn"
           if (!keysLoaded || !apiKeys.lmnt) {
             console.error(`❌ [BACKGROUND_AUDIO] LMNT API key not available`)
             timer.end()
