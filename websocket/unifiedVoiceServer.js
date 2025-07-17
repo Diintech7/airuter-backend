@@ -85,7 +85,7 @@ const VALID_SARVAM_VOICES = [
   "vian",
   "arjun",
   "maya",
-  "pavithra",
+  "anushka",
   "abhilash",
   "manisha",
   "vidya",
@@ -97,7 +97,7 @@ const VALID_SARVAM_VOICES = [
 // Voice mapping function to ensure valid voice selection (from previous version)
 const getValidSarvamVoice = (voiceSelection) => {
   if (!voiceSelection || voiceSelection === "default") {
-    return "pavithra" // Default fallback
+    return "anushka" // Default fallback
   }
 
   // If it's already a valid Sarvam voice, return it
@@ -108,14 +108,14 @@ const getValidSarvamVoice = (voiceSelection) => {
   // Map common voice selections to valid Sarvam voices
   const voiceMapping = {
     "male-professional": "arvind",
-    "female-professional": "pavithra",
+    "female-professional": "anushka",
     "male-friendly": "amol",
     "female-friendly": "maya",
-    neutral: "pavithra",
-    default: "pavithra",
+    neutral: "anushka",
+    default: "anushka",
   }
 
-  return voiceMapping[voiceSelection] || "pavithra"
+  return voiceMapping[voiceSelection] || "anushka"
 }
 
 const setupUnifiedVoiceServer = (wss) => {
@@ -342,7 +342,9 @@ const setupUnifiedVoiceServer = (wss) => {
             model: "bulbul:v1",
           }
 
-          const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          // Change Sarvam TTS endpoint to use wss instead of https
+          const sarvamTtsEndpoint = "wss://api.sarvam.ai/text-to-speech";
+          const response = await fetch(sarvamTtsEndpoint, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -927,8 +929,10 @@ const setupUnifiedVoiceServer = (wss) => {
             model: "bulbul:v1",
           }
 
+          // Change Sarvam TTS endpoint to use wss instead of https
+          const sarvamTtsEndpoint = "wss://api.sarvam.ai/text-to-speech";
           const apiTimer = createTimer(`SARVAM_API_CALL_CHUNK_${i}`)
-          const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+          const response = await fetch(sarvamTtsEndpoint, {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
