@@ -246,12 +246,34 @@ const setupUnifiedVoiceServer = (wss) => {
 
           // Convert string to Buffer (raw bytes)
           const audioBuffer = Buffer.from(agent.audioBytes, 'latin1')
-          console.log(`[INSTANT_GREETING] Sending audioBytes as raw bytes (Buffer), length: ${audioBuffer.length}`)
+          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+          console.log(`[INSTANT_GREETING] Sending audioBytes as Python bytes string, length: ${pythonBytesString.length}`)
+
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: 1,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: agent.audioMetadata?.sampleRate || 22050,
+              channels: 1,
+              sample_width: 2,
+              is_streaming: false,
+              format: agent.audioMetadata?.format || "mp3",
+            },
+            type: "ai_response",
+          }
 
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(audioBuffer) // Send as binary
+            ws.send(JSON.stringify(audioResponse))
+            ws.send(
+              JSON.stringify({
+                type: "ai_response_complete",
+                session_id: sessionId,
+                total_chunks: 1,
+              }),
+            )
             audioTimer.end()
-            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio (raw bytes) sent INSTANTLY (${audioBuffer.length} bytes)`)
+            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio (Python bytes string) sent INSTANTLY (${pythonBytesString.length} chars)`)
           }
           greetingInProgress = false // Reset flag after sending
         } else {
@@ -332,14 +354,14 @@ const setupUnifiedVoiceServer = (wss) => {
             const responseData = await response.json()
             if (responseData.audios && responseData.audios.length > 0) {
               const audioBuffer = Buffer.from(responseData.audios[0], "base64")
-              const base64Audio = bufferToPythonBytesString(audioBuffer)
+              const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
               // Send audio immediately
               const audioResponse = {
                 data: {
                   session_id: sessionId,
                   count: 1,
-                  audio_bytes_to_play: base64Audio,
+                  audio_bytes_to_play: pythonBytesString,
                   sample_rate: 22050,
                   channels: 1,
                   sample_width: 2,
@@ -938,13 +960,13 @@ RESPONSE GUIDELINES:
 
           const audioBase64 = responseData.audios[0]
           const audioBuffer = Buffer.from(audioBase64, "base64")
-          const base64Audio = bufferToPythonBytesString(audioBuffer)
+          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
           const audioResponse = {
             data: {
               session_id: sessionId,
               count: i + 1, // Chunk count
-              audio_bytes_to_play: base64Audio,
+              audio_bytes_to_play: pythonBytesString,
               sample_rate: 22050,
               channels: 1,
               sample_width: 2,
