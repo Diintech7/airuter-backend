@@ -1001,23 +1001,21 @@ RESPONSE GUIDELINES:
       }
     }
 
-    // Utility function to convert Buffer to base64 string for audio transmission
+    // Utility function to convert Buffer to Python bytes string for SIP
     const bufferToPythonBytesString = (buffer) => {
-      if (!Buffer.isBuffer(buffer)) {
-        console.error(`❌ [BUFFER_CONVERSION] Input is not a Buffer: ${typeof buffer}`)
-        return ""
+      let result = "b'";
+      for (let i = 0; i < buffer.length; i++) {
+        const byte = buffer[i];
+        if (byte >= 32 && byte <= 126 && byte !== 92 && byte !== 39) {
+          // printable ASCII except backslash and single quote
+          result += String.fromCharCode(byte);
+        } else {
+          result += "\\x" + byte.toString(16).padStart(2, "0");
+        }
       }
-
-      try {
-        // Convert buffer to base64 string for efficient transmission
-        const base64String = buffer.toString('base64')
-        console.log(`✅ [BUFFER_CONVERSION] Successfully converted ${buffer.length} bytes to base64`)
-        return base64String
-      } catch (error) {
-        console.error(`❌ [BUFFER_CONVERSION] Error converting buffer: ${error.message}`)
-        return ""
-      }
-    }
+      result += "'";
+      return result;
+    };
 
     // Utility function to validate and fix audio data from database
     const validateAndFixAudioData = (audioData) => {
