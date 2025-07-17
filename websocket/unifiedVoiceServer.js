@@ -118,6 +118,41 @@ const getValidSarvamVoice = (voiceSelection) => {
   return voiceMapping[voiceSelection] || "anushka"
 }
 
+// Sarvam TTS WebSocket client
+const sarvamTTSWebSocket = (requestBody, apiKey) => {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket('wss://api.sarvam.ai/text-to-speech', {
+      headers: {
+        'API-Subscription-Key': apiKey,
+        'Content-Type': 'application/json',
+      },
+    });
+    let responseData = '';
+    ws.on('open', () => {
+      ws.send(JSON.stringify(requestBody));
+    });
+    ws.on('message', (data) => {
+      // If data is Buffer, convert to string
+      let str = data;
+      if (Buffer.isBuffer(data)) str = data.toString('utf8');
+      responseData += str;
+      // Try to parse JSON (Sarvam may send all at once or in chunks)
+      try {
+        const json = JSON.parse(responseData);
+        ws.close();
+        resolve(json);
+      } catch (e) {
+        // Not a complete JSON yet, wait for more data
+      }
+    });
+    ws.on('error', (err) => {
+      ws.close();
+      reject(err);
+    });
+    ws.on('close', () => {});
+  });
+};
+
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Dynamic Language Detection")
 
@@ -344,76 +379,61 @@ const setupUnifiedVoiceServer = (wss) => {
 
           // Change Sarvam TTS endpoint to use wss instead of https
           const sarvamTtsEndpoint = "wss://api.sarvam.ai/text-to-speech";
-          const response = await fetch(sarvamTtsEndpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "API-Subscription-Key": apiKeys.sarvam,
-            },
-            body: JSON.stringify(requestBody),
-          })
+          const response = await sarvamTTSWebSocket(requestBody, apiKeys.sarvam);
 
           sarvamTimer.end()
 
-          if (response.ok) {
-            const responseData = await response.json()
-            if (responseData.audios && responseData.audios.length > 0) {
-              const audioBuffer = Buffer.from(responseData.audios[0], "base64")
-              const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+          if (response.audios && response.audios.length > 0) {
+            const audioBuffer = Buffer.from(response.audios[0], "base64")
+            const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
-              // Send audio immediately
-              const audioResponse = {
-                data: {
-                  session_id: sessionId,
-                  count: 1,
-                  audio_bytes_to_play: pythonBytesString,
-                  sample_rate: 22050,
-                  channels: 1,
-                  sample_width: 2,
-                  is_streaming: false,
-                  format: "mp3",
-                },
-                type: "ai_response",
-              }
-
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify(audioResponse))
-                ws.send(
-                  JSON.stringify({
-                    type: "ai_response_complete",
-                    session_id: sessionId,
-                    total_chunks: 1,
-                  }),
-                )
-                console.log(`🎵 [BACKGROUND_AUDIO] Audio generated and sent: ${audioBuffer.length} bytes`)
-              }
-
-              // Save for future use (even if not used for instant greeting, it's good to cache)
-              await Agent.updateOne(
-                { _id: agent._id },
-                {
-                  audioBytes: audioBuffer,
-                  audioMetadata: {
-                    format: "mp3",
-                    sampleRate: 22050,
-                    channels: 1,
-                    size: audioBuffer.length,
-                    generatedAt: new Date(),
-                    language: currentLanguage,
-                    speaker: validVoice,
-                    provider: "sarvam",
-                  },
-                },
-              )
-
-              console.log(`✅ [BACKGROUND_AUDIO] Audio saved for future reference`)
+            // Send audio immediately
+            const audioResponse = {
+              data: {
+                session_id: sessionId,
+                count: 1,
+                audio_bytes_to_play: pythonBytesString,
+                sample_rate: 22050,
+                channels: 1,
+                sample_width: 2,
+                is_streaming: false,
+                format: "mp3",
+              },
+              type: "ai_response",
             }
-          } else {
-            const errorText = await response.text()
-            console.error(`❌ [BACKGROUND_AUDIO] Sarvam API error: ${response.status}`, errorText)
-          }
 
-          timer.end()
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(audioResponse))
+              ws.send(
+                JSON.stringify({
+                  type: "ai_response_complete",
+                  session_id: sessionId,
+                  total_chunks: 1,
+                }),
+              )
+              console.log(`🎵 [BACKGROUND_AUDIO] Audio generated and sent: ${audioBuffer.length} bytes`)
+            }
+
+            // Save for future use (even if not used for instant greeting, it's good to cache)
+            await Agent.updateOne(
+              { _id: agent._id },
+              {
+                audioBytes: audioBuffer,
+                audioMetadata: {
+                  format: "mp3",
+                  sampleRate: 22050,
+                  channels: 1,
+                  size: audioBuffer.length,
+                  generatedAt: new Date(),
+                  language: currentLanguage,
+                  speaker: validVoice,
+                  provider: "sarvam",
+                },
+              },
+            )
+
+            console.log(`✅ [BACKGROUND_AUDIO] Audio saved for future reference`)
+          }
         } catch (error) {
           console.error(`❌ [BACKGROUND_AUDIO] Error: ${error.message}`)
           timer.end()
@@ -931,32 +951,13 @@ const setupUnifiedVoiceServer = (wss) => {
 
           // Change Sarvam TTS endpoint to use wss instead of https
           const sarvamTtsEndpoint = "wss://api.sarvam.ai/text-to-speech";
-          const apiTimer = createTimer(`SARVAM_API_CALL_CHUNK_${i}`)
-          const response = await fetch(sarvamTtsEndpoint, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "API-Subscription-Key": apiKeys.sarvam,
-            },
-            body: JSON.stringify(requestBody),
-          })
-          apiTimer.end()
+          const response = await sarvamTTSWebSocket(requestBody, apiKeys.sarvam);
 
-          if (!response.ok) {
-            const errorText = await response.text()
-            console.error(`❌ [SARVAM] API error for chunk ${i + 1}: ${response.status}`, errorText)
-            throw new Error(`Sarvam API error: ${response.status}`)
-          }
-
-          const parseTimer = createTimer(`SARVAM_RESPONSE_PARSE_CHUNK_${i}`)
-          const responseData = await response.json()
-          parseTimer.end()
-
-          if (!responseData.audios || responseData.audios.length === 0) {
+          if (!response.audios || response.audios.length === 0) {
             throw new Error("No audio data received for chunk")
           }
 
-          const audioBase64 = responseData.audios[0]
+          const audioBase64 = response.audios[0]
           const audioBuffer = Buffer.from(audioBase64, "base64")
           const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
