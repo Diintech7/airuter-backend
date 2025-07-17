@@ -193,7 +193,18 @@ const setupUnifiedVoiceServer = (wss) => {
           timestamp: new Date().toISOString(),
         })
 
-        const agent = await Agent.findOne({ didNumber: didNumber }).lean() // Use didNumber directly
+        // Try to find the agent with more detailed logging
+        const agent = await Agent.findOne({ didNumber: didNumber }).lean()
+        
+        console.log(`🔍 [INSTANT_GREETING] Database query result:`, {
+          found: !!agent,
+          agentId: agent?._id,
+          agentName: agent?.agentName,
+          hasAudioBytes: !!agent?.audioBytes,
+          audioBytesType: typeof agent?.audioBytes,
+          audioBytesLength: agent?.audioBytes?.length,
+        })
+        
         didTimer.end()
 
         if (!agent) {
@@ -228,14 +239,36 @@ const setupUnifiedVoiceServer = (wss) => {
           const audioTimer = createTimer("INSTANT_AUDIO_SEND")
           greetingInProgress = true // Set flag
 
+          // Ensure audioBytes is a proper Buffer
+          let audioBuffer = agent.audioBytes
+          if (!Buffer.isBuffer(audioBuffer)) {
+            // If it's not a Buffer, try to convert it
+            if (typeof audioBuffer === 'string') {
+              // If it's a base64 string
+              audioBuffer = Buffer.from(audioBuffer, 'base64')
+            } else if (audioBuffer && typeof audioBuffer === 'object' && audioBuffer.buffer) {
+              // If it's a TypedArray or similar
+              audioBuffer = Buffer.from(audioBuffer.buffer)
+            } else {
+              // Try to convert to Buffer directly
+              audioBuffer = Buffer.from(audioBuffer)
+            }
+          }
+
+          console.log(`🔧 [INSTANT_GREETING] Audio buffer details:`)
+          console.log(`   - Type: ${typeof audioBuffer}`)
+          console.log(`   - Is Buffer: ${Buffer.isBuffer(audioBuffer)}`)
+          console.log(`   - Length: ${audioBuffer.length} bytes`)
+          console.log(`   - First 10 bytes: ${audioBuffer.slice(0, 10).toString('hex')}`)
+
           // Send audio bytes immediately
-          const pythonBytesString = bufferToPythonBytesString(agent.audioBytes)
+          const base64Audio = bufferToPythonBytesString(audioBuffer)
 
           const audioResponse = {
             data: {
               session_id: sessionId,
               count: 1,
-              audio_bytes_to_play: pythonBytesString,
+              audio_bytes_to_play: base64Audio,
               sample_rate: agent.audioMetadata?.sampleRate || 22050,
               channels: 1,
               sample_width: 2,
@@ -255,16 +288,20 @@ const setupUnifiedVoiceServer = (wss) => {
               }),
             )
             audioTimer.end()
-            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY`)
+            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY (${audioBuffer.length} bytes)`)
           }
           greetingInProgress = false // Reset flag after sending
         } else {
           // No pre-generated audio - send text immediately and generate audio in background
+          console.log(`⚠️ [INSTANT_GREETING] No pre-generated audio found, sending text greeting`)
+          
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
               JSON.stringify({
                 type: "instant_text_greeting",
                 session_id: sessionId,
+                message: agent.firstMessage,
+                agent: agent.agentName,
                 timestamp: new Date().toISOString(),
               }),
             )
@@ -316,9 +353,9 @@ const setupUnifiedVoiceServer = (wss) => {
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
-            speech_sample_rate: 22050,
-            enable_preprocessing: true,
-            model: "bulbul:v2",
+            speech_sample_rate: 16000,
+            enable_preprocessing: false,
+            model: "bulbul:v1",
           }
 
           const response = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -336,14 +373,14 @@ const setupUnifiedVoiceServer = (wss) => {
             const responseData = await response.json()
             if (responseData.audios && responseData.audios.length > 0) {
               const audioBuffer = Buffer.from(responseData.audios[0], "base64")
-              const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+              const base64Audio = bufferToPythonBytesString(audioBuffer)
 
               // Send audio immediately
               const audioResponse = {
                 data: {
                   session_id: sessionId,
                   count: 1,
-                  audio_bytes_to_play: pythonBytesString,
+                  audio_bytes_to_play: base64Audio,
                   sample_rate: 22050,
                   channels: 1,
                   sample_width: 2,
@@ -674,6 +711,7 @@ const setupUnifiedVoiceServer = (wss) => {
                     confidence: confidence,
                     is_final: false,
                     language: currentLanguage,
+                    agent: agentConfig?.agentName,
                   }),
                 )
               }
@@ -941,13 +979,13 @@ RESPONSE GUIDELINES:
 
           const audioBase64 = responseData.audios[0]
           const audioBuffer = Buffer.from(audioBase64, "base64")
-          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+          const base64Audio = bufferToPythonBytesString(audioBuffer)
 
           const audioResponse = {
             data: {
               session_id: sessionId,
               count: i + 1, // Chunk count
-              audio_bytes_to_play: pythonBytesString,
+              audio_bytes_to_play: base64Audio,
               sample_rate: 22050,
               channels: 1,
               sample_width: 2,
@@ -981,19 +1019,22 @@ RESPONSE GUIDELINES:
       }
     }
 
-    // Utility function
+    // Utility function to convert Buffer to base64 string for audio transmission
     const bufferToPythonBytesString = (buffer) => {
-      let result = "b'"
-      for (let i = 0; i < buffer.length; i++) {
-        const byte = buffer[i]
-        if (byte >= 32 && byte <= 126 && byte !== 92 && byte !== 39) {
-          result += String.fromCharCode(byte)
-        } else {
-          result += "\\x" + byte.toString(16).padStart(2, "0")
-        }
+      if (!Buffer.isBuffer(buffer)) {
+        console.error(`❌ [BUFFER_CONVERSION] Input is not a Buffer: ${typeof buffer}`)
+        return ""
       }
-      result += "'"
-      return result
+
+      try {
+        // Convert buffer to base64 string for efficient transmission
+        const base64String = buffer.toString('base64')
+        console.log(`✅ [BUFFER_CONVERSION] Successfully converted ${buffer.length} bytes to base64`)
+        return base64String
+      } catch (error) {
+        console.error(`❌ [BUFFER_CONVERSION] Error converting buffer: ${error.message}`)
+        return ""
+      }
     }
 
     // WebSocket message handling
@@ -1077,6 +1118,12 @@ RESPONSE GUIDELINES:
                   session_id: sessionId,
                   agent: agentConfig.agentName,
                   did_number: destinationNumber,
+                  tenant_id: tenantId,
+                  providers: {
+                    stt: agentConfig.sttSelection || "deepgram",
+                    tts: agentConfig.ttsSelection || "sarvam",
+                    llm: agentConfig.llmSelection || "openai",
+                  },
                   message: "Agent matched and greeting sent",
                 }),
               )
