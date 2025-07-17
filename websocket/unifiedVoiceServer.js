@@ -3,7 +3,7 @@ const mongoose = require("mongoose")
 const ApiKey = require("../models/ApiKey")
 const Agent = require("../models/AgentProfile")
 const connectDB = require("../config/db")
-const { SarvamAIClient } = require("sarvamai");
+const { LMNTStreamingClient } = require("../services/lmntStreaming")
 connectDB()
 
 const fetch = globalThis.fetch || require("node-fetch")
@@ -119,93 +119,10 @@ const getValidSarvamVoice = (voiceSelection) => {
   return voiceMapping[voiceSelection] || "anushka"
 }
 
-// Sarvam TTS WebSocket client
-const sarvamTTSWebSocket = (requestBody, apiKey) => {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket('wss://api.sarvam.ai/text-to-speech', {
-      headers: {
-        'API-Subscription-Key': apiKey,
-        'Content-Type': 'application/json',
-      },
-    });
-    let responseData = '';
-    ws.on('open', () => {
-      ws.send(JSON.stringify(requestBody));
-    });
-    ws.on('message', (data) => {
-      // If data is Buffer, convert to string
-      let str = data;
-      if (Buffer.isBuffer(data)) str = data.toString('utf8');
-      responseData += str;
-      // Try to parse JSON (Sarvam may send all at once or in chunks)
-      try {
-        const json = JSON.parse(responseData);
-        ws.close();
-        resolve(json);
-      } catch (e) {
-        // Not a complete JSON yet, wait for more data
-      }
-    });
-    ws.on('error', (err) => {
-      ws.close();
-      reject(err);
-    });
-    ws.on('close', () => {});
-  });
-};
-
-// Helper to stream TTS audio from Sarvam using the official client
-async function sarvamTTSStream({ text, speaker, language, apiKey, model = "bulbul:v2" }) {
-  return new Promise(async (resolve, reject) => {
-    const client = new SarvamAIClient({
-      apiSubscriptionKey: apiKey,
-    });
-    const socket = await client.textToSpeechStreaming.connect({ model });
-    let audioChunks = [];
-    let isClosed = false;
-    socket.on("open", () => {
-      socket.configureConnection({
-        type: "config",
-        data: {
-          speaker,
-          target_language_code: language,
-        },
-      });
-      socket.convert(text);
-    });
-    socket.on("message", (message) => {
-      if (message.type === "audio") {
-        audioChunks.push(Buffer.from(message.data.audio, "base64"));
-      }
-    });
-    socket.on("close", () => {
-      if (!isClosed) {
-        isClosed = true;
-        resolve(Buffer.concat(audioChunks));
-      }
-    });
-    socket.on("error", (error) => {
-      if (!isClosed) {
-        isClosed = true;
-        reject(error);
-      }
-    });
-    setTimeout(() => {
-      if (!isClosed) {
-        isClosed = true;
-        socket.close();
-        resolve(Buffer.concat(audioChunks));
-      }
-    }, 15000);
-  });
-}
-
 const setupUnifiedVoiceServer = (wss) => {
   console.log("🚀 Unified Voice WebSocket server initialized with Dynamic Language Detection")
 
   wss.on("connection", (ws, req) => {
-    let conversationStartTime = Date.now();
-    let stepTimings = [];
     console.log("🔗 New unified voice connection established")
     console.log("📡 SIP Connection Details:", {
       timestamp: new Date().toISOString(),
@@ -226,7 +143,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // API keys cache
     const apiKeys = {
       deepgram: null,
-      sarvam: null,
+      lmnt: null, // Changed from sarvam to lmnt
       openai: null,
     }
 
@@ -388,52 +305,56 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Background audio generation (non-blocking)
+    // Update generateGreetingAudioBackground to use LMNT
     const generateGreetingAudioBackground = async (agent) => {
-      // Don't await - run in background
       setImmediate(async () => {
         const timer = createTimer("BACKGROUND_AUDIO_GENERATION")
-        greetingInProgress = true // Set flag
-
+        greetingInProgress = true
         try {
-          console.log(`🔄 [BACKGROUND_AUDIO] Starting generation for: ${agent.agentName}`)
-
-          // Load API keys first
+          console.log(`🔄 [BACKGROUND_AUDIO] Starting LMNT generation for: ${agent.agentName}`)
           const keysLoaded = await loadApiKeysForTenant(agent.tenantId)
-          if (!keysLoaded || !apiKeys.sarvam) {
-            console.error(`❌ [BACKGROUND_AUDIO] API keys not available`)
+          if (!keysLoaded || !apiKeys.lmnt) {
+            console.error(`❌ [BACKGROUND_AUDIO] LMNT API key not available`)
             timer.end()
             greetingInProgress = false
             return
           }
-
-          const validVoice = getValidSarvamVoice(agent.voiceSelection)
-          const sarvamLanguage = getSarvamLanguage(currentLanguage)
-
-          const audioBuffer = await sarvamTTSStream({
-            text: agent.firstMessage,
-            speaker: validVoice,
-            language: sarvamLanguage,
-            apiKey: apiKeys.sarvam,
-            model: "bulbul:v2",
-          });
-          const pythonBytesString = bufferToPythonBytesString(audioBuffer);
-
+          const voice = agent.voiceSelection || "lily"
+          const sampleRate = 16000
+          const format = "mp3"
+          const options = {
+            voice,
+            format,
+            sample_rate: sampleRate,
+            speed: 1.0,
+            conversational: true,
+          }
+          const lmntClient = new LMNTStreamingClient(apiKeys.lmnt)
+          await lmntClient.connect(options)
+          let audioBuffers = []
+          await lmntClient.synthesize(
+            agent.firstMessage,
+            (audioChunk) => {
+              audioBuffers.push(Buffer.from(audioChunk))
+            },
+            (extras) => {}
+          )
+          const audioBuffer = Buffer.concat(audioBuffers)
+          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
           // Send audio immediately
           const audioResponse = {
             data: {
               session_id: sessionId,
               count: 1,
               audio_bytes_to_play: pythonBytesString,
-              sample_rate: 22050,
+              sample_rate: sampleRate,
               channels: 1,
               sample_width: 2,
               is_streaming: false,
-              format: "mp3",
+              format,
             },
             type: "ai_response",
           }
-
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify(audioResponse))
             ws.send(
@@ -441,35 +362,34 @@ const setupUnifiedVoiceServer = (wss) => {
                 type: "ai_response_complete",
                 session_id: sessionId,
                 total_chunks: 1,
-              }),
+              })
             )
-            console.log(`🎵 [BACKGROUND_AUDIO] Audio generated and sent: ${audioBuffer.length} bytes`)
+            console.log(`🎵 [BACKGROUND_AUDIO] LMNT audio generated and sent: ${audioBuffer.length} bytes`)
           }
-
-          // Save for future use (even if not used for instant greeting, it's good to cache)
+          // Save for future use
           await Agent.updateOne(
             { _id: agent._id },
             {
               audioBytes: audioBuffer,
               audioMetadata: {
-                format: "mp3",
-                sampleRate: 22050,
+                format,
+                sampleRate,
                 channels: 1,
                 size: audioBuffer.length,
                 generatedAt: new Date(),
                 language: currentLanguage,
-                speaker: validVoice,
-                provider: "sarvam",
+                speaker: voice,
+                provider: "lmnt",
               },
             },
           )
-
-          console.log(`✅ [BACKGROUND_AUDIO] Audio saved for future reference`)
+          console.log(`✅ [BACKGROUND_AUDIO] LMNT audio saved for future reference`)
+          timer.end()
         } catch (error) {
-          console.error(`❌ [BACKGROUND_AUDIO] Error: ${error.message}`)
+          console.error(`❌ [BACKGROUND_AUDIO] LMNT Error: ${error.message}`)
           timer.end()
         } finally {
-          greetingInProgress = false // Reset flag
+          greetingInProgress = false
         }
       })
     }
@@ -504,9 +424,9 @@ const setupUnifiedVoiceServer = (wss) => {
               apiKeys.deepgram = decryptedKey
               console.log(`✅ [API_KEYS] Deepgram key loaded`)
               break
-            case "sarvam":
-              apiKeys.sarvam = decryptedKey
-              console.log(`✅ [API_KEYS] Sarvam key loaded`)
+            case "lmnt":
+              apiKeys.lmnt = decryptedKey
+              console.log(`✅ [API_KEYS] LMNT key loaded`)
               break
             case "openai":
               apiKeys.openai = decryptedKey
@@ -527,7 +447,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         console.log(`🔑 [API_KEYS] Providers ready:`)
         console.log(`   - Deepgram (STT): ${apiKeys.deepgram ? "✅" : "❌"}`)
-        console.log(`   - Sarvam (TTS): ${apiKeys.sarvam ? "✅" : "❌"}`)
+        console.log(`   - LMNT (TTS): ${apiKeys.lmnt ? "✅" : "❌"}`)
         console.log(`   - OpenAI (LLM): ${apiKeys.openai ? "✅" : "❌"}`)
 
         timer.end()
@@ -706,7 +626,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
       const openaiResponse = await sendToOpenAI(text)
       if (openaiResponse) {
-        await synthesizeWithSarvam(openaiResponse, detectedLanguage)
+        await synthesizeWithLMNT(openaiResponse, detectedLanguage)
       }
     }
 
@@ -855,35 +775,56 @@ const setupUnifiedVoiceServer = (wss) => {
     // Enhanced OpenAI Integration with timing
     const sendToOpenAI = async (userMessage) => {
       if (isProcessingOpenAI || !apiKeys.openai || !userMessage.trim()) {
-        return null;
+        return null
       }
 
-      const timer = createTimer("OPENAI_PROCESSING");
-      isProcessingOpenAI = true;
-      let openaiStepStart = Date.now();
+      const timer = createTimer("OPENAI_PROCESSING")
+      isProcessingOpenAI = true
 
       try {
         fullConversationHistory.push({
           role: "user",
           content: userMessage,
-        });
+        })
 
-        // Enhanced system prompt with language detection in response
-        const systemPrompt = `You are ${agentConfig?.agentName || "an AI assistant"}, a ${agentConfig?.category || "helpful"} voice assistant.\n\nAGENT PROFILE:\n- Name: ${agentConfig?.agentName || "Assistant"}\n- Description: ${agentConfig?.description || "A helpful AI assistant"}\n- Category: ${agentConfig?.category || "General"}\n- Personality: ${agentConfig?.personality || "formal"} (be ${agentConfig?.personality || "formal"} in your responses)\n- Brand Info: ${agentConfig?.brandInfo || "No specific brand information"}\n- Context Memory: ${agentConfig?.contextMemory || "No additional context"}\n\nLANGUAGE INSTRUCTIONS:\n- Default language: ${currentLanguage || agentConfig?.language || "hi"}\n- Current user language: ${detectedLanguage || currentLanguage || "hi"}\n- Always respond in the same language the user is speaking\n- If user speaks in ${detectedLanguage}, respond in ${detectedLanguage}\n- Maintain your personality and characteristics regardless of language\n- After your reply, append a line: [LANGUAGE: <detected_language_code>] (e.g., [LANGUAGE: en] or [LANGUAGE: hi])\n\nRESPONSE GUIDELINES:\n- Keep responses very short and conversational for phone calls (1-2 sentences max)\n- Match the user's language exactly\n- Be ${agentConfig?.personality || "formal"} in your tone\n- Stay in character as ${agentConfig?.agentName || "Assistant"}\n- Consider the context: ${agentConfig?.contextMemory || "general conversation"}`;
+        // Enhanced system prompt with all agent profile fields
+        const systemPrompt = `You are ${agentConfig?.agentName || "an AI assistant"}, a ${agentConfig?.category || "helpful"} voice assistant.
+
+AGENT PROFILE:
+- Name: ${agentConfig?.agentName || "Assistant"}
+- Description: ${agentConfig?.description || "A helpful AI assistant"}
+- Category: ${agentConfig?.category || "General"}
+- Personality: ${agentConfig?.personality || "formal"} (be ${agentConfig?.personality || "formal"} in your responses)
+- Brand Info: ${agentConfig?.brandInfo || "No specific brand information"}
+- Context Memory: ${agentConfig?.contextMemory || "No additional context"}
+
+LANGUAGE INSTRUCTIONS:
+- Default language: ${currentLanguage || agentConfig?.language || "hi"}
+- Current user language: ${detectedLanguage || currentLanguage || "hi"}
+- Always respond in the same language the user is speaking
+- If user speaks in ${detectedLanguage}, respond in ${detectedLanguage}
+- Maintain your personality and characteristics regardless of language
+
+RESPONSE GUIDELINES:
+- Keep responses very short and conversational for phone calls (1-2 sentences max)
+- Match the user's language exactly
+- Be ${agentConfig?.personality || "formal"} in your tone
+- Stay in character as ${agentConfig?.agentName || "Assistant"}
+- Consider the context: ${agentConfig?.contextMemory || "general conversation"}`
 
         const requestBody = {
           model: agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini",
           messages: [{ role: "system", content: systemPrompt }, ...fullConversationHistory.slice(-10)],
           max_tokens: 150,
           temperature: agentConfig?.personality === "formal" ? 0.3 : 0.7,
-        };
+        }
 
-        console.log(`🤖 [OPENAI] Sending request with:`);
-        console.log(`   - Language: ${detectedLanguage || currentLanguage}`);
-        console.log(`   - Personality: ${agentConfig?.personality || "formal"}`);
-        console.log(`   - Model: ${requestBody.model}`);
+        console.log(`🤖 [OPENAI] Sending request with:`)
+        console.log(`   - Language: ${detectedLanguage || currentLanguage}`)
+        console.log(`   - Personality: ${agentConfig?.personality || "formal"}`)
+        console.log(`   - Model: ${requestBody.model}`)
 
-        const openaiTimer = createTimer("OPENAI_API_CALL");
+        const openaiTimer = createTimer("OPENAI_API_CALL")
         const response = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -891,129 +832,106 @@ const setupUnifiedVoiceServer = (wss) => {
             Authorization: `Bearer ${apiKeys.openai}`,
           },
           body: JSON.stringify(requestBody),
-        });
-        openaiTimer.end();
+        })
+        openaiTimer.end()
 
         if (!response.ok) {
-          console.error(`❌ [OPENAI] API error: ${response.status}`);
-          timer.end();
-          stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-          return null;
+          console.error(`❌ [OPENAI] API error: ${response.status}`)
+          timer.end()
+          return null
         }
 
-        const parseTimer = createTimer("OPENAI_RESPONSE_PARSE");
-        const data = await response.json();
-        parseTimer.end();
+        const parseTimer = createTimer("OPENAI_RESPONSE_PARSE")
+        const data = await response.json()
+        parseTimer.end()
 
         if (data.choices && data.choices[0] && data.choices[0].message) {
-          let openaiResponse = data.choices[0].message.content;
-
-          // Parse detected language from the [LANGUAGE: xx] line
-          let detectedLangMatch = openaiResponse.match(/\[LANGUAGE:\s*([a-zA-Z\-]+)\]/);
-          if (detectedLangMatch) {
-            detectedLanguage = detectedLangMatch[1].toLowerCase();
-            openaiResponse = openaiResponse.replace(/\[LANGUAGE:\s*[a-zA-Z\-]+\]/, "").trim();
-            console.log(`🌐 [LANGUAGE_DETECT] Detected from OpenAI: ${detectedLanguage}`);
-          }
+          const openaiResponse = data.choices[0].message.content
 
           fullConversationHistory.push({
             role: "assistant",
             content: openaiResponse,
-          });
+          })
 
-          console.log(`🤖 [OPENAI] Response received: "${openaiResponse}"`);
-          timer.end();
-          stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-          return openaiResponse;
+          console.log(`🤖 [OPENAI] Response received: "${openaiResponse}"`)
+          timer.end()
+          return openaiResponse
         }
 
-        timer.end();
-        stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-        return null;
+        timer.end()
+        return null
       } catch (error) {
-        console.error(`❌ [OPENAI] Error: ${error.message}`);
-        timer.end();
-        stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-        return null;
+        console.error(`❌ [OPENAI] Error: ${error.message}`)
+        timer.end()
+        return null
       } finally {
-        isProcessingOpenAI = false;
+        isProcessingOpenAI = false
       }
-    };
+    }
 
-    // Enhanced Sarvam TTS Synthesis with simulated streaming
-    const synthesizeWithSarvam = async (text, targetLanguage = null) => {
-      if (!apiKeys.sarvam || !text.trim()) {
-        return;
+    // LMNT TTS Synthesis with WebSocket streaming (replaces Sarvam)
+    const synthesizeWithLMNT = async (text, targetLanguage = null) => {
+      if (!apiKeys.lmnt || !text.trim()) {
+        return
       }
-      const ttsStepStart = Date.now();
-      const sentences = splitIntoSentences(text)
-      const useLanguage = targetLanguage || currentLanguage || "hi"
-      const validVoice = getValidSarvamVoice(agentConfig?.voiceSelection)
-      const sarvamLanguage = getSarvamLanguage(useLanguage)
-
-      console.log(`🎵 [SARVAM] Starting TTS generation for ${sentences.length} chunks.`)
       shouldInterruptAudio = false // Reset interruption flag for new response
-
-      for (let i = 0; i < sentences.length; i++) {
-        const sentence = sentences[i]
-        if (shouldInterruptAudio) {
-          console.log("🛑 [SARVAM] Interrupted during sentence processing.")
-          break // Stop processing further chunks
-        }
-
-        const timer = createTimer(`SARVAM_TTS_PROCESSING_CHUNK_${i}`)
-        try {
-          console.log(`🎵 [SARVAM] Generating TTS for chunk ${i + 1}/${sentences.length}: "${sentence}"`)
-          console.log(`   - Language: ${sarvamLanguage}`)
-          console.log(`   - Voice: ${validVoice} (mapped from: ${agentConfig?.voiceSelection || "default"})`)
-          console.log(`   - Agent: ${agentConfig?.agentName}`)
-
-          const audioBuffer = await sarvamTTSStream({
-            text: sentence,
-            speaker: validVoice,
-            language: sarvamLanguage,
-            apiKey: apiKeys.sarvam,
-            model: "bulbul:v2",
-          });
-          const pythonBytesString = bufferToPythonBytesString(audioBuffer);
-
-          const audioResponse = {
-            data: {
+      const useLanguage = targetLanguage || currentLanguage || "hi"
+      const voice = agentConfig?.voiceSelection || "lily"
+      const sampleRate = 16000
+      const format = "mp3"
+      const speed = 1.0
+      const options = {
+        voice,
+        format,
+        sample_rate: sampleRate,
+        speed,
+        conversational: true,
+      }
+      const lmntClient = new LMNTStreamingClient(apiKeys.lmnt)
+      try {
+        await lmntClient.connect(options)
+        let chunkCount = 0
+        await lmntClient.synthesize(
+          text,
+          (audioChunk) => {
+            if (shouldInterruptAudio) return
+            chunkCount++
+            const pythonBytesString = bufferToPythonBytesString(Buffer.from(audioChunk))
+            const audioResponse = {
+              data: {
+                session_id: sessionId,
+                count: chunkCount,
+                audio_bytes_to_play: pythonBytesString,
+                sample_rate: sampleRate,
+                channels: 1,
+                sample_width: 2,
+                is_streaming: false,
+                format,
+              },
+              type: "ai_response",
+            }
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(audioResponse))
+            }
+          },
+          (extras) => {
+            // Optionally handle LMNT extras
+          }
+        )
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({
+              type: "ai_response_complete",
               session_id: sessionId,
-              count: i + 1, // Chunk count
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: 22050,
-              channels: 1,
-              sample_width: 2,
-              is_streaming: false, // Still sending full audio per chunk, not byte stream
-              format: "mp3",
-            },
-            type: "ai_response",
-          }
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            console.log(`✅ [SARVAM] Audio chunk ${i + 1} sent (${audioBuffer.length} bytes)`)
-          }
-
-          timer.end()
-        } catch (error) {
-          console.error(`❌ [SARVAM] Error processing chunk ${i + 1}: ${error.message}`)
-          timer.end()
-          // Continue to next chunk even if one fails
+              total_chunks: chunkCount,
+            })
+          )
         }
+      } catch (error) {
+        console.error(`❌ [LMNT] Error during TTS: ${error.message}`)
+      } finally {
+        lmntClient.close()
       }
-      // After all chunks are sent (or interrupted), signal completion
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({
-            type: "ai_response_complete",
-            session_id: sessionId,
-            total_chunks: sentences.length,
-          }),
-        );
-      }
-      stepTimings.push({ step: "tts", ms: Date.now() - ttsStepStart });
     }
 
     // Utility function to convert Buffer to Python bytes string for SIP
@@ -1205,7 +1123,7 @@ const setupUnifiedVoiceServer = (wss) => {
             if (data.session_id) {
               sessionId = data.session_id
             }
-            await synthesizeWithSarvam(data.text, data.language || currentLanguage)
+            await synthesizeWithLMNT(data.text, data.language || currentLanguage)
           } else if (data.data && data.data.hangup === "true") {
             console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
 
@@ -1234,14 +1152,6 @@ const setupUnifiedVoiceServer = (wss) => {
     // Connection cleanup
     ws.on("close", () => {
       const cleanupTimer = createTimer("SESSION_CLEANUP")
-      const conversationEndTime = Date.now();
-      const totalConversationTime = (conversationEndTime - conversationStartTime) / 1000;
-      console.log(`\n===== SESSION SUMMARY =====`);
-      console.log(`Total conversation time: ${totalConversationTime.toFixed(2)} seconds`);
-      for (const timing of stepTimings) {
-        console.log(`Step: ${timing.step}, Duration: ${timing.ms} ms`);
-      }
-      console.log(`===========================\n`);
 
       console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
       console.log(
@@ -1269,7 +1179,6 @@ const setupUnifiedVoiceServer = (wss) => {
       shouldInterruptAudio = true
       greetingInProgress = false
       fullConversationHistory = []
-      stepTimings = []; // Clear step timings on close
 
       cleanupTimer.end()
     })
