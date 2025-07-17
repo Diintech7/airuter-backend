@@ -40,7 +40,7 @@ const splitIntoSentences = (text) => {
 // Language detection mapping (re-added for clarity and consistency)
 const LANGUAGE_MAPPING = {
   hi: "hi-IN", // Sarvam likely needs hi-IN
-  en: "en-IN",
+  en: "en-In",
   bn: "bn-IN",
   te: "te-IN",
   ta: "ta-IN",
@@ -64,9 +64,9 @@ const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
 // Get Deepgram language code
 const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang
-  // Deepgram uses 'hi' for Hindi, 'en-IN' for English
+  // Deepgram uses 'hi' for Hindi, 'en-In' for English
   if (lang === "hi") return "hi"
-  if (lang === "en") return "en-IN"
+  if (lang === "en") return "en-In"
   // For other Indian languages, Deepgram might use just the base code or specific variants.
   return lang // Default to base code for others
 }
@@ -262,8 +262,6 @@ const setupUnifiedVoiceServer = (wss) => {
               JSON.stringify({
                 type: "instant_text_greeting",
                 session_id: sessionId,
-                message: agent.firstMessage,
-                agent: agent.agentName,
                 timestamp: new Date().toISOString(),
               }),
             )
@@ -1155,15 +1153,7 @@ RESPONSE GUIDELINES:
                 JSON.stringify({
                   type: "session_started",
                   session_id: sessionId,
-                  agent: agentConfig.agentName,
-                  did_number: destinationNumber,
-                  tenant_id: tenantId,
-                  providers: {
-                    stt: agentConfig.sttSelection || "deepgram",
-                    tts: agentConfig.ttsSelection || "sarvam",
-                    llm: agentConfig.llmSelection || "openai",
-                  },
-                  message: "Agent matched and greeting sent",
+                  
                 }),
               )
             }
