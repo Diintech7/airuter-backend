@@ -240,81 +240,44 @@ const setupUnifiedVoiceServer = (wss) => {
         )
 
         // Step 2: Send greeting immediately - NO WAITING
-        if (agent.audioBytes && audioLength > 0) {
+        if (typeof agent.audioBytes === 'string' && agent.audioBytes.length > 0) {
           const audioTimer = createTimer("INSTANT_AUDIO_SEND")
           greetingInProgress = true // Set flag
 
-          try {
-            // Use the validation function to ensure audioBytes is a proper Buffer
-            const audioBuffer = validateAndFixAudioData(agent.audioBytes)
-            
-            if (!audioBuffer) {
-              throw new Error("Failed to validate or convert audio data from database")
-            }
+          // Send base64 string directly
+          const base64Audio = agent.audioBytes
+          console.log(`[INSTANT_GREETING] Sending audioBytes as direct base64 string, length: ${base64Audio.length}`)
 
-            console.log(`🔧 [INSTANT_GREETING] Audio buffer details:`)
-            console.log(`   - Type: ${typeof audioBuffer}`)
-            console.log(`   - Is Buffer: ${Buffer.isBuffer(audioBuffer)}`)
-            console.log(`   - Length: ${audioBuffer.length} bytes`)
-            console.log(`   - First 10 bytes: ${audioBuffer.slice(0, 10).toString('hex')}`)
-
-            // Send audio bytes immediately
-            const base64Audio = bufferToPythonBytesString(audioBuffer)
-            
-            if (!base64Audio) {
-              throw new Error("Failed to convert audio buffer to base64")
-            }
-
-            const audioResponse = {
-              data: {
-                session_id: sessionId,
-                count: 1,
-                audio_bytes_to_play: base64Audio,
-                sample_rate: agent.audioMetadata?.sampleRate || 22050,
-                channels: 1,
-                sample_width: 2,
-                is_streaming: false,
-                format: agent.audioMetadata?.format || "mp3",
-              },
-              type: "ai_response",
-            }
-
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(audioResponse))
-              ws.send(
-                JSON.stringify({
-                  type: "ai_response_complete",
-                  session_id: sessionId,
-                  total_chunks: 1,
-                }),
-              )
-              audioTimer.end()
-              console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY (${audioBuffer.length} bytes)`)
-            } else {
-              console.error(`❌ [INSTANT_GREETING] WebSocket not open, readyState: ${ws.readyState}`)
-            }
-          } catch (error) {
-            console.error(`❌ [INSTANT_GREETING] Error processing audio: ${error.message}`)
-            // Fallback to text greeting
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "instant_text_greeting",
-                  session_id: sessionId,
-                  message: agent.firstMessage,
-                  agent: agent.agentName,
-                  timestamp: new Date().toISOString(),
-                }),
-              )
-              console.log(`📝 [INSTANT_GREETING] Fallback text greeting sent due to audio error`)
-            }
-          } finally {
-            greetingInProgress = false // Reset flag after sending
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: 1,
+              audio_bytes_to_play: base64Audio,
+              sample_rate: agent.audioMetadata?.sampleRate || 22050,
+              channels: 1,
+              sample_width: 2,
+              is_streaming: false,
+              format: agent.audioMetadata?.format || "mp3",
+            },
+            type: "ai_response",
           }
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(audioResponse))
+            ws.send(
+              JSON.stringify({
+                type: "ai_response_complete",
+                session_id: sessionId,
+                total_chunks: 1,
+              }),
+            )
+            audioTimer.end()
+            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio (base64 string) sent INSTANTLY (${base64Audio.length} chars)`)
+          }
+          greetingInProgress = false // Reset flag after sending
         } else {
           // No pre-generated audio - send text immediately and generate audio in background
           console.log(`⚠️ [INSTANT_GREETING] No pre-generated audio found, sending text greeting`)
-          
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
               JSON.stringify({
@@ -327,7 +290,6 @@ const setupUnifiedVoiceServer = (wss) => {
             )
             console.log(`📝 [INSTANT_GREETING] Text greeting sent instantly`)
           }
-
           // Generate audio in background - don't wait for it
           generateGreetingAudioBackground(agent)
         }
