@@ -239,58 +239,73 @@ const setupUnifiedVoiceServer = (wss) => {
           const audioTimer = createTimer("INSTANT_AUDIO_SEND")
           greetingInProgress = true // Set flag
 
-          // Ensure audioBytes is a proper Buffer
-          let audioBuffer = agent.audioBytes
-          if (!Buffer.isBuffer(audioBuffer)) {
-            // If it's not a Buffer, try to convert it
-            if (typeof audioBuffer === 'string') {
-              // If it's a base64 string
-              audioBuffer = Buffer.from(audioBuffer, 'base64')
-            } else if (audioBuffer && typeof audioBuffer === 'object' && audioBuffer.buffer) {
-              // If it's a TypedArray or similar
-              audioBuffer = Buffer.from(audioBuffer.buffer)
-            } else {
-              // Try to convert to Buffer directly
-              audioBuffer = Buffer.from(audioBuffer)
+          try {
+            // Use the validation function to ensure audioBytes is a proper Buffer
+            const audioBuffer = validateAndFixAudioData(agent.audioBytes)
+            
+            if (!audioBuffer) {
+              throw new Error("Failed to validate or convert audio data from database")
             }
-          }
 
-          console.log(`🔧 [INSTANT_GREETING] Audio buffer details:`)
-          console.log(`   - Type: ${typeof audioBuffer}`)
-          console.log(`   - Is Buffer: ${Buffer.isBuffer(audioBuffer)}`)
-          console.log(`   - Length: ${audioBuffer.length} bytes`)
-          console.log(`   - First 10 bytes: ${audioBuffer.slice(0, 10).toString('hex')}`)
+            console.log(`🔧 [INSTANT_GREETING] Audio buffer details:`)
+            console.log(`   - Type: ${typeof audioBuffer}`)
+            console.log(`   - Is Buffer: ${Buffer.isBuffer(audioBuffer)}`)
+            console.log(`   - Length: ${audioBuffer.length} bytes`)
+            console.log(`   - First 10 bytes: ${audioBuffer.slice(0, 10).toString('hex')}`)
 
-          // Send audio bytes immediately
-          const base64Audio = bufferToPythonBytesString(audioBuffer)
+            // Send audio bytes immediately
+            const base64Audio = bufferToPythonBytesString(audioBuffer)
+            
+            if (!base64Audio) {
+              throw new Error("Failed to convert audio buffer to base64")
+            }
 
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: 1,
-              audio_bytes_to_play: base64Audio,
-              sample_rate: agent.audioMetadata?.sampleRate || 22050,
-              channels: 1,
-              sample_width: 2,
-              is_streaming: false,
-              format: agent.audioMetadata?.format || "mp3",
-            },
-            type: "ai_response",
-          }
-
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            ws.send(
-              JSON.stringify({
-                type: "ai_response_complete",
+            const audioResponse = {
+              data: {
                 session_id: sessionId,
-                total_chunks: 1,
-              }),
-            )
-            audioTimer.end()
-            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY (${audioBuffer.length} bytes)`)
+                count: 1,
+                audio_bytes_to_play: base64Audio,
+                sample_rate: agent.audioMetadata?.sampleRate || 22050,
+                channels: 1,
+                sample_width: 2,
+                is_streaming: false,
+                format: agent.audioMetadata?.format || "mp3",
+              },
+              type: "ai_response",
+            }
+
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify(audioResponse))
+              ws.send(
+                JSON.stringify({
+                  type: "ai_response_complete",
+                  session_id: sessionId,
+                  total_chunks: 1,
+                }),
+              )
+              audioTimer.end()
+              console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY (${audioBuffer.length} bytes)`)
+            } else {
+              console.error(`❌ [INSTANT_GREETING] WebSocket not open, readyState: ${ws.readyState}`)
+            }
+          } catch (error) {
+            console.error(`❌ [INSTANT_GREETING] Error processing audio: ${error.message}`)
+            // Fallback to text greeting
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(
+                JSON.stringify({
+                  type: "instant_text_greeting",
+                  session_id: sessionId,
+                  message: agent.firstMessage,
+                  agent: agent.agentName,
+                  timestamp: new Date().toISOString(),
+                }),
+              )
+              console.log(`📝 [INSTANT_GREETING] Fallback text greeting sent due to audio error`)
+            }
+          } finally {
+            greetingInProgress = false // Reset flag after sending
           }
-          greetingInProgress = false // Reset flag after sending
         } else {
           // No pre-generated audio - send text immediately and generate audio in background
           console.log(`⚠️ [INSTANT_GREETING] No pre-generated audio found, sending text greeting`)
@@ -1034,6 +1049,78 @@ RESPONSE GUIDELINES:
       } catch (error) {
         console.error(`❌ [BUFFER_CONVERSION] Error converting buffer: ${error.message}`)
         return ""
+      }
+    }
+
+    // Utility function to validate and fix audio data from database
+    const validateAndFixAudioData = (audioData) => {
+      console.log(`🔍 [AUDIO_VALIDATION] Validating audio data:`, {
+        type: typeof audioData,
+        isNull: audioData === null,
+        isUndefined: audioData === undefined,
+        length: audioData?.length,
+        isBuffer: Buffer.isBuffer(audioData)
+      })
+
+      if (!audioData) {
+        console.log(`❌ [AUDIO_VALIDATION] Audio data is null or undefined`)
+        return null
+      }
+
+      // If it's already a valid Buffer
+      if (Buffer.isBuffer(audioData) && audioData.length > 0) {
+        console.log(`✅ [AUDIO_VALIDATION] Audio data is already a valid Buffer`)
+        return audioData
+      }
+
+      // Try to convert to Buffer
+      try {
+        let buffer = null
+
+        if (typeof audioData === 'string') {
+          // Try as base64 first
+          try {
+            buffer = Buffer.from(audioData, 'base64')
+            console.log(`✅ [AUDIO_VALIDATION] Converted from base64 string`)
+          } catch (e) {
+            // Try as regular string
+            buffer = Buffer.from(audioData)
+            console.log(`✅ [AUDIO_VALIDATION] Converted from regular string`)
+          }
+        } else if (audioData && typeof audioData === 'object') {
+          if (audioData.buffer) {
+            // TypedArray
+            buffer = Buffer.from(audioData.buffer)
+            console.log(`✅ [AUDIO_VALIDATION] Converted from TypedArray`)
+          } else if (audioData.data) {
+            // MongoDB Binary
+            buffer = Buffer.from(audioData.data)
+            console.log(`✅ [AUDIO_VALIDATION] Converted from MongoDB Binary`)
+          } else if (Array.isArray(audioData)) {
+            // Array
+            buffer = Buffer.from(audioData)
+            console.log(`✅ [AUDIO_VALIDATION] Converted from Array`)
+          } else {
+            // Try direct conversion
+            buffer = Buffer.from(audioData)
+            console.log(`✅ [AUDIO_VALIDATION] Converted from object`)
+          }
+        } else {
+          // Try direct conversion
+          buffer = Buffer.from(audioData)
+          console.log(`✅ [AUDIO_VALIDATION] Converted from unknown type`)
+        }
+
+        if (buffer && Buffer.isBuffer(buffer) && buffer.length > 0) {
+          console.log(`✅ [AUDIO_VALIDATION] Successfully created valid buffer (${buffer.length} bytes)`)
+          return buffer
+        } else {
+          console.log(`❌ [AUDIO_VALIDATION] Failed to create valid buffer`)
+          return null
+        }
+      } catch (error) {
+        console.error(`❌ [AUDIO_VALIDATION] Error converting audio data: ${error.message}`)
+        return null
       }
     }
 
