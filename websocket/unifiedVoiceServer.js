@@ -800,35 +800,56 @@ const setupUnifiedVoiceServer = (wss) => {
     // Enhanced OpenAI Integration with timing
     const sendToOpenAI = async (userMessage) => {
       if (isProcessingOpenAI || !apiKeys.openai || !userMessage.trim()) {
-        return null;
+        return null
       }
 
-      const timer = createTimer("OPENAI_PROCESSING");
-      isProcessingOpenAI = true;
-      let openaiStepStart = Date.now();
+      const timer = createTimer("OPENAI_PROCESSING")
+      isProcessingOpenAI = true
 
       try {
         fullConversationHistory.push({
           role: "user",
           content: userMessage,
-        });
+        })
 
-        // Enhanced system prompt with language detection in response
-        const systemPrompt = `You are ${agentConfig?.agentName || "an AI assistant"}, a ${agentConfig?.category || "helpful"} voice assistant.\n\nAGENT PROFILE:\n- Name: ${agentConfig?.agentName || "Assistant"}\n- Description: ${agentConfig?.description || "A helpful AI assistant"}\n- Category: ${agentConfig?.category || "General"}\n- Personality: ${agentConfig?.personality || "formal"} (be ${agentConfig?.personality || "formal"} in your responses)\n- Brand Info: ${agentConfig?.brandInfo || "No specific brand information"}\n- Context Memory: ${agentConfig?.contextMemory || "No additional context"}\n\nLANGUAGE INSTRUCTIONS:\n- Default language: ${currentLanguage || agentConfig?.language || "hi"}\n- Current user language: ${detectedLanguage || currentLanguage || "hi"}\n- Always respond in the same language the user is speaking\n- If user speaks in ${detectedLanguage}, respond in ${detectedLanguage}\n- Maintain your personality and characteristics regardless of language\n- After your reply, append a line: [LANGUAGE: <detected_language_code>] (e.g., [LANGUAGE: en] or [LANGUAGE: hi])\n\nRESPONSE GUIDELINES:\n- Keep responses very short and conversational for phone calls (1-2 sentences max)\n- Match the user's language exactly\n- Be ${agentConfig?.personality || "formal"} in your tone\n- Stay in character as ${agentConfig?.agentName || "Assistant"}\n- Consider the context: ${agentConfig?.contextMemory || "general conversation"}`;
+        // Enhanced system prompt with all agent profile fields
+        const systemPrompt = `You are ${agentConfig?.agentName || "an AI assistant"}, a ${agentConfig?.category || "helpful"} voice assistant.
+
+AGENT PROFILE:
+- Name: ${agentConfig?.agentName || "Assistant"}
+- Description: ${agentConfig?.description || "A helpful AI assistant"}
+- Category: ${agentConfig?.category || "General"}
+- Personality: ${agentConfig?.personality || "formal"} (be ${agentConfig?.personality || "formal"} in your responses)
+- Brand Info: ${agentConfig?.brandInfo || "No specific brand information"}
+- Context Memory: ${agentConfig?.contextMemory || "No additional context"}
+
+LANGUAGE INSTRUCTIONS:
+- Default language: ${currentLanguage || agentConfig?.language || "hi"}
+- Current user language: ${detectedLanguage || currentLanguage || "hi"}
+- Always respond in the same language the user is speaking
+- If user speaks in ${detectedLanguage}, respond in ${detectedLanguage}
+- Maintain your personality and characteristics regardless of language
+
+RESPONSE GUIDELINES:
+- Keep responses very short and conversational for phone calls (1-2 sentences max)
+- Match the user's language exactly
+- Be ${agentConfig?.personality || "formal"} in your tone
+- Stay in character as ${agentConfig?.agentName || "Assistant"}
+- Consider the context: ${agentConfig?.contextMemory || "general conversation"}`
 
         const requestBody = {
           model: agentConfig?.llmSelection === "openai" ? "gpt-4o-mini" : "gpt-4o-mini",
           messages: [{ role: "system", content: systemPrompt }, ...fullConversationHistory.slice(-10)],
           max_tokens: 150,
           temperature: agentConfig?.personality === "formal" ? 0.3 : 0.7,
-        };
+        }
 
-        console.log(`🤖 [OPENAI] Sending request with:`);
-        console.log(`   - Language: ${detectedLanguage || currentLanguage}`);
-        console.log(`   - Personality: ${agentConfig?.personality || "formal"}`);
-        console.log(`   - Model: ${requestBody.model}`);
+        console.log(`🤖 [OPENAI] Sending request with:`)
+        console.log(`   - Language: ${detectedLanguage || currentLanguage}`)
+        console.log(`   - Personality: ${agentConfig?.personality || "formal"}`)
+        console.log(`   - Model: ${requestBody.model}`)
 
-        const openaiTimer = createTimer("OPENAI_API_CALL");
+        const openaiTimer = createTimer("OPENAI_API_CALL")
         const response = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: {
@@ -836,61 +857,49 @@ const setupUnifiedVoiceServer = (wss) => {
             Authorization: `Bearer ${apiKeys.openai}`,
           },
           body: JSON.stringify(requestBody),
-        });
-        openaiTimer.end();
+        })
+        openaiTimer.end()
 
         if (!response.ok) {
-          console.error(`❌ [OPENAI] API error: ${response.status}`);
-          timer.end();
-          stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-          return null;
+          console.error(`❌ [OPENAI] API error: ${response.status}`)
+          timer.end()
+          return null
         }
 
-        const parseTimer = createTimer("OPENAI_RESPONSE_PARSE");
-        const data = await response.json();
-        parseTimer.end();
+        const parseTimer = createTimer("OPENAI_RESPONSE_PARSE")
+        const data = await response.json()
+        parseTimer.end()
 
         if (data.choices && data.choices[0] && data.choices[0].message) {
-          let openaiResponse = data.choices[0].message.content;
-
-          // Parse detected language from the [LANGUAGE: xx] line
-          let detectedLangMatch = openaiResponse.match(/\[LANGUAGE:\s*([a-zA-Z\-]+)\]/);
-          if (detectedLangMatch) {
-            detectedLanguage = detectedLangMatch[1].toLowerCase();
-            openaiResponse = openaiResponse.replace(/\[LANGUAGE:\s*[a-zA-Z\-]+\]/, "").trim();
-            console.log(`🌐 [LANGUAGE_DETECT] Detected from OpenAI: ${detectedLanguage}`);
-          }
+          const openaiResponse = data.choices[0].message.content
 
           fullConversationHistory.push({
             role: "assistant",
             content: openaiResponse,
-          });
+          })
 
-          console.log(`🤖 [OPENAI] Response received: "${openaiResponse}"`);
-          timer.end();
-          stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-          return openaiResponse;
+          console.log(`🤖 [OPENAI] Response received: "${openaiResponse}"`)
+          timer.end()
+          return openaiResponse
         }
 
-        timer.end();
-        stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-        return null;
+        timer.end()
+        return null
       } catch (error) {
-        console.error(`❌ [OPENAI] Error: ${error.message}`);
-        timer.end();
-        stepTimings.push({ step: "openai", ms: Date.now() - openaiStepStart });
-        return null;
+        console.error(`❌ [OPENAI] Error: ${error.message}`)
+        timer.end()
+        return null
       } finally {
-        isProcessingOpenAI = false;
+        isProcessingOpenAI = false
       }
-    };
+    }
 
     // Enhanced Sarvam TTS Synthesis with simulated streaming
     const synthesizeWithSarvam = async (text, targetLanguage = null) => {
       if (!apiKeys.sarvam || !text.trim()) {
-        return;
+        return
       }
-      const ttsStepStart = Date.now();
+
       const sentences = splitIntoSentences(text)
       const useLanguage = targetLanguage || currentLanguage || "hi"
       const validVoice = getValidSarvamVoice(agentConfig?.voiceSelection)
@@ -988,9 +997,8 @@ const setupUnifiedVoiceServer = (wss) => {
             session_id: sessionId,
             total_chunks: sentences.length,
           }),
-        );
+        )
       }
-      stepTimings.push({ step: "tts", ms: Date.now() - ttsStepStart });
     }
 
     // Utility function to convert Buffer to Python bytes string for SIP
@@ -1211,14 +1219,6 @@ const setupUnifiedVoiceServer = (wss) => {
     // Connection cleanup
     ws.on("close", () => {
       const cleanupTimer = createTimer("SESSION_CLEANUP")
-      const conversationEndTime = Date.now();
-      const totalConversationTime = (conversationEndTime - conversationStartTime) / 1000;
-      console.log(`\n===== SESSION SUMMARY =====`);
-      console.log(`Total conversation time: ${totalConversationTime.toFixed(2)} seconds`);
-      for (const timing of stepTimings) {
-        console.log(`Step: ${timing.step}, Duration: ${timing.ms} ms`);
-      }
-      console.log(`===========================\n`);
 
       console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`)
       console.log(
@@ -1246,7 +1246,6 @@ const setupUnifiedVoiceServer = (wss) => {
       shouldInterruptAudio = true
       greetingInProgress = false
       fullConversationHistory = []
-      stepTimings = []; // Clear step timings on close
 
       cleanupTimer.end()
     })
