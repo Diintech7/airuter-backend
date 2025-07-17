@@ -202,7 +202,8 @@ const setupUnifiedVoiceServer = (wss) => {
           agentName: agent?.agentName,
           hasAudioBytes: !!agent?.audioBytes,
           audioBytesType: typeof agent?.audioBytes,
-          audioBytesLength: agent?.audioBytes?.length,
+          audioBytesConstructor: agent?.audioBytes?.constructor?.name,
+          audioBytesLength: typeof agent?.audioBytes?.length === 'function' ? agent.audioBytes.length() : agent?.audioBytes?.length,
         })
         
         didTimer.end()
@@ -224,18 +225,22 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - DID: ${agent.didNumber}`)
         // Debugging audioBytes
         console.log(`DEBUG: agent.audioBytes type: ${typeof agent.audioBytes}`)
+        console.log(`DEBUG: agent.audioBytes constructor: ${agent.audioBytes?.constructor?.name}`)
         if (agent.audioBytes) {
           console.log(`DEBUG: agent.audioBytes is Buffer: ${Buffer.isBuffer(agent.audioBytes)}`)
-          console.log(`DEBUG: agent.audioBytes length: ${agent.audioBytes.length}`)
+          const length = typeof agent.audioBytes.length === 'function' ? agent.audioBytes.length() : agent.audioBytes.length
+          console.log(`DEBUG: agent.audioBytes length: ${length}`)
         } else {
           console.log(`DEBUG: agent.audioBytes is null or undefined`)
         }
+        
+        const audioLength = typeof agent.audioBytes?.length === 'function' ? agent.audioBytes.length() : agent.audioBytes?.length
         console.log(
-          `   - Audio Available: ${agent.audioBytes && agent.audioBytes.length > 0 ? `YES (${agent.audioBytes.length} bytes)` : "NO"}`,
+          `   - Audio Available: ${agent.audioBytes && audioLength > 0 ? `YES (${audioLength} bytes)` : "NO"}`,
         )
 
         // Step 2: Send greeting immediately - NO WAITING
-        if (agent.audioBytes && agent.audioBytes.length > 0) {
+        if (agent.audioBytes && audioLength > 0) {
           const audioTimer = createTimer("INSTANT_AUDIO_SEND")
           greetingInProgress = true // Set flag
 
@@ -1058,8 +1063,9 @@ RESPONSE GUIDELINES:
         type: typeof audioData,
         isNull: audioData === null,
         isUndefined: audioData === undefined,
-        length: audioData?.length,
-        isBuffer: Buffer.isBuffer(audioData)
+        length: typeof audioData?.length === 'function' ? audioData.length() : audioData?.length,
+        isBuffer: Buffer.isBuffer(audioData),
+        constructor: audioData?.constructor?.name
       })
 
       if (!audioData) {
@@ -1088,14 +1094,19 @@ RESPONSE GUIDELINES:
             console.log(`✅ [AUDIO_VALIDATION] Converted from regular string`)
           }
         } else if (audioData && typeof audioData === 'object') {
-          if (audioData.buffer) {
+          // Check if it's a MongoDB Binary object
+          if (audioData.constructor && audioData.constructor.name === 'Binary') {
+            // MongoDB Binary object - use the buffer property
+            buffer = Buffer.from(audioData.buffer)
+            console.log(`✅ [AUDIO_VALIDATION] Converted from MongoDB Binary (${buffer.length} bytes)`)
+          } else if (audioData.buffer) {
             // TypedArray
             buffer = Buffer.from(audioData.buffer)
             console.log(`✅ [AUDIO_VALIDATION] Converted from TypedArray`)
           } else if (audioData.data) {
-            // MongoDB Binary
+            // Alternative MongoDB Binary format
             buffer = Buffer.from(audioData.data)
-            console.log(`✅ [AUDIO_VALIDATION] Converted from MongoDB Binary`)
+            console.log(`✅ [AUDIO_VALIDATION] Converted from MongoDB Binary (data property)`)
           } else if (Array.isArray(audioData)) {
             // Array
             buffer = Buffer.from(audioData)
