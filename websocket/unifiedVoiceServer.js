@@ -3,7 +3,6 @@ const mongoose = require("mongoose")
 const ApiKey = require("../models/ApiKey")
 const Agent = require("../models/AgentProfile")
 const connectDB = require("../config/db")
-const { LMNTStreamingClient } = require("../services/lmntStreaming")
 connectDB()
 
 const fetch = globalThis.fetch || require("node-fetch")
@@ -143,7 +142,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // API keys cache
     const apiKeys = {
       deepgram: null,
-      lmnt: null, // Changed from sarvam to lmnt
+      sarvam: null,
       openai: null,
     }
 
@@ -305,92 +304,117 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     }
 
-    // Update generateGreetingAudioBackground to use LMNT
+    // Background audio generation (non-blocking)
     const generateGreetingAudioBackground = async (agent) => {
+      // Don't await - run in background
       setImmediate(async () => {
         const timer = createTimer("BACKGROUND_AUDIO_GENERATION")
-        greetingInProgress = true
+        greetingInProgress = true // Set flag
+
         try {
-          console.log(`🔄 [BACKGROUND_AUDIO] Starting LMNT generation for: ${agent.agentName}`)
+          console.log(`🔄 [BACKGROUND_AUDIO] Starting generation for: ${agent.agentName}`)
+
+          // Load API keys first
           const keysLoaded = await loadApiKeysForTenant(agent.tenantId)
-          apiKeys.lmnt = "ak_k5oc5g5R5QQ6GvfntiwYcn"
-          if (!keysLoaded || !apiKeys.lmnt) {
-            console.error(`❌ [BACKGROUND_AUDIO] LMNT API key not available`)
+          if (!keysLoaded || !apiKeys.sarvam) {
+            console.error(`❌ [BACKGROUND_AUDIO] API keys not available`)
             timer.end()
             greetingInProgress = false
             return
           }
-          const voice = agent.voiceSelection || "lily"
-          const sampleRate = 16000
-          const format = "mp3"
-          const options = {
-            voice,
-            format,
-            sample_rate: sampleRate,
-            speed: 1.0,
-            conversational: true,
+
+          const validVoice = getValidSarvamVoice(agent.voiceSelection)
+          const sarvamLanguage = getSarvamLanguage(currentLanguage)
+
+          const sarvamTimer = createTimer("SARVAM_TTS_BACKGROUND")
+
+          const requestBody = {
+            inputs: [agent.firstMessage],
+            target_language_code: sarvamLanguage,
+            speaker: validVoice,
+            pitch: 0,
+            pace: 1.0,
+            loudness: 1.0,
+            speech_sample_rate: 16000,
+            enable_preprocessing: false,
+            model: "bulbul:v1",
           }
-          const lmntClient = new LMNTStreamingClient(apiKeys.lmnt)
-          await lmntClient.connect(options)
-          let audioBuffers = []
-          await lmntClient.synthesize(
-            agent.firstMessage,
-            (audioChunk) => {
-              audioBuffers.push(Buffer.from(audioChunk))
+
+          const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "API-Subscription-Key": apiKeys.sarvam,
             },
-            (extras) => {}
-          )
-          const audioBuffer = Buffer.concat(audioBuffers)
-          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
-          // Send audio immediately
-          const audioResponse = {
-            data: {
-              session_id: sessionId,
-              count: 1,
-              audio_bytes_to_play: pythonBytesString,
-              sample_rate: sampleRate,
-              channels: 1,
-              sample_width: 2,
-              is_streaming: false,
-              format,
-            },
-            type: "ai_response",
+            body: JSON.stringify(requestBody),
+          })
+
+          sarvamTimer.end()
+
+          if (response.ok) {
+            const responseData = await response.json()
+            if (responseData.audios && responseData.audios.length > 0) {
+              const audioBuffer = Buffer.from(responseData.audios[0], "base64")
+              const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+
+              // Send audio immediately
+              const audioResponse = {
+                data: {
+                  session_id: sessionId,
+                  count: 1,
+                  audio_bytes_to_play: pythonBytesString,
+                  sample_rate: 22050,
+                  channels: 1,
+                  sample_width: 2,
+                  is_streaming: false,
+                  format: "mp3",
+                },
+                type: "ai_response",
+              }
+
+              if (ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify(audioResponse))
+                ws.send(
+                  JSON.stringify({
+                    type: "ai_response_complete",
+                    session_id: sessionId,
+                    total_chunks: 1,
+                  }),
+                )
+                console.log(`🎵 [BACKGROUND_AUDIO] Audio generated and sent: ${audioBuffer.length} bytes`)
+              }
+
+              // Save for future use (even if not used for instant greeting, it's good to cache)
+              await Agent.updateOne(
+                { _id: agent._id },
+                {
+                  audioBytes: audioBuffer,
+                  audioMetadata: {
+                    format: "mp3",
+                    sampleRate: 22050,
+                    channels: 1,
+                    size: audioBuffer.length,
+                    generatedAt: new Date(),
+                    language: currentLanguage,
+                    speaker: validVoice,
+                    provider: "sarvam",
+                  },
+                },
+              )
+
+              console.log(`✅ [BACKGROUND_AUDIO] Audio saved for future reference`)
+            }
+          } else {
+            const errorText = await response.text()
+            console.error(`❌ [BACKGROUND_AUDIO] Sarvam API error: ${response.status}`, errorText)
           }
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify(audioResponse))
-            ws.send(
-              JSON.stringify({
-                type: "ai_response_complete",
-                session_id: sessionId,
-                total_chunks: 1,
-              })
-            )
-            console.log(`🎵 [BACKGROUND_AUDIO] LMNT audio generated and sent: ${audioBuffer.length} bytes`)
-          }
-          // Save for future use
-          await Agent.updateOne(
-            { _id: agent._id },
-            {
-              audioBytes: audioBuffer,
-              audioMetadata: {
-                format,
-                sampleRate,
-                channels: 1,
-                size: audioBuffer.length,
-                generatedAt: new Date(),
-                language: currentLanguage,
-                speaker: voice,
-                provider: "lmnt",
-              },
-            },
-          )
-          console.log(`✅ [BACKGROUND_AUDIO] LMNT audio saved for future reference`)
+
           timer.end()
         } catch (error) {
-          console.error(`❌ [BACKGROUND_AUDIO] LMNT Error: ${error.message}`)
+          console.error(`❌ [BACKGROUND_AUDIO] Error: ${error.message}`)
           timer.end()
         } finally {
-          greetingInProgress = false
+          greetingInProgress = false // Reset flag
         }
       })
     }
@@ -425,9 +449,9 @@ const setupUnifiedVoiceServer = (wss) => {
               apiKeys.deepgram = decryptedKey
               console.log(`✅ [API_KEYS] Deepgram key loaded`)
               break
-            case "lmnt":
-              apiKeys.lmnt = decryptedKey
-              console.log(`✅ [API_KEYS] LMNT key loaded`)
+            case "sarvam":
+              apiKeys.sarvam = decryptedKey
+              console.log(`✅ [API_KEYS] Sarvam key loaded`)
               break
             case "openai":
               apiKeys.openai = decryptedKey
@@ -448,7 +472,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         console.log(`🔑 [API_KEYS] Providers ready:`)
         console.log(`   - Deepgram (STT): ${apiKeys.deepgram ? "✅" : "❌"}`)
-        console.log(`   - LMNT (TTS): ${apiKeys.lmnt ? "✅" : "❌"}`)
+        console.log(`   - Sarvam (TTS): ${apiKeys.sarvam ? "✅" : "❌"}`)
         console.log(`   - OpenAI (LLM): ${apiKeys.openai ? "✅" : "❌"}`)
 
         timer.end()
@@ -627,7 +651,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
       const openaiResponse = await sendToOpenAI(text)
       if (openaiResponse) {
-        await synthesizeWithLMNT(openaiResponse, detectedLanguage)
+        await synthesizeWithSarvam(openaiResponse, detectedLanguage)
       }
     }
 
@@ -870,68 +894,110 @@ RESPONSE GUIDELINES:
       }
     }
 
-    // LMNT TTS Synthesis with WebSocket streaming (replaces Sarvam)
-    const synthesizeWithLMNT = async (text, targetLanguage = null) => {
-      if (!apiKeys.lmnt || !text.trim()) {
+    // Enhanced Sarvam TTS Synthesis with simulated streaming
+    const synthesizeWithSarvam = async (text, targetLanguage = null) => {
+      if (!apiKeys.sarvam || !text.trim()) {
         return
       }
-      shouldInterruptAudio = false // Reset interruption flag for new response
+
+      const sentences = splitIntoSentences(text)
       const useLanguage = targetLanguage || currentLanguage || "hi"
-      const voice = agentConfig?.voiceSelection || "lily"
-      const sampleRate = 16000
-      const format = "mp3"
-      const speed = 1.0
-      const options = {
-        voice,
-        format,
-        sample_rate: sampleRate,
-        speed,
-        conversational: true,
-      }
-      const lmntClient = new LMNTStreamingClient(apiKeys.lmnt)
-      try {
-        await lmntClient.connect(options)
-        let chunkCount = 0
-        await lmntClient.synthesize(
-          text,
-          (audioChunk) => {
-            if (shouldInterruptAudio) return
-            chunkCount++
-            const pythonBytesString = bufferToPythonBytesString(Buffer.from(audioChunk))
-            const audioResponse = {
-              data: {
-                session_id: sessionId,
-                count: chunkCount,
-                audio_bytes_to_play: pythonBytesString,
-                sample_rate: sampleRate,
-                channels: 1,
-                sample_width: 2,
-                is_streaming: false,
-                format,
-              },
-              type: "ai_response",
-            }
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify(audioResponse))
-            }
-          },
-          (extras) => {
-            // Optionally handle LMNT extras
-          }
-        )
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(
-            JSON.stringify({
-              type: "ai_response_complete",
-              session_id: sessionId,
-              total_chunks: chunkCount,
-            })
-          )
+      const validVoice = getValidSarvamVoice(agentConfig?.voiceSelection)
+      const sarvamLanguage = getSarvamLanguage(useLanguage)
+
+      console.log(`🎵 [SARVAM] Starting TTS generation for ${sentences.length} chunks.`)
+      shouldInterruptAudio = false // Reset interruption flag for new response
+
+      for (let i = 0; i < sentences.length; i++) {
+        const sentence = sentences[i]
+        if (shouldInterruptAudio) {
+          console.log("🛑 [SARVAM] Interrupted during sentence processing.")
+          break // Stop processing further chunks
         }
-      } catch (error) {
-        console.error(`❌ [LMNT] Error during TTS: ${error.message}`)
-      } finally {
-        lmntClient.close()
+
+        const timer = createTimer(`SARVAM_TTS_PROCESSING_CHUNK_${i}`)
+        try {
+          console.log(`🎵 [SARVAM] Generating TTS for chunk ${i + 1}/${sentences.length}: "${sentence}"`)
+          console.log(`   - Language: ${sarvamLanguage}`)
+          console.log(`   - Voice: ${validVoice} (mapped from: ${agentConfig?.voiceSelection || "default"})`)
+          console.log(`   - Agent: ${agentConfig?.agentName}`)
+
+          const requestBody = {
+            inputs: [sentence], // Send one sentence at a time
+            target_language_code: sarvamLanguage,
+            speaker: validVoice,
+            pitch: 0,
+            pace: 1.0,
+            loudness: 1.0,
+            speech_sample_rate: 22050,
+            enable_preprocessing: false,
+            model: "bulbul:v1",
+          }
+
+          const apiTimer = createTimer(`SARVAM_API_CALL_CHUNK_${i}`)
+          const response = await fetch("https://api.sarvam.ai/text-to-speech", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "API-Subscription-Key": apiKeys.sarvam,
+            },
+            body: JSON.stringify(requestBody),
+          })
+          apiTimer.end()
+
+          if (!response.ok) {
+            const errorText = await response.text()
+            console.error(`❌ [SARVAM] API error for chunk ${i + 1}: ${response.status}`, errorText)
+            throw new Error(`Sarvam API error: ${response.status}`)
+          }
+
+          const parseTimer = createTimer(`SARVAM_RESPONSE_PARSE_CHUNK_${i}`)
+          const responseData = await response.json()
+          parseTimer.end()
+
+          if (!responseData.audios || responseData.audios.length === 0) {
+            throw new Error("No audio data received for chunk")
+          }
+
+          const audioBase64 = responseData.audios[0]
+          const audioBuffer = Buffer.from(audioBase64, "base64")
+          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
+
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: i + 1, // Chunk count
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: 22050,
+              channels: 1,
+              sample_width: 2,
+              is_streaming: false, // Still sending full audio per chunk, not byte stream
+              format: "mp3",
+            },
+            type: "ai_response",
+          }
+
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify(audioResponse))
+            console.log(`✅ [SARVAM] Audio chunk ${i + 1} sent (${audioBuffer.length} bytes)`)
+          }
+
+          timer.end()
+        } catch (error) {
+          console.error(`❌ [SARVAM] Error processing chunk ${i + 1}: ${error.message}`)
+          timer.end()
+          // Continue to next chunk even if one fails
+        }
+      }
+      // After all chunks are sent (or interrupted), signal completion
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(
+          JSON.stringify({
+            type: "ai_response_complete",
+            session_id: sessionId,
+            total_chunks: sentences.length,
+          }),
+        )
       }
     }
 
@@ -1124,7 +1190,7 @@ RESPONSE GUIDELINES:
             if (data.session_id) {
               sessionId = data.session_id
             }
-            await synthesizeWithLMNT(data.text, data.language || currentLanguage)
+            await synthesizeWithSarvam(data.text, data.language || currentLanguage)
           } else if (data.data && data.data.hangup === "true") {
             console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
 
