@@ -58,7 +58,7 @@ const LANGUAGE_MAPPING = {
 const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang
   // Use the mapping for Sarvam, which likely requires locale-specific codes
-  return LANGUAGE_MAPPING[lang] || "hi-IN" // Default to hi-IN if not found
+  return "hi-IN" // Default to hi-IN if not found
 }
 
 // Get Deepgram language code
