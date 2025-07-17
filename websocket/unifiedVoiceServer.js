@@ -193,19 +193,7 @@ const setupUnifiedVoiceServer = (wss) => {
           timestamp: new Date().toISOString(),
         })
 
-        // Try to find the agent with more detailed logging
-        const agent = await Agent.findOne({ didNumber: didNumber }).lean()
-        
-        console.log(`🔍 [INSTANT_GREETING] Database query result:`, {
-          found: !!agent,
-          agentId: agent?._id,
-          agentName: agent?.agentName,
-          hasAudioBytes: !!agent?.audioBytes,
-          audioBytesType: typeof agent?.audioBytes,
-          audioBytesConstructor: agent?.audioBytes?.constructor?.name,
-          audioBytesLength: typeof agent?.audioBytes?.length === 'function' ? agent.audioBytes.length() : agent?.audioBytes?.length,
-        })
-        
+        const agent = await Agent.findOne({ didNumber: didNumber }).lean() // Use didNumber directly
         didTimer.end()
 
         if (!agent) {
@@ -225,50 +213,64 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`   - DID: ${agent.didNumber}`)
         // Debugging audioBytes
         console.log(`DEBUG: agent.audioBytes type: ${typeof agent.audioBytes}`)
-        console.log(`DEBUG: agent.audioBytes constructor: ${agent.audioBytes?.constructor?.name}`)
         if (agent.audioBytes) {
           console.log(`DEBUG: agent.audioBytes is Buffer: ${Buffer.isBuffer(agent.audioBytes)}`)
-          const length = typeof agent.audioBytes.length === 'function' ? agent.audioBytes.length() : agent.audioBytes.length
-          console.log(`DEBUG: agent.audioBytes length: ${length}`)
+          console.log(`DEBUG: agent.audioBytes length: ${agent.audioBytes.length}`)
         } else {
           console.log(`DEBUG: agent.audioBytes is null or undefined`)
         }
-        
-        const audioLength = typeof agent.audioBytes?.length === 'function' ? agent.audioBytes.length() : agent.audioBytes?.length
         console.log(
-          `   - Audio Available: ${agent.audioBytes && audioLength > 0 ? `YES (${audioLength} bytes)` : "NO"}`,
+          `   - Audio Available: ${agent.audioBytes && agent.audioBytes.length > 0 ? `YES (${agent.audioBytes.length} bytes)` : "NO"}`,
         )
 
         // Step 2: Send greeting immediately - NO WAITING
-        if (typeof agent.audioBytes === 'string' && agent.audioBytes.length > 0) {
+        if (agent.audioBytes && agent.audioBytes.length > 0) {
           const audioTimer = createTimer("INSTANT_AUDIO_SEND")
           greetingInProgress = true // Set flag
 
-          // Convert string to Buffer (raw bytes)
-          const audioBuffer = Buffer.from(agent.audioBytes, 'latin1')
-          console.log(`[INSTANT_GREETING] Sending audioBytes as raw bytes (Buffer), length: ${audioBuffer.length}`)
+          // Send audio bytes immediately
+          const pythonBytesString = bufferToPythonBytesString(agent.audioBytes)
+
+          const audioResponse = {
+            data: {
+              session_id: sessionId,
+              count: 1,
+              audio_bytes_to_play: pythonBytesString,
+              sample_rate: agent.audioMetadata?.sampleRate || 22050,
+              channels: 1,
+              sample_width: 2,
+              is_streaming: false,
+              format: agent.audioMetadata?.format || "mp3",
+            },
+            type: "ai_response",
+          }
 
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(audioBuffer) // Send as binary
+            ws.send(JSON.stringify(audioResponse))
+            ws.send(
+              JSON.stringify({
+                type: "ai_response_complete",
+                session_id: sessionId,
+                total_chunks: 1,
+              }),
+            )
             audioTimer.end()
-            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio (raw bytes) sent INSTANTLY (${audioBuffer.length} bytes)`)
+            console.log(`🚀 [INSTANT_GREETING] Pre-generated audio sent INSTANTLY`)
           }
           greetingInProgress = false // Reset flag after sending
         } else {
           // No pre-generated audio - send text immediately and generate audio in background
-          console.log(`⚠️ [INSTANT_GREETING] No pre-generated audio found, sending text greeting`)
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(
               JSON.stringify({
                 type: "instant_text_greeting",
                 session_id: sessionId,
-                message: agent.firstMessage,
-                agent: agent.agentName,
                 timestamp: new Date().toISOString(),
               }),
             )
             console.log(`📝 [INSTANT_GREETING] Text greeting sent instantly`)
           }
+
           // Generate audio in background - don't wait for it
           generateGreetingAudioBackground(agent)
         }
@@ -314,9 +316,9 @@ const setupUnifiedVoiceServer = (wss) => {
             pitch: 0,
             pace: 1.0,
             loudness: 1.0,
-            speech_sample_rate: 16000,
-            enable_preprocessing: false,
-            model: "bulbul:v1",
+            speech_sample_rate: 22050,
+            enable_preprocessing: true,
+            model: "bulbul:v2",
           }
 
           const response = await fetch("https://api.sarvam.ai/text-to-speech", {
@@ -334,14 +336,14 @@ const setupUnifiedVoiceServer = (wss) => {
             const responseData = await response.json()
             if (responseData.audios && responseData.audios.length > 0) {
               const audioBuffer = Buffer.from(responseData.audios[0], "base64")
-              const base64Audio = bufferToPythonBytesString(audioBuffer)
+              const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
               // Send audio immediately
               const audioResponse = {
                 data: {
                   session_id: sessionId,
                   count: 1,
-                  audio_bytes_to_play: base64Audio,
+                  audio_bytes_to_play: pythonBytesString,
                   sample_rate: 22050,
                   channels: 1,
                   sample_width: 2,
@@ -672,7 +674,6 @@ const setupUnifiedVoiceServer = (wss) => {
                     confidence: confidence,
                     is_final: false,
                     language: currentLanguage,
-                    agent: agentConfig?.agentName,
                   }),
                 )
               }
@@ -940,13 +941,13 @@ RESPONSE GUIDELINES:
 
           const audioBase64 = responseData.audios[0]
           const audioBuffer = Buffer.from(audioBase64, "base64")
-          const base64Audio = bufferToPythonBytesString(audioBuffer)
+          const pythonBytesString = bufferToPythonBytesString(audioBuffer)
 
           const audioResponse = {
             data: {
               session_id: sessionId,
               count: i + 1, // Chunk count
-              audio_bytes_to_play: base64Audio,
+              audio_bytes_to_play: pythonBytesString,
               sample_rate: 22050,
               channels: 1,
               sample_width: 2,
@@ -980,100 +981,19 @@ RESPONSE GUIDELINES:
       }
     }
 
-    // Utility function to convert Buffer to base64 string for audio transmission
+    // Utility function
     const bufferToPythonBytesString = (buffer) => {
-      if (!Buffer.isBuffer(buffer)) {
-        console.error(`❌ [BUFFER_CONVERSION] Input is not a Buffer: ${typeof buffer}`)
-        return ""
-      }
-
-      try {
-        // Convert buffer to base64 string for efficient transmission
-        const base64String = buffer.toString('base64')
-        console.log(`✅ [BUFFER_CONVERSION] Successfully converted ${buffer.length} bytes to base64`)
-        return base64String
-      } catch (error) {
-        console.error(`❌ [BUFFER_CONVERSION] Error converting buffer: ${error.message}`)
-        return ""
-      }
-    }
-
-    // Utility function to validate and fix audio data from database
-    const validateAndFixAudioData = (audioData) => {
-      console.log(`🔍 [AUDIO_VALIDATION] Validating audio data:`, {
-        type: typeof audioData,
-        isNull: audioData === null,
-        isUndefined: audioData === undefined,
-        length: typeof audioData?.length === 'function' ? audioData.length() : audioData?.length,
-        isBuffer: Buffer.isBuffer(audioData),
-        constructor: audioData?.constructor?.name
-      })
-
-      if (!audioData) {
-        console.log(`❌ [AUDIO_VALIDATION] Audio data is null or undefined`)
-        return null
-      }
-
-      // If it's already a valid Buffer
-      if (Buffer.isBuffer(audioData) && audioData.length > 0) {
-        console.log(`✅ [AUDIO_VALIDATION] Audio data is already a valid Buffer`)
-        return audioData
-      }
-
-      // Try to convert to Buffer
-      try {
-        let buffer = null
-
-        if (typeof audioData === 'string') {
-          // Try as base64 first
-          try {
-            buffer = Buffer.from(audioData, 'base64')
-            console.log(`✅ [AUDIO_VALIDATION] Converted from base64 string`)
-          } catch (e) {
-            // Try as regular string
-            buffer = Buffer.from(audioData)
-            console.log(`✅ [AUDIO_VALIDATION] Converted from regular string`)
-          }
-        } else if (audioData && typeof audioData === 'object') {
-          // Check if it's a MongoDB Binary object
-          if (audioData.constructor && audioData.constructor.name === 'Binary') {
-            // MongoDB Binary object - use the buffer property
-            buffer = Buffer.from(audioData.buffer)
-            console.log(`✅ [AUDIO_VALIDATION] Converted from MongoDB Binary (${buffer.length} bytes)`)
-          } else if (audioData.buffer) {
-            // TypedArray
-            buffer = Buffer.from(audioData.buffer)
-            console.log(`✅ [AUDIO_VALIDATION] Converted from TypedArray`)
-          } else if (audioData.data) {
-            // Alternative MongoDB Binary format
-            buffer = Buffer.from(audioData.data)
-            console.log(`✅ [AUDIO_VALIDATION] Converted from MongoDB Binary (data property)`)
-          } else if (Array.isArray(audioData)) {
-            // Array
-            buffer = Buffer.from(audioData)
-            console.log(`✅ [AUDIO_VALIDATION] Converted from Array`)
-          } else {
-            // Try direct conversion
-            buffer = Buffer.from(audioData)
-            console.log(`✅ [AUDIO_VALIDATION] Converted from object`)
-          }
+      let result = "b'"
+      for (let i = 0; i < buffer.length; i++) {
+        const byte = buffer[i]
+        if (byte >= 32 && byte <= 126 && byte !== 92 && byte !== 39) {
+          result += String.fromCharCode(byte)
         } else {
-          // Try direct conversion
-          buffer = Buffer.from(audioData)
-          console.log(`✅ [AUDIO_VALIDATION] Converted from unknown type`)
+          result += "\\x" + byte.toString(16).padStart(2, "0")
         }
-
-        if (buffer && Buffer.isBuffer(buffer) && buffer.length > 0) {
-          console.log(`✅ [AUDIO_VALIDATION] Successfully created valid buffer (${buffer.length} bytes)`)
-          return buffer
-        } else {
-          console.log(`❌ [AUDIO_VALIDATION] Failed to create valid buffer`)
-          return null
-        }
-      } catch (error) {
-        console.error(`❌ [AUDIO_VALIDATION] Error converting audio data: ${error.message}`)
-        return null
       }
+      result += "'"
+      return result
     }
 
     // WebSocket message handling
@@ -1157,12 +1077,6 @@ RESPONSE GUIDELINES:
                   session_id: sessionId,
                   agent: agentConfig.agentName,
                   did_number: destinationNumber,
-                  tenant_id: tenantId,
-                  providers: {
-                    stt: agentConfig.sttSelection || "deepgram",
-                    tts: agentConfig.ttsSelection || "sarvam",
-                    llm: agentConfig.llmSelection || "openai",
-                  },
                   message: "Agent matched and greeting sent",
                 }),
               )
