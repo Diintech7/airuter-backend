@@ -1,5 +1,4 @@
 const WebSocket = require("ws");
-const crypto = require("crypto");
 
 // Load API keys from environment variables
 const API_KEYS = {
