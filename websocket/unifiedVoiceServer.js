@@ -99,8 +99,8 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 100,
-        temperature: 0.7,
+        max_tokens: 50,
+        temperature: 0.3,
         stream: true,
       }),
     });
