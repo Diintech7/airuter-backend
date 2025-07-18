@@ -371,7 +371,7 @@ class OptimizedSarvamTTSProcessor {
     // Chunk size constraints for SIP (20ms - 100ms)
     const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);   // 320 bytes (20ms)
     const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);  // 1600 bytes (100ms)
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS); // 640 bytes (40ms)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS); // 640 bytes (40ms)
     
     // Ensure chunk sizes are aligned to sample boundaries (even numbers)
     const alignToSample = (size) => Math.floor(size / 2) * 2;
