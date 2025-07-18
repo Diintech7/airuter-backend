@@ -33,7 +33,7 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   return lang;
 };
 
-// ElevenLabs voice configuration for WebSocket streaming
+// ElevenLabs voice configuration for HTTP API
 const ELEVENLABS_CONFIG = {
   // Popular multilingual voices from ElevenLabs
   voices: {
@@ -47,23 +47,15 @@ const ELEVENLABS_CONFIG = {
     default: "21m00Tcm4TlvDq8ikWAM",
   },
   
-  // Model configuration optimized for WebSocket streaming
-  model: "eleven_turbo_v2", // Fastest model for real-time streaming
+  // Model configuration optimized for HTTP API
+  model: "eleven_turbo_v2", // Fastest model for real-time
   
-  // Voice settings optimized for real-time WebSocket streaming
+  // Voice settings optimized for HTTP API
   voiceSettings: {
-    stability: 0.4,        // Lower for faster response
-    similarity_boost: 0.7, // Balanced for speed and quality
-    style: 0.1,            // Minimal style for faster processing
-    use_speaker_boost: false // Disable for faster processing
-  },
-  
-  // WebSocket streaming configuration
-  streamingConfig: {
-    chunk_length_schedule: [50, 80, 120, 160, 200], // Optimized for ultra-low latency
-    enable_ssml_parsing: false, // Disable for faster processing
-    optimize_streaming_latency: 3, // Maximum optimization
-    output_format: "pcm_16000"
+    stability: 0.5,
+    similarity_boost: 0.8,
+    style: 0.2,
+    use_speaker_boost: true
   }
 };
 
@@ -196,7 +188,7 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with ElevenLabs streaming
+// Enhanced TTS processor with ElevenLabs HTTP API
 class OptimizedElevenLabsTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language;
@@ -206,16 +198,16 @@ class OptimizedElevenLabsTTSProcessor {
     this.isProcessing = false;
     this.voice = getElevenLabsVoice(DEFAULT_CONFIG.voiceSelection);
     
-    // Sentence-based processing settings optimized for WebSocket
+    // Sentence-based processing settings
     this.sentenceBuffer = "";
-    this.processingTimeout = 50; // Even faster processing for WebSocket streaming
+    this.processingTimeout = 100; // Faster processing
     this.sentenceTimer = null;
     
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
     
-    console.log(`🎵 [ELEVENLABS-WS] Initialized with voice: ${this.voice} (WebSocket streaming)`);
+    console.log(`🎵 [ELEVENLABS-HTTP] Initialized with voice: ${this.voice} (HTTP API)`);
   }
 
   addPhrase(phrase) {
@@ -304,213 +296,106 @@ class OptimizedElevenLabsTTSProcessor {
   }
 
   async synthesizeAndStreamWithElevenLabs(text) {
-    const timer = createTimer("ELEVENLABS_TTS_WS");
+    const timer = createTimer("ELEVENLABS_TTS_HTTP");
     
     try {
-      console.log(`🎵 [ELEVENLABS-WS] Synthesizing: "${text}"`);
+      console.log(`🎵 [ELEVENLABS-HTTP] Synthesizing: "${text}"`);
 
-      // Use WebSocket for real-time streaming
-      await this.streamWithWebSocket(text, timer);
+      // Use HTTP API for synthesis
+      await this.synthesizeWithHTTPAPI(text, timer);
       
-      console.log(`✅ [ELEVENLABS-WS] Complete synthesis in ${timer.end()}ms`);
+      console.log(`✅ [ELEVENLABS-HTTP] Complete synthesis in ${timer.end()}ms`);
       
     } catch (error) {
-      console.error(`❌ [ELEVENLABS-WS] Synthesis error: ${error.message}`);
+      console.error(`❌ [ELEVENLABS-HTTP] Synthesis error: ${error.message}`);
       throw error;
     }
   }
 
-  async streamWithWebSocket(text, timer) {
-    return new Promise((resolve, reject) => {
-      // ElevenLabs WebSocket URL
-      const wsUrl = `wss://api.elevenlabs.io/v1/text-to-speech/${this.voice}/stream-input?model_id=${ELEVENLABS_CONFIG.model}&output_format=pcm_16000`;
+  async synthesizeWithHTTPAPI(text, timer) {
+    try {
+      const url = `https://api.elevenlabs.io/v1/text-to-speech/${this.voice}`;
       
-      const elevenLabsWs = new WebSocket(wsUrl, {
+      const response = await fetch(url, {
+        method: "POST",
         headers: {
+          "Content-Type": "application/json",
           "xi-api-key": API_KEYS.elevenlabs,
+          "Accept": "audio/mpeg"
         },
+        body: JSON.stringify({
+          text: text,
+          model_id: ELEVENLABS_CONFIG.model,
+          voice_settings: ELEVENLABS_CONFIG.voiceSettings,
+          output_format: "mp3_22050_32"
+        })
       });
 
-      let chunkIndex = 0;
-      let totalBytes = 0;
-      let isFirstChunk = true;
-      let audioBuffer = Buffer.alloc(0);
-      
-      // Target chunk size for SIP (20ms of 8kHz audio)
-      const TARGET_CHUNK_SIZE = (8000 * 2 * 20) / 1000; // 320 bytes
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorText}`);
+      }
 
-      elevenLabsWs.onopen = () => {
-        console.log(`🔗 [ELEVENLABS-WS] Connected for text: "${text}"`);
-        
-        // Send initial configuration
-        const config = {
-          text: text,
-          voice_settings: ELEVENLABS_CONFIG.voiceSettings,
-          generation_config: {
-            chunk_length_schedule: [120, 160, 250, 290] // Optimized for low latency
+      console.log(`⚡ [ELEVENLABS-HTTP] Audio received (${timer.checkpoint('audio_received')}ms)`);
+
+      // Get audio data
+      const audioBuffer = await response.arrayBuffer();
+      const audioData = Buffer.from(audioBuffer);
+
+      // Process and stream audio
+      await this.processAndStreamAudio(audioData, timer);
+
+    } catch (error) {
+      console.error(`❌ [ELEVENLABS-HTTP] HTTP API error: ${error.message}`);
+      throw error;
+    }
+  }
+
+  async processAndStreamAudio(audioData, timer) {
+    try {
+      // For MP3 data, we need to stream it in chunks
+      // This is a simplified approach - in production, you'd want to decode MP3 to PCM first
+      const chunkSize = 1024; // 1KB chunks
+      const totalChunks = Math.ceil(audioData.length / chunkSize);
+      
+      console.log(`📤 [ELEVENLABS-HTTP] Streaming ${totalChunks} chunks (${audioData.length} bytes)`);
+
+      for (let i = 0; i < totalChunks; i++) {
+        const start = i * chunkSize;
+        const end = Math.min(start + chunkSize, audioData.length);
+        const chunk = audioData.slice(start, end);
+
+        // Convert to base64 for WebSocket transmission
+        const base64Chunk = chunk.toString('base64');
+
+        // Send to SIP
+        const mediaMessage = {
+          event: "media",
+          streamSid: this.streamSid,
+          media: {
+            payload: base64Chunk
           }
         };
 
-        elevenLabsWs.send(JSON.stringify(config));
-        
-        // Send EOS (End of Stream) signal
-        elevenLabsWs.send(JSON.stringify({ text: "" }));
-      };
-
-      elevenLabsWs.onmessage = async (event) => {
-        try {
-          if (typeof event.data === 'string') {
-            const response = JSON.parse(event.data);
-            
-            if (response.error) {
-              console.error(`❌ [ELEVENLABS-WS] Error: ${response.error}`);
-              reject(new Error(response.error));
-              return;
-            }
-            
-            if (response.audio) {
-              // Decode base64 audio
-              const audioChunk = Buffer.from(response.audio, 'base64');
-              
-              if (isFirstChunk) {
-                console.log(`⚡ [ELEVENLABS-WS] First audio chunk (${timer.checkpoint('first_audio')}ms)`);
-                isFirstChunk = false;
-              }
-              
-              // Accumulate audio data
-              audioBuffer = Buffer.concat([audioBuffer, audioChunk]);
-              totalBytes += audioChunk.length;
-              
-              // Process and send chunks when we have enough data
-              await this.processAccumulatedAudio(audioBuffer, chunkIndex, TARGET_CHUNK_SIZE);
-              
-              // Keep only unprocessed audio
-              const processedSize = Math.floor(audioBuffer.length / (TARGET_CHUNK_SIZE * 2)) * (TARGET_CHUNK_SIZE * 2);
-              audioBuffer = audioBuffer.slice(processedSize);
-              chunkIndex += Math.floor(processedSize / (TARGET_CHUNK_SIZE * 2));
-            }
-            
-            if (response.isFinal) {
-              // Process any remaining audio
-              if (audioBuffer.length > 0) {
-                await this.processAndSendFinalChunk(audioBuffer, chunkIndex);
-              }
-              
-              console.log(`📊 [ELEVENLABS-WS] Stream complete: ${chunkIndex} chunks, ${totalBytes} bytes`);
-              elevenLabsWs.close();
-              resolve();
-            }
-            
-          } else {
-            console.log(`❓ [ELEVENLABS-WS] Received binary data: ${event.data.byteLength} bytes`);
-          }
-          
-        } catch (error) {
-          console.error(`❌ [ELEVENLABS-WS] Message processing error: ${error.message}`);
-          reject(error);
+        if (this.ws.readyState === WebSocket.OPEN) {
+          this.ws.send(JSON.stringify(mediaMessage));
         }
-      };
 
-      elevenLabsWs.onerror = (error) => {
-        console.error(`❌ [ELEVENLABS-WS] WebSocket error:`, error);
-        reject(error);
-      };
-
-      elevenLabsWs.onclose = (event) => {
-        console.log(`🔌 [ELEVENLABS-WS] Connection closed: ${event.code} - ${event.reason}`);
-        if (event.code !== 1000) {
-          reject(new Error(`WebSocket closed unexpectedly: ${event.code}`));
+        // Small delay between chunks to prevent overwhelming the connection
+        if (i < totalChunks - 1) {
+          await new Promise(resolve => setTimeout(resolve, 20));
         }
-      };
-
-      // Timeout handling
-      setTimeout(() => {
-        if (elevenLabsWs.readyState === WebSocket.OPEN) {
-          elevenLabsWs.close();
-          reject(new Error("WebSocket timeout"));
-        }
-      }, 10000); // 10 second timeout
-    });
-  }
-
-  async processAccumulatedAudio(audioBuffer, startIndex, targetChunkSize) {
-    const sourceChunkSize = targetChunkSize * 2; // 16kHz to 8kHz ratio
-    let chunkIndex = startIndex;
-    
-    while (audioBuffer.length >= sourceChunkSize) {
-      const chunk = audioBuffer.slice(0, sourceChunkSize);
-      await this.processAndSendAudioChunk(chunk, chunkIndex);
-      chunkIndex++;
-      audioBuffer = audioBuffer.slice(sourceChunkSize);
-    }
-  }
-
-  async processAndSendFinalChunk(audioBuffer, chunkIndex) {
-    if (audioBuffer.length > 0) {
-      await this.processAndSendAudioChunk(audioBuffer, chunkIndex);
-    }
-  }
-
-  // This method is now handled by the WebSocket implementation above
-
-  async processAndSendAudioChunk(audioData, chunkIndex) {
-    try {
-      // Downsample from 16kHz to 8kHz for SIP compatibility
-      const downsampledAudio = this.downsampleAudio(audioData, 16000, 8000);
-      
-      if (downsampledAudio.length === 0) return;
-      
-      const durationMs = (downsampledAudio.length / (8000 * 2)) * 1000;
-      
-      console.log(`📤 [ELEVENLABS-SIP] Chunk ${chunkIndex + 1}: ${downsampledAudio.length} bytes (${durationMs.toFixed(1)}ms)`);
-      
-      // Send to SIP
-      const mediaMessage = {
-        event: "media",
-        streamSid: this.streamSid,
-        media: {
-          payload: downsampledAudio.toString("base64")
-        }
-      };
-
-      if (this.ws.readyState === WebSocket.OPEN) {
-        this.ws.send(JSON.stringify(mediaMessage));
       }
-      
-      // Calculate delay based on chunk duration
-      const delayMs = Math.max(durationMs - 5, 10); // 5ms buffer for processing
-      
-      // Wait before sending next chunk (real-time streaming)
-      await new Promise(resolve => setTimeout(resolve, delayMs));
-      
+
+      this.totalChunks += totalChunks;
+      this.totalAudioBytes += audioData.length;
+
+      console.log(`✅ [ELEVENLABS-HTTP] Streamed ${totalChunks} chunks in ${timer.checkpoint('streaming_complete')}ms`);
+
     } catch (error) {
-      console.error(`❌ [ELEVENLABS-CHUNK] Error processing chunk ${chunkIndex}: ${error.message}`);
+      console.error(`❌ [ELEVENLABS-HTTP] Streaming error: ${error.message}`);
+      throw error;
     }
-  }
-
-  downsampleAudio(audioBuffer, sourceRate, targetRate) {
-    if (sourceRate === targetRate) return audioBuffer;
-    
-    const ratio = targetRate / sourceRate;
-    const sourceLength = audioBuffer.length / 2; // 16-bit samples
-    const targetLength = Math.floor(sourceLength * ratio);
-    
-    if (targetLength === 0) return Buffer.alloc(0);
-    
-    const result = Buffer.alloc(targetLength * 2);
-    
-    for (let i = 0; i < targetLength; i++) {
-      const sourceIndex = Math.floor(i / ratio);
-      const sourceByteIndex = sourceIndex * 2;
-      
-      if (sourceByteIndex + 1 < audioBuffer.length) {
-        // Copy 16-bit sample (little-endian)
-        result[i * 2] = audioBuffer[sourceByteIndex];
-        result[i * 2 + 1] = audioBuffer[sourceByteIndex + 1];
-      }
-    }
-    
-    return result;
   }
 
   complete() {
@@ -537,10 +422,10 @@ class OptimizedElevenLabsTTSProcessor {
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [ELEVENLABS-OPTIMIZED] Voice Server started");
+  console.log("🚀 [ELEVENLABS-HTTP] Voice Server started");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New WebSocket connection with ElevenLabs");
+    console.log("🔗 [CONNECTION] New WebSocket connection with ElevenLabs HTTP API");
 
     // Session state
     let streamSid = null;
@@ -669,7 +554,7 @@ const setupUnifiedVoiceServer = (wss) => {
     };
 
     const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting with ElevenLabs WebSocket");
+      console.log("👋 [GREETING] Sending initial greeting with ElevenLabs HTTP API");
       const tts = new OptimizedElevenLabsTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
       await tts.synthesizeAndStreamWithElevenLabs(DEFAULT_CONFIG.firstMessage);
     };
@@ -681,12 +566,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [ELEVENLABS-OPTIMIZED] Connected - Protocol: ${data.protocol}`);
+            console.log(`🔗 [ELEVENLABS-HTTP] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start":
             streamSid = data.streamSid || data.start?.streamSid;
-            console.log(`🎯 [ELEVENLABS-OPTIMIZED] Stream started - StreamSid: ${streamSid}`);
+            console.log(`🎯 [ELEVENLABS-HTTP] Stream started - StreamSid: ${streamSid}`);
             
             await connectToDeepgram();
             await sendInitialGreeting();
@@ -705,23 +590,23 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case "stop":
-            console.log(`📞 [ELEVENLABS-OPTIMIZED] Stream stopped`);
+            console.log(`📞 [ELEVENLABS-HTTP] Stream stopped`);
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
             break;
 
           default:
-            console.log(`❓ [ELEVENLABS-OPTIMIZED] Unknown event: ${data.event}`);
+            console.log(`❓ [ELEVENLABS-HTTP] Unknown event: ${data.event}`);
         }
       } catch (error) {
-        console.error(`❌ [ELEVENLABS-OPTIMIZED] Message error: ${error.message}`);
+        console.error(`❌ [ELEVENLABS-HTTP] Message error: ${error.message}`);
       }
     });
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log("🔗 [ELEVENLABS-OPTIMIZED] Connection closed");
+      console.log("🔗 [ELEVENLABS-HTTP] Connection closed");
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
@@ -738,7 +623,7 @@ const setupUnifiedVoiceServer = (wss) => {
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [ELEVENLABS-OPTIMIZED] WebSocket error: ${error.message}`);
+      console.error(`❌ [ELEVENLABS-HTTP] WebSocket error: ${error.message}`);
     });
   });
 };
