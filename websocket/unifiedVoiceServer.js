@@ -75,29 +75,7 @@ const DEFAULT_CONFIG = {
   contextMemory: "customer service conversation in Hindi",
 };
 
-// Enhanced phrase detection with better chunking
-const shouldSendPhrase = (buffer) => {
-  const trimmed = buffer.trim();
-  
-  // Don't send empty phrases
-  if (!trimmed) return false;
-  
-  // Complete sentences - handles missing spaces after punctuation
-  if (/[.!?।]/.test(trimmed)) return true;
-  
-  // Meaningful phrases with natural breaks
-  if (trimmed.length >= 8 && /[,;।]\s*/.test(trimmed)) return true;
-  
-  // Longer phrases (prevent too much buffering) - reduced threshold
-  if (trimmed.length >= 15 && /\s/.test(trimmed)) return true;
-  
-  // Force send if buffer gets too long (prevent hanging)
-  if (trimmed.length >= 30) return true;
-  
-  return false;
-};
-
-// Optimized OpenAI streaming with enhanced phrase-based chunking
+// Optimized OpenAI streaming with phrase-based chunking
 const processWithOpenAIStreaming = async (userMessage, conversationHistory, onPhrase, onComplete) => {
   const timer = createTimer("OPENAI_STREAMING");
   
@@ -152,7 +130,6 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
           
           if (data === '[DONE]') {
             if (phraseBuffer.trim()) {
-              console.log(`📤 [OPENAI-FINAL] Final phrase: "${phraseBuffer.trim()}"`);
               onPhrase(phraseBuffer.trim());
               fullResponse += phraseBuffer;
             }
@@ -165,7 +142,6 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
             
             if (content) {
               phraseBuffer += content;
-              console.log(`📝 [OPENAI-CHUNK] Content: "${content}", Buffer: "${phraseBuffer}"`);
               
               // Phrase-based chunking: send when we have meaningful phrases
               if (shouldSendPhrase(phraseBuffer)) {
@@ -175,7 +151,6 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
                     console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint('first_phrase')}ms)`);
                     isFirstPhrase = false;
                   }
-                  console.log(`✅ [OPENAI-PHRASE] Sending: "${phrase}"`);
                   onPhrase(phrase);
                   fullResponse += phrase;
                   phraseBuffer = "";
@@ -199,7 +174,28 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
   }
 };
 
-// Enhanced TTS processor with better sentence detection and debugging
+// Smart phrase detection for better chunking
+const shouldSendPhrase = (buffer) => {
+  // Send phrase if we have:
+  // 1. Complete sentence (ends with punctuation)
+  // 2. Meaningful phrase (8+ chars with space)
+  // 3. Natural break points
+  
+  const trimmed = buffer.trim();
+  
+  // Complete sentences
+  if (/[.!?।]$/.test(trimmed)) return true;
+  
+  // Meaningful phrases with natural breaks
+  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true;
+  
+  // Longer phrases (prevent too much buffering)
+  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true;
+  
+  return false;
+};
+
+// Enhanced TTS processor with sentence-based optimization and SIP streaming
 class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language;
@@ -212,43 +208,36 @@ class OptimizedSarvamTTSProcessor {
     
     // Sentence-based processing settings
     this.sentenceBuffer = "";
-    this.processingTimeout = 50; // Faster processing for real-time
+    this.processingTimeout = 100; // Faster processing for real-time
     this.sentenceTimer = null;
     
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
-    
-    console.log(`🎵 [TTS-INIT] Language: ${language} → Sarvam: ${this.sarvamLanguage}, Voice: ${this.voice}`);
   }
 
   addPhrase(phrase) {
     if (!phrase.trim()) return;
     
-    const cleanPhrase = phrase.trim();
-    console.log(`📝 [TTS-PHRASE] Adding: "${cleanPhrase}"`);
-    
-    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + cleanPhrase;
+    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
     
     // Process immediately if we have complete sentences
     if (this.hasCompleteSentence(this.sentenceBuffer)) {
-      console.log(`✅ [TTS-SENTENCE] Complete sentence detected`);
       this.processCompleteSentences();
     } else {
       // Schedule processing for incomplete sentences
-      console.log(`⏳ [TTS-BUFFER] Buffering: "${this.sentenceBuffer}"`);
       this.scheduleProcessing();
     }
   }
 
   hasCompleteSentence(text) {
-    // More flexible sentence detection - handles missing spaces after punctuation
+    // Check for sentence endings in Hindi and English
     return /[.!?।॥]/.test(text);
   }
 
   extractCompleteSentences(text) {
-    // Enhanced sentence extraction with better regex
-    const sentences = text.split(/([.!?।॥])/);
+    // Split by sentence endings, keeping the punctuation
+    const sentences = text.split(/([.!?।॥])/).filter(s => s.trim());
     
     let completeSentences = "";
     let remainingText = "";
@@ -257,12 +246,12 @@ class OptimizedSarvamTTSProcessor {
       const sentence = sentences[i];
       const punctuation = sentences[i + 1];
       
-      if (punctuation && sentence.trim()) {
+      if (punctuation) {
         // Complete sentence
-        completeSentences += sentence.trim() + punctuation + " ";
-      } else if (sentence.trim()) {
+        completeSentences += sentence + punctuation + " ";
+      } else {
         // Incomplete sentence
-        remainingText = sentence.trim();
+        remainingText = sentence;
       }
     }
     
@@ -281,7 +270,6 @@ class OptimizedSarvamTTSProcessor {
     const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
     
     if (complete) {
-      console.log(`🎯 [TTS-QUEUE] Adding complete: "${complete}"`);
       this.queue.push(complete);
       this.sentenceBuffer = remaining;
       this.processQueue();
@@ -293,7 +281,6 @@ class OptimizedSarvamTTSProcessor {
     
     this.sentenceTimer = setTimeout(() => {
       if (this.sentenceBuffer.trim()) {
-        console.log(`⏰ [TTS-TIMEOUT] Processing buffered: "${this.sentenceBuffer}"`);
         this.queue.push(this.sentenceBuffer.trim());
         this.sentenceBuffer = "";
         this.processQueue();
@@ -306,8 +293,6 @@ class OptimizedSarvamTTSProcessor {
 
     this.isProcessing = true;
     const textToProcess = this.queue.shift();
-
-    console.log(`🎵 [TTS-START] Processing: "${textToProcess}"`);
 
     try {
       await this.synthesizeAndStream(textToProcess);
@@ -386,7 +371,7 @@ class OptimizedSarvamTTSProcessor {
     // Chunk size constraints for SIP (20ms - 100ms)
     const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);   // 320 bytes (20ms)
     const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);  // 1600 bytes (100ms)
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS); // 640 bytes (40ms)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS); // 640 bytes (40ms)
     
     // Ensure chunk sizes are aligned to sample boundaries (even numbers)
     const alignToSample = (size) => Math.floor(size / 2) * 2;
@@ -461,11 +446,8 @@ class OptimizedSarvamTTSProcessor {
   }
 
   complete() {
-    console.log(`🏁 [TTS-COMPLETE] Buffer: "${this.sentenceBuffer}", Queue: ${this.queue.length}`);
-    
     // Process any remaining buffered text
     if (this.sentenceBuffer.trim()) {
-      console.log(`🎯 [TTS-FINAL] Processing remaining: "${this.sentenceBuffer}"`);
       this.queue.push(this.sentenceBuffer.trim());
       this.sentenceBuffer = "";
     }
@@ -603,15 +585,8 @@ const setupUnifiedVoiceServer = (wss) => {
             optimizedTTS.addPhrase(phrase);
           },
           (fullResponse) => {
-            // Handle completion - Force process any remaining text
+            // Handle completion
             console.log(`✅ [COMPLETE] "${fullResponse}"`);
-            
-            // Force immediate processing of the complete response if not already processed
-            if (fullResponse.trim() && optimizedTTS.totalChunks === 0) {
-              console.log(`🔄 [FORCE-PROCESS] Processing complete response`);
-              optimizedTTS.addPhrase(fullResponse);
-            }
-            
             optimizedTTS.complete();
             
             // Log TTS stats
