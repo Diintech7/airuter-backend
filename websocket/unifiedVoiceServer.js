@@ -69,7 +69,7 @@ const DEFAULT_CONFIG = {
   agentName: "हिंदी सहायक",
   language: "hi",
   voiceSelection: "pavithra",
-  firstMessage: "नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ।",
+  firstMessage: "नमस्कार! एआई तोता में संपर्क करने के लिए धन्यवाद। बताइए, मैं आपकी किस प्रकार मदद कर सकता हूँ?",
   personality: "friendly",
   category: "customer service",
   contextMemory: "customer service conversation in Hindi",
