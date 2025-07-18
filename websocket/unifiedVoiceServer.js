@@ -6,9 +6,7 @@ const connectDB = require("../config/db")
 connectDB()
 
 const fetch = globalThis.fetch || require("node-fetch")
-const ffmpeg = require('fluent-ffmpeg')
-const fs = require('fs')
-const path = require('path')
+
 
 if (!fetch) {
   console.error("❌ Fetch not available. Please use Node.js 18+ or install node-fetch@2")
