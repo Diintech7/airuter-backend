@@ -6,6 +6,9 @@ const connectDB = require("../config/db")
 connectDB()
 
 const fetch = globalThis.fetch || require("node-fetch")
+const ffmpeg = require('fluent-ffmpeg')
+const fs = require('fs')
+const path = require('path')
 
 if (!fetch) {
   console.error("❌ Fetch not available. Please use Node.js 18+ or install node-fetch@2")
@@ -203,7 +206,7 @@ const setupUnifiedVoiceServer = (wss) => {
           hasAudioBytes: !!agent?.audioBytes,
           audioBytesType: typeof agent?.audioBytes,
           audioBytesConstructor: agent?.audioBytes?.constructor?.name,
-          audioBytesLength: typeof agent?.audioBytes?.length === 'function' ? agent.audioBytes.length() : agent?.audioBytes?.length,
+          audioBytesLength: typeof agent.audioBytes?.length === 'function' ? agent.audioBytes.length() : agent?.audioBytes?.length,
         })
         
         didTimer.end()
@@ -1095,124 +1098,107 @@ RESPONSE GUIDELINES:
       }
     }
 
-    // WebSocket message handling
-    ws.on("message", async (message) => {
-      const messageTimer = createTimer("MESSAGE_PROCESSING")
+    // --- C-Zentrix Protocol State ---
+    let inactivityTimer = null
+    const INACTIVITY_TIMEOUT = 30000 // 30 seconds
+    let sequenceNumber = 1
+    let streamSid = null
 
+    // --- Outbound: Send audio as C-Zentrix media event ---
+    async function sendCzMediaAudio(ws, audioBuffer, inputFormat = 'mp3') {
+      if (!streamSid) {
+        console.error('[CZ] No streamSid, cannot send media')
+        return
+      }
       try {
-        let isTextMessage = false
-        let data = null
-
-        if (typeof message === "string") {
-          isTextMessage = true
-          try {
-            data = JSON.parse(message)
-          } catch (parseError) {
-            console.error("❌ Failed to parse JSON:", parseError.message)
-            messageTimer.end()
-            return
+        const slinearBuffer = await convertToSlinear16(audioBuffer, inputFormat)
+        const base64Payload = slinearBuffer.toString('base64')
+        const msg = {
+          event: 'media',
+          streamSid,
+          sequenceNumber: String(sequenceNumber++),
+          media: {
+            payload: base64Payload
           }
+        }
+        ws.send(JSON.stringify(msg))
+        console.log(`[CZ] Sent media event, seq=${msg.sequenceNumber}, bytes=${slinearBuffer.length}`)
+      } catch (err) {
+        console.error('[CZ] Audio conversion/send error:', err.message)
+      }
+    }
+
+    // --- Outbound: Send clear, transfer, close events ---
+    function sendCzClear(ws) {
+      if (!streamSid) return
+      ws.send(JSON.stringify({ event: 'clear', streamSid }))
+      console.log('[CZ] Sent clear event')
+    }
+    function sendCzTransfer(ws, payload, chat = '', summary = '', metadata = {}) {
+      if (!streamSid) return
+      ws.send(JSON.stringify({ event: 'transfer', streamSid, transfer: { payload }, chat, summary, metadata }))
+      console.log('[CZ] Sent transfer event')
+    }
+    function sendCzClose(ws, chat = '', summary = '', metadata = {}) {
+      if (!streamSid) return
+      ws.send(JSON.stringify({ event: 'close', streamSid, chat, summary, metadata }))
+      console.log('[CZ] Sent close event')
+    }
+
+    // WebSocket message handling
+    ws.on('message', async (message) => {
+      // Reset inactivity timer
+      if (inactivityTimer) clearTimeout(inactivityTimer)
+      inactivityTimer = setTimeout(() => {
+        console.log('⏰ [TIMEOUT] No packets for 30s, closing connection.')
+        ws.close(4000, 'Inactivity timeout')
+      }, INACTIVITY_TIMEOUT)
+
+      let data = null
+      try {
+        if (typeof message === 'string') {
+          data = JSON.parse(message)
         } else if (message instanceof Buffer) {
-          try {
-            const messageStr = message.toString("utf8")
-            if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
-              data = JSON.parse(messageStr)
-              isTextMessage = true
-            } else {
-              isTextMessage = false
-            }
-          } catch (parseError) {
-            isTextMessage = false
-          }
+          const str = message.toString('utf8')
+          if (str.trim().startsWith('{')) data = JSON.parse(str)
         }
+      } catch (e) {
+        console.error('❌ [WS] Failed to parse message:', e.message)
+        return
+      }
+      if (!data) return
 
-        if (isTextMessage && data) {
-          console.log(`📨 [MESSAGE] Received: `, data)
-
-          if (data.event === "start" && data.session_id) {
-            sessionId = data.session_id
-            destinationNumber = data.Destination
-            sourceNumber = data.Source
-
-            console.log(`✅ [SESSION] SIP Call Started:`)
-            console.log(`   - Session ID: ${sessionId}`)
-            console.log(`   - Source: ${sourceNumber}`)
-            console.log(`   - Destination (DID): ${destinationNumber}`)
-
-            // IMMEDIATE ACTION: Send greeting without waiting for anything else
-            const agent = await sendInstantGreeting(destinationNumber)
-            if (!agent) {
-              console.error(`❌ [SESSION] No agent found for DID: ${destinationNumber}`)
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  message: `No agent configured for DID: ${destinationNumber}`,
-                  session_id: sessionId,
-                }),
-              )
-              messageTimer.end()
-              return
-            }
-
-            // Load API keys in background
-            const keysLoaded = await loadApiKeysForTenant(tenantId)
-            if (!keysLoaded) {
-              console.error(`❌ [SESSION] API keys not available for tenant: ${tenantId}`)
-              ws.send(
-                JSON.stringify({
-                  type: "error",
-                  message: "API keys not configured for tenant",
-                  session_id: sessionId,
-                }),
-              )
-              messageTimer.end()
-              return
-            }
-
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(
-                JSON.stringify({
-                  type: "session_started",
-                  session_id: sessionId,
-                  
-                }),
-              )
-            }
-
-            // Connect to Deepgram in background
-            try {
-              await connectToDeepgram()
-              console.log(`✅ [SESSION] Deepgram connected for ${agentConfig.agentName}`)
-            } catch (error) {
-              console.error(`❌ [SESSION] Deepgram connection failed: ${error.message}`)
-            }
-          } else if (data.type === "synthesize") {
-            if (data.session_id) {
-              sessionId = data.session_id
-            }
-            await synthesizeWithSarvam(data.text, data.language || currentLanguage)
-          } else if (data.data && data.data.hangup === "true") {
-            console.log(`📞 [SESSION] Hangup for session ${sessionId}`)
-
-            if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              deepgramWs.close(1000, "Call ended")
-            }
-
-            shouldInterruptAudio = true // Ensure any ongoing TTS stops
-
-            ws.close(1000, "Hangup requested")
+      switch (data.event) {
+        case 'connected':
+          console.log('[CZ] Connected event:', data)
+          // Optionally respond or just log
+          break
+        case 'start':
+          console.log('[CZ] Start event:', data)
+          streamSid = data.start?.streamSid || data.streamSid
+          sequenceNumber = 1
+          // Optionally store metadata
+          break
+        case 'media':
+          // Inbound audio from CZ (base64 slinear16)
+          if (data.media && data.media.payload) {
+            const audioBuffer = Buffer.from(data.media.payload, 'base64')
+            // TODO: Pass to STT or process as needed
+            console.log(`[CZ] Media event: chunk=${data.media.chunk}, ts=${data.media.timestamp}, bytes=${audioBuffer.length}`)
           }
-        } else {
-          // This is audio data
-          if (deepgramConnected && deepgramReady) {
-            await sendAudioToDeepgram(message)
-          }
-        }
-
-        messageTimer.end()
-      } catch (error) {
-        console.error(`❌ [MESSAGE] Processing error: ${error.message}`)
-        messageTimer.end()
+          break
+        case 'stop':
+          console.log('[CZ] Stop event:', data)
+          ws.close(1000, 'Call ended')
+          break
+        case 'dtmf':
+          console.log('[CZ] DTMF event:', data)
+          break
+        case 'vad':
+          console.log('[CZ] VAD event:', data)
+          break
+        default:
+          console.log('[CZ] Unknown event:', data)
       }
     })
 
