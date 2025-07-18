@@ -352,7 +352,7 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
 };
 
 // Main WebSocket server setup
-const setupStreamlinedVoiceServer = (wss) => {
+const setupUnifiedVoiceServer  = (wss) => {
   console.log("🚀 [SERVER] Streamlined Voice Server started");
 
   wss.on("connection", (ws, req) => {
@@ -658,10 +658,10 @@ const setupStreamlinedVoiceServer = (wss) => {
   });
 };
 
-module.exports = { setupStreamlinedVoiceServer };
+module.exports = { setupUnifiedVoiceServer  };
 
 // Example usage:
 // const WebSocket = require('ws');
 // const wss = new WebSocket.Server({ port: 8080 });
-// setupStreamlinedVoiceServer(wss);
+// setupUnifiedVoiceServer (wss);
 // console.log('🚀 Server running on ws://localhost:8080');
