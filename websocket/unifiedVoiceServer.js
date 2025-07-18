@@ -75,8 +75,6 @@ const DEFAULT_CONFIG = {
   contextMemory: "customer service conversation in Hindi",
 };
 
-// Language detection removed - using fixed language
-
 // Optimized OpenAI streaming with phrase-based chunking
 const processWithOpenAIStreaming = async (userMessage, conversationHistory, onPhrase, onComplete) => {
   const timer = createTimer("OPENAI_STREAMING");
@@ -197,8 +195,8 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Ultra-optimized Sarvam TTS with intelligent batching
-class OptimizedTTSProcessor {
+// Enhanced TTS processor with sentence-based optimization and SIP streaming
+class OptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language;
     this.ws = ws;
@@ -208,36 +206,83 @@ class OptimizedTTSProcessor {
     this.sarvamLanguage = getSarvamLanguage(language);
     this.voice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
     
-    // TTS optimization settings
-    this.maxBatchSize = 3; // Process up to 3 phrases in batch
-    this.processingTimeout = 150; // Max wait time before processing
-    this.batchTimer = null;
+    // Sentence-based processing settings
+    this.sentenceBuffer = "";
+    this.processingTimeout = 100; // Faster processing for real-time
+    this.sentenceTimer = null;
+    
+    // Audio streaming stats
+    this.totalChunks = 0;
+    this.totalAudioBytes = 0;
   }
 
   addPhrase(phrase) {
     if (!phrase.trim()) return;
     
-    this.queue.push(phrase.trim());
+    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
     
-    // Process immediately if it's a complete sentence or queue is full
-    if (this.shouldProcessImmediately(phrase) || this.queue.length >= this.maxBatchSize) {
-      this.processQueue();
+    // Process immediately if we have complete sentences
+    if (this.hasCompleteSentence(this.sentenceBuffer)) {
+      this.processCompleteSentences();
     } else {
-      // Set timer for batch processing
-      this.scheduleBatchProcessing();
+      // Schedule processing for incomplete sentences
+      this.scheduleProcessing();
     }
   }
 
-  shouldProcessImmediately(phrase) {
-    // Process immediately for complete sentences or urgent phrases
-    return /[.!?।]$/.test(phrase.trim()) || phrase.length > 30;
+  hasCompleteSentence(text) {
+    // Check for sentence endings in Hindi and English
+    return /[.!?।॥]/.test(text);
   }
 
-  scheduleBatchProcessing() {
-    if (this.batchTimer) clearTimeout(this.batchTimer);
+  extractCompleteSentences(text) {
+    // Split by sentence endings, keeping the punctuation
+    const sentences = text.split(/([.!?।॥])/).filter(s => s.trim());
     
-    this.batchTimer = setTimeout(() => {
-      if (this.queue.length > 0) {
+    let completeSentences = "";
+    let remainingText = "";
+    
+    for (let i = 0; i < sentences.length; i += 2) {
+      const sentence = sentences[i];
+      const punctuation = sentences[i + 1];
+      
+      if (punctuation) {
+        // Complete sentence
+        completeSentences += sentence + punctuation + " ";
+      } else {
+        // Incomplete sentence
+        remainingText = sentence;
+      }
+    }
+    
+    return {
+      complete: completeSentences.trim(),
+      remaining: remainingText.trim()
+    };
+  }
+
+  processCompleteSentences() {
+    if (this.sentenceTimer) {
+      clearTimeout(this.sentenceTimer);
+      this.sentenceTimer = null;
+    }
+
+    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
+    
+    if (complete) {
+      this.queue.push(complete);
+      this.sentenceBuffer = remaining;
+      this.processQueue();
+    }
+  }
+
+  scheduleProcessing() {
+    if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
+    
+    this.sentenceTimer = setTimeout(() => {
+      if (this.sentenceBuffer.trim()) {
+        this.queue.push(this.sentenceBuffer.trim());
+        this.sentenceBuffer = "";
         this.processQueue();
       }
     }, this.processingTimeout);
@@ -247,33 +292,27 @@ class OptimizedTTSProcessor {
     if (this.isProcessing || this.queue.length === 0) return;
 
     this.isProcessing = true;
-    if (this.batchTimer) {
-      clearTimeout(this.batchTimer);
-      this.batchTimer = null;
-    }
-
-    const phrasesToProcess = this.queue.splice(0, this.maxBatchSize);
-    const batchText = phrasesToProcess.join(' ');
+    const textToProcess = this.queue.shift();
 
     try {
-      await this.synthesizeOptimized(batchText);
+      await this.synthesizeAndStream(textToProcess);
     } catch (error) {
-      console.error(`❌ [TTS_BATCH] Error: ${error.message}`);
+      console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
     } finally {
       this.isProcessing = false;
       
-      // Process remaining queue
+      // Process next item in queue
       if (this.queue.length > 0) {
         setTimeout(() => this.processQueue(), 10);
       }
     }
   }
 
-  async synthesizeOptimized(text) {
-    const timer = createTimer("SARVAM_TTS_OPTIMIZED");
+  async synthesizeAndStream(text) {
+    const timer = createTimer("SARVAM_TTS_SENTENCE");
     
     try {
-      console.log(`🎵 [SARVAM] TTS Batch: "${text}" (${this.sarvamLanguage})`);
+      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -286,49 +325,93 @@ class OptimizedTTSProcessor {
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
           pitch: 0,
+          pace: 1.0, // Optimal pace for SIP
           loudness: 1.0,
-          speech_sample_rate: 8000,
+          speech_sample_rate: 8000, // Match SIP requirements
           enable_preprocessing: false,
           model: "bulbul:v1",
         }),
       });
 
       if (!response.ok) {
-        throw new Error(`Sarvam API error: ${response.status}`);
+        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
       }
 
       const responseData = await response.json();
       const audioBase64 = responseData.audios?.[0];
       
       if (!audioBase64) {
-        throw new Error("No audio data received");
+        throw new Error("No audio data received from Sarvam API");
       }
 
-      await this.streamAudioOptimized(audioBase64);
-      console.log(`✅ [SARVAM] TTS completed in ${timer.end()}ms`);
-
+      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
+      
+      // Stream audio with optimized SIP chunking
+      await this.streamAudioOptimizedForSIP(audioBase64);
+      
+      // Update stats
+      const audioBuffer = Buffer.from(audioBase64, "base64");
+      this.totalAudioBytes += audioBuffer.length;
+      this.totalChunks++;
+      
     } catch (error) {
-      console.error(`❌ [SARVAM] Error: ${error.message}`);
+      console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
       throw error;
     }
   }
 
-  async streamAudioOptimized(audioBase64) {
+  async streamAudioOptimizedForSIP(audioBase64) {
     const audioBuffer = Buffer.from(audioBase64, "base64");
     
-    // Optimized chunking for SIP: 160-800 bytes chunks for <20ms intervals
-    const optimalChunkSize = 640; // 40ms of audio at 8kHz
-    const minChunkSize = 160;     // 20ms minimum
+    // SIP audio chunk specifications
+    const SAMPLE_RATE = 8000; // 8kHz
+    const BYTES_PER_SAMPLE = 2; // 16-bit audio = 2 bytes per sample
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000; // 16 bytes per ms
     
-    const totalChunks = Math.ceil(audioBuffer.length / optimalChunkSize);
-    console.log(`📦 [SARVAM] Streaming ${audioBuffer.length} bytes in ${totalChunks} chunks`);
-
-    for (let i = 0; i < totalChunks; i++) {
-      const start = i * optimalChunkSize;
-      const end = Math.min(start + optimalChunkSize, audioBuffer.length);
-      const chunk = audioBuffer.slice(start, end);
+    // Chunk size constraints for SIP (20ms - 100ms)
+    const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);   // 320 bytes (20ms)
+    const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);  // 1600 bytes (100ms)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS); // 640 bytes (40ms)
+    
+    // Ensure chunk sizes are aligned to sample boundaries (even numbers)
+    const alignToSample = (size) => Math.floor(size / 2) * 2;
+    
+    const minChunk = alignToSample(MIN_CHUNK_SIZE);
+    const maxChunk = alignToSample(MAX_CHUNK_SIZE);
+    const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
+    
+    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
+    console.log(`📦 [SARVAM-SIP] Chunk config: ${minChunk}-${maxChunk} bytes (${minChunk/16}-${maxChunk/16}ms)`);
+    
+    let position = 0;
+    let chunkIndex = 0;
+    
+    while (position < audioBuffer.length) {
+      // Calculate chunk size for this iteration
+      const remaining = audioBuffer.length - position;
+      let chunkSize;
       
-      if (chunk.length >= minChunkSize) {
+      if (remaining <= maxChunk) {
+        // Last chunk - use all remaining data if >= minimum
+        chunkSize = remaining >= minChunk ? remaining : minChunk;
+      } else {
+        // Use optimal chunk size
+        chunkSize = optimalChunk;
+      }
+      
+      // Ensure we don't exceed buffer length
+      chunkSize = Math.min(chunkSize, remaining);
+      
+      // Extract chunk
+      const chunk = audioBuffer.slice(position, position + chunkSize);
+      
+      // Only send if chunk meets minimum size requirement
+      if (chunk.length >= minChunk) {
+        const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
+        
+        console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
+        
+        // Send to SIP
         const mediaMessage = {
           event: "media",
           streamSid: this.streamSid,
@@ -341,19 +424,50 @@ class OptimizedTTSProcessor {
           this.ws.send(JSON.stringify(mediaMessage));
         }
         
-        // Optimal delay for SIP streaming (15ms for smooth playback)
-        if (i < totalChunks - 1) {
-          await new Promise(resolve => setTimeout(resolve, 15));
+        // Calculate delay based on actual chunk duration
+        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        
+        // Add small buffer time for network transmission (2-3ms)
+        const networkBufferMs = 2;
+        const delayMs = Math.max(chunkDurationMs - networkBufferMs, 10);
+        
+        // Wait before sending next chunk (except for last chunk)
+        if (position + chunkSize < audioBuffer.length) {
+          await new Promise(resolve => setTimeout(resolve, delayMs));
         }
+        
+        chunkIndex++;
       }
+      
+      position += chunkSize;
     }
+    
+    console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
   }
 
   complete() {
-    // Force process any remaining queue
+    // Process any remaining buffered text
+    if (this.sentenceBuffer.trim()) {
+      this.queue.push(this.sentenceBuffer.trim());
+      this.sentenceBuffer = "";
+    }
+    
+    // Force process remaining queue
     if (this.queue.length > 0) {
       this.processQueue();
     }
+    
+    // Log final stats
+    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
+  }
+
+  // Method to get streaming statistics
+  getStats() {
+    return {
+      totalChunks: this.totalChunks,
+      totalAudioBytes: this.totalAudioBytes,
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
+    };
   }
 }
 
@@ -447,7 +561,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized utterance processing
+    // Optimized utterance processing with enhanced TTS
     const processUserUtterance = async (text) => {
       if (!text.trim() || isProcessing || text === lastProcessedText) return;
 
@@ -458,15 +572,15 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        // Initialize optimized TTS processor
-        optimizedTTS = new OptimizedTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
+        // Use the enhanced TTS processor
+        optimizedTTS = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
 
         // Process with OpenAI streaming
         const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
           (phrase) => {
-            // Handle phrase chunks
+            // Handle phrase chunks with sentence-based optimization
             console.log(`📤 [PHRASE] "${phrase}"`);
             optimizedTTS.addPhrase(phrase);
           },
@@ -474,6 +588,10 @@ const setupUnifiedVoiceServer = (wss) => {
             // Handle completion
             console.log(`✅ [COMPLETE] "${fullResponse}"`);
             optimizedTTS.complete();
+            
+            // Log TTS stats
+            const stats = optimizedTTS.getStats();
+            console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
             
             // Update conversation history
             conversationHistory.push(
@@ -500,8 +618,8 @@ const setupUnifiedVoiceServer = (wss) => {
     // Optimized initial greeting
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new OptimizedTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
-      await tts.synthesizeOptimized(DEFAULT_CONFIG.firstMessage);
+      const tts = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
+      await tts.synthesizeAndStream(DEFAULT_CONFIG.firstMessage);
     };
 
     // WebSocket message handling
