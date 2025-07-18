@@ -439,7 +439,6 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("interim_results", "true");
         deepgramUrl.searchParams.append("smart_format", "true");
         deepgramUrl.searchParams.append("endpointing", "200"); // Even faster endpointing
-        deepgramUrl.searchParams.append("vad_turnoff", "250"); // Faster VAD turnoff
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
