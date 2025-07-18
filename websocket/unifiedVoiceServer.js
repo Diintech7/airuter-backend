@@ -75,18 +75,18 @@ const DEFAULT_CONFIG = {
   contextMemory: "customer service conversation in Hindi",
 };
 
-// Optimized OpenAI streaming with phrase-based chunking
+// Ultra-optimized OpenAI streaming with aggressive phrase chunking
 const processWithOpenAIStreaming = async (userMessage, conversationHistory, onPhrase, onComplete) => {
   const timer = createTimer("OPENAI_STREAMING");
   
   try {
     const systemPrompt = `You are ${DEFAULT_CONFIG.agentName}, a helpful voice assistant.
 Language: ${DEFAULT_CONFIG.language}
-Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
+Rules: Respond in Hindi, be conversational, keep responses under 100 chars, use short sentences.`;
 
     const messages = [
       { role: "system", content: systemPrompt },
-      ...conversationHistory.slice(-6), // Keep more context for better responses
+      ...conversationHistory.slice(-4), // Reduced context for faster processing
       { role: "user", content: userMessage }
     ];
 
@@ -99,9 +99,11 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 100,
-        temperature: 0.7,
+        max_tokens: 60, // Reduced for faster responses
+        temperature: 0.5, // Reduced for faster generation
         stream: true,
+        presence_penalty: 0.1,
+        frequency_penalty: 0.1,
       }),
     });
 
@@ -143,8 +145,8 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
             if (content) {
               phraseBuffer += content;
               
-              // Phrase-based chunking: send when we have meaningful phrases
-              if (shouldSendPhrase(phraseBuffer)) {
+              // More aggressive phrase chunking for faster TTS start
+              if (shouldSendPhraseAggressive(phraseBuffer)) {
                 const phrase = phraseBuffer.trim();
                 if (phrase.length > 0) {
                   if (isFirstPhrase) {
@@ -174,145 +176,93 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
   }
 };
 
-// Smart phrase detection for better chunking
-const shouldSendPhrase = (buffer) => {
-  // Send phrase if we have:
-  // 1. Complete sentence (ends with punctuation)
-  // 2. Meaningful phrase (8+ chars with space)
-  // 3. Natural break points
-  
+// More aggressive phrase detection for ultra-low latency
+const shouldSendPhraseAggressive = (buffer) => {
   const trimmed = buffer.trim();
   
-  // Complete sentences
+  // Send immediately on complete sentences
   if (/[.!?।]$/.test(trimmed)) return true;
   
-  // Meaningful phrases with natural breaks
-  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true;
+  // Send on commas and shorter phrases (reduced threshold)
+  if (trimmed.length >= 5 && /[,;।]\s*$/.test(trimmed)) return true;
   
-  // Longer phrases (prevent too much buffering)
-  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true;
+  // Send on longer phrases (reduced threshold)
+  if (trimmed.length >= 15 && /\s/.test(trimmed)) return true;
+  
+  // Send on word boundaries for very short responses
+  if (trimmed.length >= 8 && /\s\S+$/.test(trimmed)) return true;
   
   return false;
 };
 
-// Enhanced TTS processor with sentence-based optimization and SIP streaming
-class OptimizedSarvamTTSProcessor {
+// Ultra-optimized TTS processor with parallel processing and streaming
+class UltraOptimizedSarvamTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language;
     this.ws = ws;
     this.streamSid = streamSid;
-    this.queue = [];
-    this.isProcessing = false;
+    this.processingQueue = [];
+    this.activeProcesses = new Set();
     this.sarvamLanguage = getSarvamLanguage(language);
     this.voice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
     
-    // Sentence-based processing settings
-    this.sentenceBuffer = "";
-    this.processingTimeout = 100; // Faster processing for real-time
-    this.sentenceTimer = null;
+    // Ultra-aggressive settings for minimum latency
+    this.maxParallelProcesses = 3; // Allow multiple parallel TTS requests
+    this.minPhraseLength = 3; // Process very short phrases
+    this.maxProcessingDelay = 50; // Reduced processing delay
     
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
+    this.firstAudioTime = null;
   }
 
   addPhrase(phrase) {
-    if (!phrase.trim()) return;
+    if (!phrase.trim() || phrase.length < this.minPhraseLength) return;
     
-    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
+    console.log(`📝 [TTS-QUEUE] Adding phrase: "${phrase}"`);
     
-    // Process immediately if we have complete sentences
-    if (this.hasCompleteSentence(this.sentenceBuffer)) {
-      this.processCompleteSentences();
-    } else {
-      // Schedule processing for incomplete sentences
-      this.scheduleProcessing();
-    }
+    // Add to queue and process immediately if we have capacity
+    this.processingQueue.push({
+      text: phrase.trim(),
+      timestamp: Date.now(),
+      id: `phrase_${this.totalChunks++}`
+    });
+    
+    this.processNextInQueue();
   }
 
-  hasCompleteSentence(text) {
-    // Check for sentence endings in Hindi and English
-    return /[.!?।॥]/.test(text);
-  }
-
-  extractCompleteSentences(text) {
-    // Split by sentence endings, keeping the punctuation
-    const sentences = text.split(/([.!?।॥])/).filter(s => s.trim());
-    
-    let completeSentences = "";
-    let remainingText = "";
-    
-    for (let i = 0; i < sentences.length; i += 2) {
-      const sentence = sentences[i];
-      const punctuation = sentences[i + 1];
-      
-      if (punctuation) {
-        // Complete sentence
-        completeSentences += sentence + punctuation + " ";
-      } else {
-        // Incomplete sentence
-        remainingText = sentence;
-      }
-    }
-    
-    return {
-      complete: completeSentences.trim(),
-      remaining: remainingText.trim()
-    };
-  }
-
-  processCompleteSentences() {
-    if (this.sentenceTimer) {
-      clearTimeout(this.sentenceTimer);
-      this.sentenceTimer = null;
+  async processNextInQueue() {
+    // Check if we can start a new process
+    if (this.activeProcesses.size >= this.maxParallelProcesses || this.processingQueue.length === 0) {
+      return;
     }
 
-    const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
-    
-    if (complete) {
-      this.queue.push(complete);
-      this.sentenceBuffer = remaining;
-      this.processQueue();
-    }
-  }
+    const phraseData = this.processingQueue.shift();
+    if (!phraseData) return;
 
-  scheduleProcessing() {
-    if (this.sentenceTimer) clearTimeout(this.sentenceTimer);
-    
-    this.sentenceTimer = setTimeout(() => {
-      if (this.sentenceBuffer.trim()) {
-        this.queue.push(this.sentenceBuffer.trim());
-        this.sentenceBuffer = "";
-        this.processQueue();
-      }
-    }, this.processingTimeout);
-  }
-
-  async processQueue() {
-    if (this.isProcessing || this.queue.length === 0) return;
-
-    this.isProcessing = true;
-    const textToProcess = this.queue.shift();
+    const processId = `proc_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    this.activeProcesses.add(processId);
 
     try {
-      await this.synthesizeAndStream(textToProcess);
+      await this.synthesizeAndStreamUltraFast(phraseData.text, phraseData.id);
     } catch (error) {
-      console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
+      console.error(`❌ [TTS-ULTRA] Error processing phrase: ${error.message}`);
     } finally {
-      this.isProcessing = false;
+      this.activeProcesses.delete(processId);
       
-      // Process next item in queue
-      if (this.queue.length > 0) {
-        setTimeout(() => this.processQueue(), 10);
+      // Start next process if queue has items
+      if (this.processingQueue.length > 0) {
+        setTimeout(() => this.processNextInQueue(), 10);
       }
     }
   }
 
-  async synthesizeAndStream(text) {
-    const timer = createTimer("SARVAM_TTS_SENTENCE");
+  async synthesizeAndStreamUltraFast(text, phraseId) {
+    const timer = createTimer("ULTRA_FAST_TTS");
     
     try {
-      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
+      console.log(`🚀 [TTS-ULTRA] Processing "${text}" (${phraseId})`);
 
       const response = await fetch("https://api.sarvam.ai/text-to-speech", {
         method: "POST",
@@ -325,10 +275,9 @@ class OptimizedSarvamTTSProcessor {
           target_language_code: this.sarvamLanguage,
           speaker: this.voice,
           pitch: 0,
-          pace: 1.1, // Optimal pace for SIP
           loudness: 1.0,
-          speech_sample_rate: 8000, // Match SIP requirements
-          enable_preprocessing: true,
+          speech_sample_rate: 8000,
+          enable_preprocessing: false, // OPTIMIZATION: Disable preprocessing for speed
           model: "bulbul:v1",
         }),
       });
@@ -344,74 +293,60 @@ class OptimizedSarvamTTSProcessor {
         throw new Error("No audio data received from Sarvam API");
       }
 
-      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
+      const synthesisTime = timer.end();
+      console.log(`⚡ [TTS-ULTRA] Synthesis "${text}" completed in ${synthesisTime}ms`);
       
-      // Stream audio with optimized SIP chunking
-      await this.streamAudioOptimizedForSIP(audioBase64);
+      // Track first audio timing
+      if (!this.firstAudioTime) {
+        this.firstAudioTime = synthesisTime;
+        console.log(`🎯 [TTS-ULTRA] FIRST AUDIO: ${synthesisTime}ms`);
+      }
       
-      // Update stats
-      const audioBuffer = Buffer.from(audioBase64, "base64");
-      this.totalAudioBytes += audioBuffer.length;
-      this.totalChunks++;
+      // Stream with ultra-optimized chunking
+      await this.streamAudioUltraOptimized(audioBase64, phraseId);
       
     } catch (error) {
-      console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
+      console.error(`❌ [TTS-ULTRA] Synthesis error: ${error.message}`);
       throw error;
     }
   }
 
-  async streamAudioOptimizedForSIP(audioBase64) {
+  async streamAudioUltraOptimized(audioBase64, phraseId) {
     const audioBuffer = Buffer.from(audioBase64, "base64");
     
-    // SIP audio chunk specifications
-    const SAMPLE_RATE = 8000; // 8kHz
-    const BYTES_PER_SAMPLE = 2; // 16-bit audio = 2 bytes per sample
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000; // 16 bytes per ms
+    // Ultra-optimized SIP streaming with minimal delays
+    const SAMPLE_RATE = 8000;
+    const BYTES_PER_SAMPLE = 2;
+    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000;
     
-    // Chunk size constraints for SIP (20ms - 100ms)
-    const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);   // 320 bytes (20ms)
-    const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);  // 1600 bytes (100ms)
-    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS); // 640 bytes (40ms)
+    // Smaller chunk sizes for faster streaming
+    const MIN_CHUNK_SIZE = Math.floor(15 * BYTES_PER_MS);   // 240 bytes (15ms)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(25 * BYTES_PER_MS); // 400 bytes (25ms)
     
-    // Ensure chunk sizes are aligned to sample boundaries (even numbers)
     const alignToSample = (size) => Math.floor(size / 2) * 2;
-    
     const minChunk = alignToSample(MIN_CHUNK_SIZE);
-    const maxChunk = alignToSample(MAX_CHUNK_SIZE);
     const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
     
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
-    console.log(`📦 [SARVAM-SIP] Chunk config: ${minChunk}-${maxChunk} bytes (${minChunk/16}-${maxChunk/16}ms)`);
+    console.log(`📦 [TTS-ULTRA] Streaming ${audioBuffer.length} bytes (${phraseId})`);
     
     let position = 0;
     let chunkIndex = 0;
     
     while (position < audioBuffer.length) {
-      // Calculate chunk size for this iteration
       const remaining = audioBuffer.length - position;
-      let chunkSize;
+      const chunkSize = Math.min(remaining >= optimalChunk ? optimalChunk : remaining, remaining);
       
-      if (remaining <= maxChunk) {
-        // Last chunk - use all remaining data if >= minimum
-        chunkSize = remaining >= minChunk ? remaining : minChunk;
-      } else {
-        // Use optimal chunk size
-        chunkSize = optimalChunk;
+      if (chunkSize < minChunk && remaining > minChunk) {
+        position += chunkSize;
+        continue;
       }
       
-      // Ensure we don't exceed buffer length
-      chunkSize = Math.min(chunkSize, remaining);
-      
-      // Extract chunk
       const chunk = audioBuffer.slice(position, position + chunkSize);
       
-      // Only send if chunk meets minimum size requirement
       if (chunk.length >= minChunk) {
         const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
         
-        console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
-        
-        // Send to SIP
+        // Send to SIP immediately
         const mediaMessage = {
           event: "media",
           streamSid: this.streamSid,
@@ -424,14 +359,11 @@ class OptimizedSarvamTTSProcessor {
           this.ws.send(JSON.stringify(mediaMessage));
         }
         
-        // Calculate delay based on actual chunk duration
+        // OPTIMIZATION: Minimal delay between chunks
         const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
+        const networkBufferMs = 1; // Reduced from 2-3ms to 1ms
+        const delayMs = Math.max(chunkDurationMs - networkBufferMs, 5); // Reduced minimum delay
         
-        // Add small buffer time for network transmission (2-3ms)
-        const networkBufferMs = 2;
-        const delayMs = Math.max(chunkDurationMs - networkBufferMs, 10);
-        
-        // Wait before sending next chunk (except for last chunk)
         if (position + chunkSize < audioBuffer.length) {
           await new Promise(resolve => setTimeout(resolve, delayMs));
         }
@@ -442,41 +374,42 @@ class OptimizedSarvamTTSProcessor {
       position += chunkSize;
     }
     
-    console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
+    console.log(`✅ [TTS-ULTRA] Streamed ${chunkIndex} chunks (${phraseId})`);
+    this.totalAudioBytes += audioBuffer.length;
   }
 
   complete() {
-    // Process any remaining buffered text
-    if (this.sentenceBuffer.trim()) {
-      this.queue.push(this.sentenceBuffer.trim());
-      this.sentenceBuffer = "";
-    }
+    console.log(`📊 [TTS-ULTRA] Completing - ${this.processingQueue.length} items in queue, ${this.activeProcesses.size} active`);
     
-    // Force process remaining queue
-    if (this.queue.length > 0) {
-      this.processQueue();
+    // Force process remaining queue with higher concurrency
+    this.maxParallelProcesses = 5; // Increase for final processing
+    
+    while (this.processingQueue.length > 0 && this.activeProcesses.size < this.maxParallelProcesses) {
+      this.processNextInQueue();
     }
     
     // Log final stats
-    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
+    console.log(`📊 [TTS-ULTRA-STATS] First audio: ${this.firstAudioTime}ms, Total: ${this.totalChunks} chunks, ${this.totalAudioBytes} bytes`);
   }
 
-  // Method to get streaming statistics
   getStats() {
     return {
       totalChunks: this.totalChunks,
       totalAudioBytes: this.totalAudioBytes,
-      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0
+      avgBytesPerChunk: this.totalChunks > 0 ? Math.round(this.totalAudioBytes / this.totalChunks) : 0,
+      firstAudioTime: this.firstAudioTime,
+      activeProcesses: this.activeProcesses.size,
+      queueLength: this.processingQueue.length
     };
   }
 }
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [OPTIMIZED] Voice Server started");
+  console.log("🚀 [ULTRA-OPTIMIZED] Voice Server started");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New optimized WebSocket connection");
+    console.log("🔗 [CONNECTION] New ultra-optimized WebSocket connection");
 
     // Session state
     let streamSid = null;
@@ -484,14 +417,14 @@ const setupUnifiedVoiceServer = (wss) => {
     let isProcessing = false;
     let userUtteranceBuffer = "";
     let lastProcessedText = "";
-    let optimizedTTS = null;
+    let ultraOptimizedTTS = null;
 
     // Deepgram WebSocket connection
     let deepgramWs = null;
     let deepgramReady = false;
     let deepgramAudioQueue = [];
 
-    // Optimized Deepgram connection
+    // Ultra-optimized Deepgram connection
     const connectToDeepgram = async () => {
       try {
         console.log("🔌 [DEEPGRAM] Connecting...");
@@ -505,7 +438,8 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage);
         deepgramUrl.searchParams.append("interim_results", "true");
         deepgramUrl.searchParams.append("smart_format", "true");
-        deepgramUrl.searchParams.append("endpointing", "300"); // Faster endpointing
+        deepgramUrl.searchParams.append("endpointing", "200"); // Even faster endpointing
+        deepgramUrl.searchParams.append("vad_turnoff", "250"); // Faster VAD turnoff
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -513,7 +447,7 @@ const setupUnifiedVoiceServer = (wss) => {
 
         deepgramWs.onopen = () => {
           deepgramReady = true;
-          console.log("✅ [DEEPGRAM] Connected");
+          console.log("✅ [DEEPGRAM] Connected with ultra-fast settings");
           
           // Send buffered audio
           deepgramAudioQueue.forEach(buffer => deepgramWs.send(buffer));
@@ -561,37 +495,37 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized utterance processing with enhanced TTS
+    // Ultra-optimized utterance processing
     const processUserUtterance = async (text) => {
       if (!text.trim() || isProcessing || text === lastProcessedText) return;
 
       isProcessing = true;
       lastProcessedText = text;
-      const timer = createTimer("UTTERANCE_PROCESSING");
+      const timer = createTimer("ULTRA_UTTERANCE_PROCESSING");
 
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        // Use the enhanced TTS processor
-        optimizedTTS = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
+        // Initialize ultra-optimized TTS processor
+        ultraOptimizedTTS = new UltraOptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
 
-        // Process with OpenAI streaming
+        // Process with ultra-aggressive OpenAI streaming
         const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
           (phrase) => {
-            // Handle phrase chunks with sentence-based optimization
+            // Handle phrase chunks with parallel TTS processing
             console.log(`📤 [PHRASE] "${phrase}"`);
-            optimizedTTS.addPhrase(phrase);
+            ultraOptimizedTTS.addPhrase(phrase);
           },
           (fullResponse) => {
             // Handle completion
             console.log(`✅ [COMPLETE] "${fullResponse}"`);
-            optimizedTTS.complete();
+            ultraOptimizedTTS.complete();
             
-            // Log TTS stats
-            const stats = optimizedTTS.getStats();
-            console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
+            // Log ultra-optimized stats
+            const stats = ultraOptimizedTTS.getStats();
+            console.log(`📊 [ULTRA-STATS] First audio: ${stats.firstAudioTime}ms, ${stats.totalChunks} chunks, Active: ${stats.activeProcesses}, Queue: ${stats.queueLength}`);
             
             // Update conversation history
             conversationHistory.push(
@@ -599,27 +533,27 @@ const setupUnifiedVoiceServer = (wss) => {
               { role: "assistant", content: fullResponse }
             );
 
-            // Keep last 10 messages for context
-            if (conversationHistory.length > 10) {
-              conversationHistory = conversationHistory.slice(-10);
+            // Keep last 8 messages for context (reduced from 10)
+            if (conversationHistory.length > 8) {
+              conversationHistory = conversationHistory.slice(-8);
             }
           }
         );
 
-        console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`);
+        console.log(`⚡ [ULTRA-TOTAL] Processing time: ${timer.end()}ms`);
 
       } catch (error) {
-        console.error(`❌ [PROCESSING] Error: ${error.message}`);
+        console.error(`❌ [ULTRA-PROCESSING] Error: ${error.message}`);
       } finally {
         isProcessing = false;
       }
     };
 
-    // Optimized initial greeting
+    // Ultra-optimized initial greeting
     const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
-      await tts.synthesizeAndStream(DEFAULT_CONFIG.firstMessage);
+      console.log("👋 [GREETING] Sending ultra-optimized initial greeting");
+      const tts = new UltraOptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
+      await tts.synthesizeAndStreamUltraFast(DEFAULT_CONFIG.firstMessage, "greeting");
     };
 
     // WebSocket message handling
@@ -629,12 +563,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [OPTIMIZED] Connected - Protocol: ${data.protocol}`);
+            console.log(`🔗 [ULTRA-OPTIMIZED] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start":
             streamSid = data.streamSid || data.start?.streamSid;
-            console.log(`🎯 [OPTIMIZED] Stream started - StreamSid: ${streamSid}`);
+            console.log(`🎯 [ULTRA-OPTIMIZED] Stream started - StreamSid: ${streamSid}`);
             
             await connectToDeepgram();
             await sendInitialGreeting();
@@ -653,23 +587,23 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case "stop":
-            console.log(`📞 [OPTIMIZED] Stream stopped`);
+            console.log(`📞 [ULTRA-OPTIMIZED] Stream stopped`);
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
             break;
 
           default:
-            console.log(`❓ [OPTIMIZED] Unknown event: ${data.event}`);
+            console.log(`❓ [ULTRA-OPTIMIZED] Unknown event: ${data.event}`);
         }
       } catch (error) {
-        console.error(`❌ [OPTIMIZED] Message error: ${error.message}`);
+        console.error(`❌ [ULTRA-OPTIMIZED] Message error: ${error.message}`);
       }
     });
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log("🔗 [OPTIMIZED] Connection closed");
+      console.log("🔗 [ULTRA-OPTIMIZED] Connection closed");
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
@@ -683,11 +617,11 @@ const setupUnifiedVoiceServer = (wss) => {
       lastProcessedText = "";
       deepgramReady = false;
       deepgramAudioQueue = [];
-      optimizedTTS = null;
+      ultraOptimizedTTS = null;
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [OPTIMIZED] WebSocket error: ${error.message}`);
+      console.error(`❌ [ULTRA-OPTIMIZED] WebSocket error: ${error.message}`);
     });
   });
 };
