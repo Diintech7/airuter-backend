@@ -75,70 +75,16 @@ const DEFAULT_CONFIG = {
   contextMemory: "customer service conversation in Hindi",
 };
 
-// Optimized language detection with caching
-const languageCache = new Map();
-const detectLanguage = async (text) => {
-  const cacheKey = text.substring(0, 50); // Cache based on first 50 chars
-  if (languageCache.has(cacheKey)) {
-    return languageCache.get(cacheKey);
-  }
-
-  const timer = createTimer("LANGUAGE_DETECTION");
-  
-  try {
-    if (!API_KEYS.openai || !text.trim()) {
-      return "hi";
-    }
-
-    const requestBody = {
-      model: "gpt-4o-mini",
-      messages: [
-        {
-          role: "system",
-          content: `Detect language, respond with code only: hi, en, bn, te, ta, mr, gu, kn, ml, pa, or, as, ur`,
-        },
-        { role: "user", content: text.substring(0, 100) }, // Limit text for faster processing
-      ],
-      max_tokens: 3,
-      temperature: 0,
-    };
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      console.error(`❌ [LANGUAGE_DETECT] Error: ${response.status}`);
-      return "hi";
-    }
-
-    const data = await response.json();
-    const detectedLang = data.choices?.[0]?.message?.content?.trim()?.toLowerCase() || "hi";
-    
-    // Cache the result
-    languageCache.set(cacheKey, detectedLang);
-    
-    console.log(`🔍 [LANGUAGE_DETECT] ${detectedLang} (${timer.end()}ms)`);
-    return detectedLang;
-  } catch (error) {
-    console.error(`❌ [LANGUAGE_DETECT] Error: ${error.message}`);
-    return "hi";
-  }
-};
+// Language detection removed - using fixed language
 
 // Optimized OpenAI streaming with phrase-based chunking
-const processWithOpenAIStreaming = async (userMessage, conversationHistory, currentLanguage, onPhrase, onComplete) => {
+const processWithOpenAIStreaming = async (userMessage, conversationHistory, onPhrase, onComplete) => {
   const timer = createTimer("OPENAI_STREAMING");
   
   try {
     const systemPrompt = `You are ${DEFAULT_CONFIG.agentName}, a helpful voice assistant.
-Language: ${currentLanguage}
-Rules: Respond in user's language, be conversational, keep responses under 150 chars.`;
+Language: ${DEFAULT_CONFIG.language}
+Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
 
     const messages = [
       { role: "system", content: systemPrompt },
@@ -421,8 +367,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
     // Session state
     let streamSid = null;
-    let currentLanguage = "hi";
-    let detectedLanguage = "hi";
     let conversationHistory = [];
     let isProcessing = false;
     let userUtteranceBuffer = "";
@@ -438,7 +382,7 @@ const setupUnifiedVoiceServer = (wss) => {
     const connectToDeepgram = async () => {
       try {
         console.log("🔌 [DEEPGRAM] Connecting...");
-        const deepgramLanguage = getDeepgramLanguage(currentLanguage);
+        const deepgramLanguage = getDeepgramLanguage(DEFAULT_CONFIG.language);
         
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen");
         deepgramUrl.searchParams.append("sample_rate", "8000");
@@ -516,15 +460,12 @@ const setupUnifiedVoiceServer = (wss) => {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
         // Initialize optimized TTS processor
-        optimizedTTS = new OptimizedTTSProcessor(detectedLanguage, ws, streamSid);
+        optimizedTTS = new OptimizedTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
 
-        // Process language detection and OpenAI in parallel
-        const languagePromise = detectLanguage(text);
-        
-        const responsePromise = processWithOpenAIStreaming(
+        // Process with OpenAI streaming
+        const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
-          detectedLanguage,
           (phrase) => {
             // Handle phrase chunks
             console.log(`📤 [PHRASE] "${phrase}"`);
@@ -548,14 +489,6 @@ const setupUnifiedVoiceServer = (wss) => {
           }
         );
 
-        // Wait for both operations
-        const [newLanguage, response] = await Promise.all([languagePromise, responsePromise]);
-
-        if (newLanguage !== detectedLanguage) {
-          detectedLanguage = newLanguage;
-          console.log(`🔄 [LANGUAGE] Changed to: ${detectedLanguage}`);
-        }
-
         console.log(`⚡ [TOTAL] Processing time: ${timer.end()}ms`);
 
       } catch (error) {
@@ -568,7 +501,7 @@ const setupUnifiedVoiceServer = (wss) => {
     // Optimized initial greeting
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new OptimizedTTSProcessor(currentLanguage, ws, streamSid);
+      const tts = new OptimizedTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
       await tts.synthesizeOptimized(DEFAULT_CONFIG.firstMessage);
     };
 
@@ -627,8 +560,6 @@ const setupUnifiedVoiceServer = (wss) => {
 
       // Reset state
       streamSid = null;
-      currentLanguage = "hi";
-      detectedLanguage = "hi";
       conversationHistory = [];
       isProcessing = false;
       userUtteranceBuffer = "";
