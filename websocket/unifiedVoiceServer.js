@@ -66,27 +66,57 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
 
 // Basic configuration
 const DEFAULT_CONFIG = {
-  agentName: "हिंदी सहायक",
+  agentName: "Aitota",
   language: "hi",
   voiceSelection: "pavithra",
-  firstMessage: "नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ।",
+  firstMessage: "नमस्ते! मैं Aitota हूँ। आज मैं आपकी कैसे सहायता कर सकता हूँ?",
   personality: "friendly",
   category: "customer service",
-  contextMemory: "customer service conversation in Hindi",
+  contextMemory: "customer service conversation",
 };
 
-// Optimized OpenAI streaming with phrase-based chunking
+// Helper function to clean language detection tags from response
+const cleanLanguageTag = (text) => {
+  return text.replace(/\[LANG:\w+\]\s*/g, '').trim();
+};
+
+// Enhanced OpenAI streaming with integrated language detection and Aitota persona
 const processWithOpenAIStreaming = async (userMessage, conversationHistory, onPhrase, onComplete) => {
   const timer = createTimer("OPENAI_STREAMING");
   
   try {
-    const systemPrompt = `You are ${DEFAULT_CONFIG.agentName}, a helpful voice assistant.
-Language: ${DEFAULT_CONFIG.language}
-Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
+    // Enhanced system prompt with Aitota persona and language detection
+    const systemPrompt = `You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English and Hindi. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. End each message with a friendly follow-up question to keep the conversation going. When speaking Hindi, use Devanagari script (e.g., नमस्ते, कैसे मदद कर सकता हूँ?). Your goal is to make customers feel heard, supported, and valued.
+
+CRITICAL: First, detect the language of the user's message. Then respond in the SAME language the user used. Handle numbers, technical terms, and mixed content appropriately in the detected language.
+
+Examples:
+- If user says "I forgot my password" → Respond in English
+- If user says "मेरा रिचार्ज नहीं हुआ है" → Respond in Hindi
+- If user mixes languages, use the dominant language
+
+Always start your response with [LANG:XX] where XX is the detected language code (EN for English, HI for Hindi, etc.), then provide your response in that language.
+
+Example Conversations:
+English Example 1
+User: I forgot my password.
+Aitota: [LANG:EN] No worries, I can help reset it. Should I send the reset link to your email now?
+
+English Example 2
+User: How can I track my order?
+Aitota: [LANG:EN] I'll check it for you—could you share your order ID please?
+
+Hindi Example 1
+User: मेरा रिचार्ज नहीं हुआ है।
+Aitota: [LANG:HI] क्षमा कीजिए, मैं तुरंत जाँच करता हूँ। क्या आप अपना मोबाइल नंबर बता सकते हैं?
+
+Hindi Example 2
+User: मुझे नया पता जोड़ना है।
+Aitota: [LANG:HI] बिल्कुल, कृपया नया पता बताइए। क्या आप इसे डिलीवरी एड्रेस भी बनाना चाहेंगे?`;
 
     const messages = [
       { role: "system", content: systemPrompt },
-      ...conversationHistory.slice(-6), // Keep more context for better responses
+      ...conversationHistory.slice(-6), // Keep context for better responses
       { role: "user", content: userMessage }
     ];
 
@@ -99,7 +129,7 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 50,
+        max_tokens: 100, // Increased for language detection
         temperature: 0.3,
         stream: true,
       }),
@@ -113,6 +143,7 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
     let fullResponse = "";
     let phraseBuffer = "";
     let isFirstPhrase = true;
+    let detectedLanguage = null;
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -130,8 +161,11 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
           
           if (data === '[DONE]') {
             if (phraseBuffer.trim()) {
-              onPhrase(phraseBuffer.trim());
-              fullResponse += phraseBuffer;
+              const cleanPhrase = cleanLanguageTag(phraseBuffer.trim());
+              if (cleanPhrase) {
+                onPhrase(cleanPhrase);
+                fullResponse += cleanPhrase;
+              }
             }
             break;
           }
@@ -143,16 +177,28 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
             if (content) {
               phraseBuffer += content;
               
+              // Extract language detection if present
+              if (!detectedLanguage && phraseBuffer.includes('[LANG:')) {
+                const langMatch = phraseBuffer.match(/\[LANG:(\w+)\]/);
+                if (langMatch) {
+                  detectedLanguage = langMatch[1].toLowerCase();
+                  console.log(`🗣️ [LANGUAGE] Detected: ${detectedLanguage}`);
+                  
+                  // Remove language tag from phrase buffer
+                  phraseBuffer = phraseBuffer.replace(/\[LANG:\w+\]\s*/, '');
+                }
+              }
+              
               // Phrase-based chunking: send when we have meaningful phrases
               if (shouldSendPhrase(phraseBuffer)) {
-                const phrase = phraseBuffer.trim();
-                if (phrase.length > 0) {
+                const cleanPhrase = cleanLanguageTag(phraseBuffer.trim());
+                if (cleanPhrase.length > 0) {
                   if (isFirstPhrase) {
                     console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint('first_phrase')}ms)`);
                     isFirstPhrase = false;
                   }
-                  onPhrase(phrase);
-                  fullResponse += phrase;
+                  onPhrase(cleanPhrase);
+                  fullResponse += cleanPhrase;
                   phraseBuffer = "";
                 }
               }
@@ -164,9 +210,12 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
       }
     }
 
-    console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`);
-    onComplete(fullResponse);
-    return fullResponse;
+    const cleanFullResponse = cleanLanguageTag(fullResponse);
+    console.log(`🤖 [OPENAI] Complete: "${cleanFullResponse}" (${timer.end()}ms)`);
+    
+    // Pass detected language to completion callback
+    onComplete(cleanFullResponse, detectedLanguage);
+    return { response: cleanFullResponse, language: detectedLanguage };
 
   } catch (error) {
     console.error(`❌ [OPENAI] Error: ${error.message}`);
@@ -195,15 +244,17 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with sentence-based optimization and SIP streaming
+// Enhanced TTS processor with dynamic language detection
 class OptimizedSarvamTTSProcessor {
-  constructor(language, ws, streamSid) {
-    this.language = language;
+  constructor(detectedLanguage, ws, streamSid) {
+    this.detectedLanguage = detectedLanguage || DEFAULT_CONFIG.language;
     this.ws = ws;
     this.streamSid = streamSid;
     this.queue = [];
     this.isProcessing = false;
-    this.sarvamLanguage = getSarvamLanguage(language);
+    
+    // Use detected language for Sarvam
+    this.sarvamLanguage = this.getSarvamLanguageFromDetected(this.detectedLanguage);
     this.voice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
     
     // Sentence-based processing settings
@@ -214,6 +265,28 @@ class OptimizedSarvamTTSProcessor {
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
+    
+    console.log(`🎵 [TTS-INIT] Language: ${this.detectedLanguage} → Sarvam: ${this.sarvamLanguage}`);
+  }
+
+  getSarvamLanguageFromDetected(detectedLang) {
+    const langMap = {
+      'en': 'en-IN',
+      'hi': 'hi-IN',
+      'bn': 'bn-IN',
+      'te': 'te-IN',
+      'ta': 'ta-IN',
+      'mr': 'mr-IN',
+      'gu': 'gu-IN',
+      'kn': 'kn-IN',
+      'ml': 'ml-IN',
+      'pa': 'pa-IN',
+      'or': 'or-IN',
+      'as': 'as-IN',
+      'ur': 'ur-IN'
+    };
+    
+    return langMap[detectedLang?.toLowerCase()] || 'hi-IN';
   }
 
   addPhrase(phrase) {
@@ -473,10 +546,10 @@ class OptimizedSarvamTTSProcessor {
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [OPTIMIZED] Voice Server started");
+  console.log("🚀 [AITOTA] Voice Server started with dynamic language detection");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New optimized WebSocket connection");
+    console.log("🔗 [CONNECTION] New Aitota WebSocket connection");
 
     // Session state
     let streamSid = null;
@@ -561,7 +634,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized utterance processing with enhanced TTS
+    // Updated utterance processing function to use detected language
     const processUserUtterance = async (text) => {
       if (!text.trim() || isProcessing || text === lastProcessedText) return;
 
@@ -572,21 +645,35 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        // Use the enhanced TTS processor
-        optimizedTTS = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
+        let optimizedTTS = null;
+        let detectedLanguage = null;
 
         // Process with OpenAI streaming
-        const response = await processWithOpenAIStreaming(
+        const result = await processWithOpenAIStreaming(
           text,
           conversationHistory,
           (phrase) => {
+            // Initialize TTS with detected language on first phrase
+            if (!optimizedTTS && detectedLanguage) {
+              optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid);
+            }
+            
             // Handle phrase chunks with sentence-based optimization
             console.log(`📤 [PHRASE] "${phrase}"`);
-            optimizedTTS.addPhrase(phrase);
+            if (optimizedTTS) {
+              optimizedTTS.addPhrase(phrase);
+            }
           },
-          (fullResponse) => {
+          (fullResponse, detectedLang) => {
             // Handle completion
-            console.log(`✅ [COMPLETE] "${fullResponse}"`);
+            detectedLanguage = detectedLang;
+            console.log(`✅ [COMPLETE] "${fullResponse}" (Language: ${detectedLanguage})`);
+            
+            // Initialize TTS if not already done
+            if (!optimizedTTS) {
+              optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid);
+            }
+            
             optimizedTTS.complete();
             
             // Log TTS stats
@@ -629,12 +716,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [OPTIMIZED] Connected - Protocol: ${data.protocol}`);
+            console.log(`🔗 [AITOTA] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start":
             streamSid = data.streamSid || data.start?.streamSid;
-            console.log(`🎯 [OPTIMIZED] Stream started - StreamSid: ${streamSid}`);
+            console.log(`🎯 [AITOTA] Stream started - StreamSid: ${streamSid}`);
             
             await connectToDeepgram();
             await sendInitialGreeting();
@@ -653,23 +740,23 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case "stop":
-            console.log(`📞 [OPTIMIZED] Stream stopped`);
+            console.log(`📞 [AITOTA] Stream stopped`);
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
             break;
 
           default:
-            console.log(`❓ [OPTIMIZED] Unknown event: ${data.event}`);
+            console.log(`❓ [AITOTA] Unknown event: ${data.event}`);
         }
       } catch (error) {
-        console.error(`❌ [OPTIMIZED] Message error: ${error.message}`);
+        console.error(`❌ [AITOTA] Message error: ${error.message}`);
       }
     });
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log("🔗 [OPTIMIZED] Connection closed");
+      console.log("🔗 [AITOTA] Connection closed");
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
@@ -687,7 +774,7 @@ const setupUnifiedVoiceServer = (wss) => {
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [OPTIMIZED] WebSocket error: ${error.message}`);
+      console.error(`❌ [AITOTA] WebSocket error: ${error.message}`);
     });
   });
 };
