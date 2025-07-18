@@ -3,12 +3,12 @@ const WebSocket = require("ws");
 // Load API keys from environment variables
 const API_KEYS = {
   deepgram: process.env.DEEPGRAM_API_KEY,
-  sarvam: process.env.SARVAM_API_KEY,
+  elevenlabs: process.env.ELEVENLABS_API_KEY,
   openai: process.env.OPENAI_API_KEY,
 };
 
 // Validate API keys
-if (!API_KEYS.deepgram || !API_KEYS.sarvam || !API_KEYS.openai) {
+if (!API_KEYS.deepgram || !API_KEYS.elevenlabs || !API_KEYS.openai) {
   console.error("❌ Missing required API keys in environment variables");
   process.exit(1);
 }
@@ -25,18 +25,7 @@ const createTimer = (label) => {
   };
 };
 
-// Language mappings
-const LANGUAGE_MAPPING = {
-  hi: "hi-IN", en: "en-IN", bn: "bn-IN", te: "te-IN", ta: "ta-IN",
-  mr: "mr-IN", gu: "gu-IN", kn: "kn-IN", ml: "ml-IN", pa: "pa-IN",
-  or: "or-IN", as: "as-IN", ur: "ur-IN",
-};
-
-const getSarvamLanguage = (detectedLang, defaultLang = "hi") => {
-  const lang = detectedLang?.toLowerCase() || defaultLang;
-  return LANGUAGE_MAPPING[lang] || "hi-IN";
-};
-
+// Language mappings for Deepgram
 const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   const lang = detectedLang?.toLowerCase() || defaultLang;
   if (lang === "hi") return "hi";
@@ -44,31 +33,49 @@ const getDeepgramLanguage = (detectedLang, defaultLang = "hi") => {
   return lang;
 };
 
-// Valid Sarvam voice options
-const VALID_SARVAM_VOICES = ["meera", "pavithra", "arvind", "amol", "maya"];
-
-const getValidSarvamVoice = (voiceSelection = "pavithra") => {
-  if (VALID_SARVAM_VOICES.includes(voiceSelection)) {
-    return voiceSelection;
+// ElevenLabs voice configuration for WebSocket streaming
+const ELEVENLABS_CONFIG = {
+  // Popular multilingual voices from ElevenLabs
+  voices: {
+    "male-professional": "21m00Tcm4TlvDq8ikWAM", // Rachel (English)
+    "female-professional": "AZnzlk1XvdvUeBnXmlld", // Domi (English)
+    "male-friendly": "29vD33N1CtxCmqQRPOHJ", // Drew (English)
+    "female-friendly": "21m00Tcm4TlvDq8ikWAM", // Rachel (English)
+    "multilingual-male": "onwK4e9ZLuTAKqWW03F9", // Daniel (Multilingual)
+    "multilingual-female": "Xb7hH8MSUJpSbSDYk0k2", // Alice (Multilingual)
+    neutral: "21m00Tcm4TlvDq8ikWAM",
+    default: "21m00Tcm4TlvDq8ikWAM",
+  },
+  
+  // Model configuration optimized for WebSocket streaming
+  model: "eleven_turbo_v2", // Fastest model for real-time streaming
+  
+  // Voice settings optimized for real-time WebSocket streaming
+  voiceSettings: {
+    stability: 0.4,        // Lower for faster response
+    similarity_boost: 0.7, // Balanced for speed and quality
+    style: 0.1,            // Minimal style for faster processing
+    use_speaker_boost: false // Disable for faster processing
+  },
+  
+  // WebSocket streaming configuration
+  streamingConfig: {
+    chunk_length_schedule: [50, 80, 120, 160, 200], // Optimized for ultra-low latency
+    enable_ssml_parsing: false, // Disable for faster processing
+    optimize_streaming_latency: 3, // Maximum optimization
+    output_format: "pcm_16000"
   }
-  
-  const voiceMapping = {
-    "male-professional": "arvind",
-    "female-professional": "pavithra",
-    "male-friendly": "amol",
-    "female-friendly": "maya",
-    neutral: "pavithra",
-    default: "pavithra",
-  };
-  
-  return voiceMapping[voiceSelection] || "pavithra";
+};
+
+const getElevenLabsVoice = (voiceSelection = "multilingual-female") => {
+  return ELEVENLABS_CONFIG.voices[voiceSelection] || ELEVENLABS_CONFIG.voices.default;
 };
 
 // Basic configuration
 const DEFAULT_CONFIG = {
-  agentName: "हिंदी सहायक",
+  agentName: "Voice Assistant",
   language: "hi",
-  voiceSelection: "pavithra",
+  voiceSelection: "multilingual-female",
   firstMessage: "नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ।",
   personality: "friendly",
   category: "customer service",
@@ -86,7 +93,7 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
 
     const messages = [
       { role: "system", content: systemPrompt },
-      ...conversationHistory.slice(-6), // Keep more context for better responses
+      ...conversationHistory.slice(-6),
       { role: "user", content: userMessage }
     ];
 
@@ -143,7 +150,6 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
             if (content) {
               phraseBuffer += content;
               
-              // Phrase-based chunking: send when we have meaningful phrases
               if (shouldSendPhrase(phraseBuffer)) {
                 const phrase = phraseBuffer.trim();
                 if (phrase.length > 0) {
@@ -176,11 +182,6 @@ Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
 
 // Smart phrase detection for better chunking
 const shouldSendPhrase = (buffer) => {
-  // Send phrase if we have:
-  // 1. Complete sentence (ends with punctuation)
-  // 2. Meaningful phrase (8+ chars with space)
-  // 3. Natural break points
-  
   const trimmed = buffer.trim();
   
   // Complete sentences
@@ -195,25 +196,26 @@ const shouldSendPhrase = (buffer) => {
   return false;
 };
 
-// Enhanced TTS processor with sentence-based optimization and SIP streaming
-class OptimizedSarvamTTSProcessor {
+// Enhanced TTS processor with ElevenLabs streaming
+class OptimizedElevenLabsTTSProcessor {
   constructor(language, ws, streamSid) {
     this.language = language;
     this.ws = ws;
     this.streamSid = streamSid;
     this.queue = [];
     this.isProcessing = false;
-    this.sarvamLanguage = getSarvamLanguage(language);
-    this.voice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
+    this.voice = getElevenLabsVoice(DEFAULT_CONFIG.voiceSelection);
     
-    // Sentence-based processing settings
+    // Sentence-based processing settings optimized for WebSocket
     this.sentenceBuffer = "";
-    this.processingTimeout = 100; // Faster processing for real-time
+    this.processingTimeout = 50; // Even faster processing for WebSocket streaming
     this.sentenceTimer = null;
     
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
+    
+    console.log(`🎵 [ELEVENLABS-WS] Initialized with voice: ${this.voice} (WebSocket streaming)`);
   }
 
   addPhrase(phrase) {
@@ -221,22 +223,18 @@ class OptimizedSarvamTTSProcessor {
     
     this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
     
-    // Process immediately if we have complete sentences
     if (this.hasCompleteSentence(this.sentenceBuffer)) {
       this.processCompleteSentences();
     } else {
-      // Schedule processing for incomplete sentences
       this.scheduleProcessing();
     }
   }
 
   hasCompleteSentence(text) {
-    // Check for sentence endings in Hindi and English
     return /[.!?।॥]/.test(text);
   }
 
   extractCompleteSentences(text) {
-    // Split by sentence endings, keeping the punctuation
     const sentences = text.split(/([.!?।॥])/).filter(s => s.trim());
     
     let completeSentences = "";
@@ -247,10 +245,8 @@ class OptimizedSarvamTTSProcessor {
       const punctuation = sentences[i + 1];
       
       if (punctuation) {
-        // Complete sentence
         completeSentences += sentence + punctuation + " ";
       } else {
-        // Incomplete sentence
         remainingText = sentence;
       }
     }
@@ -295,173 +291,241 @@ class OptimizedSarvamTTSProcessor {
     const textToProcess = this.queue.shift();
 
     try {
-      await this.synthesizeAndStream(textToProcess);
+      await this.synthesizeAndStreamWithElevenLabs(textToProcess);
     } catch (error) {
-      console.error(`❌ [SARVAM-TTS] Error: ${error.message}`);
+      console.error(`❌ [ELEVENLABS-TTS] Error: ${error.message}`);
     } finally {
       this.isProcessing = false;
       
-      // Process next item in queue
       if (this.queue.length > 0) {
         setTimeout(() => this.processQueue(), 10);
       }
     }
   }
 
-  async synthesizeAndStream(text) {
-    const timer = createTimer("SARVAM_TTS_SENTENCE");
+  async synthesizeAndStreamWithElevenLabs(text) {
+    const timer = createTimer("ELEVENLABS_TTS_WS");
     
     try {
-      console.log(`🎵 [SARVAM-TTS] Synthesizing: "${text}" (${this.sarvamLanguage})`);
+      console.log(`🎵 [ELEVENLABS-WS] Synthesizing: "${text}"`);
 
-      const response = await fetch("https://api.sarvam.ai/text-to-speech", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "API-Subscription-Key": API_KEYS.sarvam,
-        },
-        body: JSON.stringify({
-          inputs: [text],
-          target_language_code: this.sarvamLanguage,
-          speaker: this.voice,
-          pitch: 0,
-          pace: 1.0, // Optimal pace for SIP
-          loudness: 1.0,
-          speech_sample_rate: 8000, // Match SIP requirements
-          enable_preprocessing: false,
-          model: "bulbul:v1",
-        }),
-      });
-
-      if (!response.ok) {
-        throw new Error(`Sarvam API error: ${response.status} - ${response.statusText}`);
-      }
-
-      const responseData = await response.json();
-      const audioBase64 = responseData.audios?.[0];
+      // Use WebSocket for real-time streaming
+      await this.streamWithWebSocket(text, timer);
       
-      if (!audioBase64) {
-        throw new Error("No audio data received from Sarvam API");
-      }
-
-      console.log(`⚡ [SARVAM-TTS] Synthesis completed in ${timer.end()}ms`);
-      
-      // Stream audio with optimized SIP chunking
-      await this.streamAudioOptimizedForSIP(audioBase64);
-      
-      // Update stats
-      const audioBuffer = Buffer.from(audioBase64, "base64");
-      this.totalAudioBytes += audioBuffer.length;
-      this.totalChunks++;
+      console.log(`✅ [ELEVENLABS-WS] Complete synthesis in ${timer.end()}ms`);
       
     } catch (error) {
-      console.error(`❌ [SARVAM-TTS] Synthesis error: ${error.message}`);
+      console.error(`❌ [ELEVENLABS-WS] Synthesis error: ${error.message}`);
       throw error;
     }
   }
 
-  async streamAudioOptimizedForSIP(audioBase64) {
-    const audioBuffer = Buffer.from(audioBase64, "base64");
-    
-    // SIP audio chunk specifications
-    const SAMPLE_RATE = 8000; // 8kHz
-    const BYTES_PER_SAMPLE = 2; // 16-bit audio = 2 bytes per sample
-    const BYTES_PER_MS = (SAMPLE_RATE * BYTES_PER_SAMPLE) / 1000; // 16 bytes per ms
-    
-    // Chunk size constraints for SIP (20ms - 100ms)
-    const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);   // 320 bytes (20ms)
-    const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);  // 1600 bytes (100ms)
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS); // 640 bytes (40ms)
-    
-    // Ensure chunk sizes are aligned to sample boundaries (even numbers)
-    const alignToSample = (size) => Math.floor(size / 2) * 2;
-    
-    const minChunk = alignToSample(MIN_CHUNK_SIZE);
-    const maxChunk = alignToSample(MAX_CHUNK_SIZE);
-    const optimalChunk = alignToSample(OPTIMAL_CHUNK_SIZE);
-    
-    console.log(`📦 [SARVAM-SIP] Streaming ${audioBuffer.length} bytes`);
-    console.log(`📦 [SARVAM-SIP] Chunk config: ${minChunk}-${maxChunk} bytes (${minChunk/16}-${maxChunk/16}ms)`);
-    
-    let position = 0;
-    let chunkIndex = 0;
-    
-    while (position < audioBuffer.length) {
-      // Calculate chunk size for this iteration
-      const remaining = audioBuffer.length - position;
-      let chunkSize;
+  async streamWithWebSocket(text, timer) {
+    return new Promise((resolve, reject) => {
+      // ElevenLabs WebSocket URL
+      const wsUrl = `wss://api.elevenlabs.io/v1/text-to-speech/${this.voice}/stream-input?model_id=${ELEVENLABS_CONFIG.model}&output_format=pcm_16000`;
       
-      if (remaining <= maxChunk) {
-        // Last chunk - use all remaining data if >= minimum
-        chunkSize = remaining >= minChunk ? remaining : minChunk;
-      } else {
-        // Use optimal chunk size
-        chunkSize = optimalChunk;
-      }
+      const elevenLabsWs = new WebSocket(wsUrl, {
+        headers: {
+          "xi-api-key": API_KEYS.elevenlabs,
+        },
+      });
+
+      let chunkIndex = 0;
+      let totalBytes = 0;
+      let isFirstChunk = true;
+      let audioBuffer = Buffer.alloc(0);
       
-      // Ensure we don't exceed buffer length
-      chunkSize = Math.min(chunkSize, remaining);
-      
-      // Extract chunk
-      const chunk = audioBuffer.slice(position, position + chunkSize);
-      
-      // Only send if chunk meets minimum size requirement
-      if (chunk.length >= minChunk) {
-        const durationMs = (chunk.length / BYTES_PER_MS).toFixed(1);
+      // Target chunk size for SIP (20ms of 8kHz audio)
+      const TARGET_CHUNK_SIZE = (8000 * 2 * 20) / 1000; // 320 bytes
+
+      elevenLabsWs.onopen = () => {
+        console.log(`🔗 [ELEVENLABS-WS] Connected for text: "${text}"`);
         
-        console.log(`📤 [SARVAM-SIP] Chunk ${chunkIndex + 1}: ${chunk.length} bytes (${durationMs}ms)`);
-        
-        // Send to SIP
-        const mediaMessage = {
-          event: "media",
-          streamSid: this.streamSid,
-          media: {
-            payload: chunk.toString("base64")
+        // Send initial configuration
+        const config = {
+          text: text,
+          voice_settings: ELEVENLABS_CONFIG.voiceSettings,
+          generation_config: {
+            chunk_length_schedule: [120, 160, 250, 290] // Optimized for low latency
           }
         };
 
-        if (this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify(mediaMessage));
+        elevenLabsWs.send(JSON.stringify(config));
+        
+        // Send EOS (End of Stream) signal
+        elevenLabsWs.send(JSON.stringify({ text: "" }));
+      };
+
+      elevenLabsWs.onmessage = async (event) => {
+        try {
+          if (typeof event.data === 'string') {
+            const response = JSON.parse(event.data);
+            
+            if (response.error) {
+              console.error(`❌ [ELEVENLABS-WS] Error: ${response.error}`);
+              reject(new Error(response.error));
+              return;
+            }
+            
+            if (response.audio) {
+              // Decode base64 audio
+              const audioChunk = Buffer.from(response.audio, 'base64');
+              
+              if (isFirstChunk) {
+                console.log(`⚡ [ELEVENLABS-WS] First audio chunk (${timer.checkpoint('first_audio')}ms)`);
+                isFirstChunk = false;
+              }
+              
+              // Accumulate audio data
+              audioBuffer = Buffer.concat([audioBuffer, audioChunk]);
+              totalBytes += audioChunk.length;
+              
+              // Process and send chunks when we have enough data
+              await this.processAccumulatedAudio(audioBuffer, chunkIndex, TARGET_CHUNK_SIZE);
+              
+              // Keep only unprocessed audio
+              const processedSize = Math.floor(audioBuffer.length / (TARGET_CHUNK_SIZE * 2)) * (TARGET_CHUNK_SIZE * 2);
+              audioBuffer = audioBuffer.slice(processedSize);
+              chunkIndex += Math.floor(processedSize / (TARGET_CHUNK_SIZE * 2));
+            }
+            
+            if (response.isFinal) {
+              // Process any remaining audio
+              if (audioBuffer.length > 0) {
+                await this.processAndSendFinalChunk(audioBuffer, chunkIndex);
+              }
+              
+              console.log(`📊 [ELEVENLABS-WS] Stream complete: ${chunkIndex} chunks, ${totalBytes} bytes`);
+              elevenLabsWs.close();
+              resolve();
+            }
+            
+          } else {
+            console.log(`❓ [ELEVENLABS-WS] Received binary data: ${event.data.byteLength} bytes`);
+          }
+          
+        } catch (error) {
+          console.error(`❌ [ELEVENLABS-WS] Message processing error: ${error.message}`);
+          reject(error);
         }
-        
-        // Calculate delay based on actual chunk duration
-        const chunkDurationMs = Math.floor(chunk.length / BYTES_PER_MS);
-        
-        // Add small buffer time for network transmission (2-3ms)
-        const networkBufferMs = 2;
-        const delayMs = Math.max(chunkDurationMs - networkBufferMs, 10);
-        
-        // Wait before sending next chunk (except for last chunk)
-        if (position + chunkSize < audioBuffer.length) {
-          await new Promise(resolve => setTimeout(resolve, delayMs));
+      };
+
+      elevenLabsWs.onerror = (error) => {
+        console.error(`❌ [ELEVENLABS-WS] WebSocket error:`, error);
+        reject(error);
+      };
+
+      elevenLabsWs.onclose = (event) => {
+        console.log(`🔌 [ELEVENLABS-WS] Connection closed: ${event.code} - ${event.reason}`);
+        if (event.code !== 1000) {
+          reject(new Error(`WebSocket closed unexpectedly: ${event.code}`));
         }
-        
-        chunkIndex++;
+      };
+
+      // Timeout handling
+      setTimeout(() => {
+        if (elevenLabsWs.readyState === WebSocket.OPEN) {
+          elevenLabsWs.close();
+          reject(new Error("WebSocket timeout"));
+        }
+      }, 10000); // 10 second timeout
+    });
+  }
+
+  async processAccumulatedAudio(audioBuffer, startIndex, targetChunkSize) {
+    const sourceChunkSize = targetChunkSize * 2; // 16kHz to 8kHz ratio
+    let chunkIndex = startIndex;
+    
+    while (audioBuffer.length >= sourceChunkSize) {
+      const chunk = audioBuffer.slice(0, sourceChunkSize);
+      await this.processAndSendAudioChunk(chunk, chunkIndex);
+      chunkIndex++;
+      audioBuffer = audioBuffer.slice(sourceChunkSize);
+    }
+  }
+
+  async processAndSendFinalChunk(audioBuffer, chunkIndex) {
+    if (audioBuffer.length > 0) {
+      await this.processAndSendAudioChunk(audioBuffer, chunkIndex);
+    }
+  }
+
+  // This method is now handled by the WebSocket implementation above
+
+  async processAndSendAudioChunk(audioData, chunkIndex) {
+    try {
+      // Downsample from 16kHz to 8kHz for SIP compatibility
+      const downsampledAudio = this.downsampleAudio(audioData, 16000, 8000);
+      
+      if (downsampledAudio.length === 0) return;
+      
+      const durationMs = (downsampledAudio.length / (8000 * 2)) * 1000;
+      
+      console.log(`📤 [ELEVENLABS-SIP] Chunk ${chunkIndex + 1}: ${downsampledAudio.length} bytes (${durationMs.toFixed(1)}ms)`);
+      
+      // Send to SIP
+      const mediaMessage = {
+        event: "media",
+        streamSid: this.streamSid,
+        media: {
+          payload: downsampledAudio.toString("base64")
+        }
+      };
+
+      if (this.ws.readyState === WebSocket.OPEN) {
+        this.ws.send(JSON.stringify(mediaMessage));
       }
       
-      position += chunkSize;
+      // Calculate delay based on chunk duration
+      const delayMs = Math.max(durationMs - 5, 10); // 5ms buffer for processing
+      
+      // Wait before sending next chunk (real-time streaming)
+      await new Promise(resolve => setTimeout(resolve, delayMs));
+      
+    } catch (error) {
+      console.error(`❌ [ELEVENLABS-CHUNK] Error processing chunk ${chunkIndex}: ${error.message}`);
+    }
+  }
+
+  downsampleAudio(audioBuffer, sourceRate, targetRate) {
+    if (sourceRate === targetRate) return audioBuffer;
+    
+    const ratio = targetRate / sourceRate;
+    const sourceLength = audioBuffer.length / 2; // 16-bit samples
+    const targetLength = Math.floor(sourceLength * ratio);
+    
+    if (targetLength === 0) return Buffer.alloc(0);
+    
+    const result = Buffer.alloc(targetLength * 2);
+    
+    for (let i = 0; i < targetLength; i++) {
+      const sourceIndex = Math.floor(i / ratio);
+      const sourceByteIndex = sourceIndex * 2;
+      
+      if (sourceByteIndex + 1 < audioBuffer.length) {
+        // Copy 16-bit sample (little-endian)
+        result[i * 2] = audioBuffer[sourceByteIndex];
+        result[i * 2 + 1] = audioBuffer[sourceByteIndex + 1];
+      }
     }
     
-    console.log(`✅ [SARVAM-SIP] Completed streaming ${chunkIndex} chunks`);
+    return result;
   }
 
   complete() {
-    // Process any remaining buffered text
     if (this.sentenceBuffer.trim()) {
       this.queue.push(this.sentenceBuffer.trim());
       this.sentenceBuffer = "";
     }
     
-    // Force process remaining queue
     if (this.queue.length > 0) {
       this.processQueue();
     }
     
-    // Log final stats
-    console.log(`📊 [SARVAM-STATS] Total: ${this.totalChunks} sentences, ${this.totalAudioBytes} bytes`);
+    console.log(`📊 [ELEVENLABS-STATS] Total: ${this.totalChunks} chunks, ${this.totalAudioBytes} bytes`);
   }
 
-  // Method to get streaming statistics
   getStats() {
     return {
       totalChunks: this.totalChunks,
@@ -473,10 +537,10 @@ class OptimizedSarvamTTSProcessor {
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [OPTIMIZED] Voice Server started");
+  console.log("🚀 [ELEVENLABS-OPTIMIZED] Voice Server started");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New optimized WebSocket connection");
+    console.log("🔗 [CONNECTION] New WebSocket connection with ElevenLabs");
 
     // Session state
     let streamSid = null;
@@ -491,7 +555,6 @@ const setupUnifiedVoiceServer = (wss) => {
     let deepgramReady = false;
     let deepgramAudioQueue = [];
 
-    // Optimized Deepgram connection
     const connectToDeepgram = async () => {
       try {
         console.log("🔌 [DEEPGRAM] Connecting...");
@@ -505,7 +568,7 @@ const setupUnifiedVoiceServer = (wss) => {
         deepgramUrl.searchParams.append("language", deepgramLanguage);
         deepgramUrl.searchParams.append("interim_results", "true");
         deepgramUrl.searchParams.append("smart_format", "true");
-        deepgramUrl.searchParams.append("endpointing", "300"); // Faster endpointing
+        deepgramUrl.searchParams.append("endpointing", "300");
 
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
@@ -515,7 +578,6 @@ const setupUnifiedVoiceServer = (wss) => {
           deepgramReady = true;
           console.log("✅ [DEEPGRAM] Connected");
           
-          // Send buffered audio
           deepgramAudioQueue.forEach(buffer => deepgramWs.send(buffer));
           deepgramAudioQueue = [];
         };
@@ -540,7 +602,6 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Handle Deepgram responses
     const handleDeepgramResponse = async (data) => {
       if (data.type === "Results") {
         const transcript = data.channel?.alternatives?.[0]?.transcript;
@@ -561,7 +622,6 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized utterance processing with enhanced TTS
     const processUserUtterance = async (text) => {
       if (!text.trim() || isProcessing || text === lastProcessedText) return;
 
@@ -572,34 +632,27 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        // Use the enhanced TTS processor
-        optimizedTTS = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
+        optimizedTTS = new OptimizedElevenLabsTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
 
-        // Process with OpenAI streaming
         const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
           (phrase) => {
-            // Handle phrase chunks with sentence-based optimization
             console.log(`📤 [PHRASE] "${phrase}"`);
             optimizedTTS.addPhrase(phrase);
           },
           (fullResponse) => {
-            // Handle completion
             console.log(`✅ [COMPLETE] "${fullResponse}"`);
             optimizedTTS.complete();
             
-            // Log TTS stats
             const stats = optimizedTTS.getStats();
             console.log(`📊 [TTS-STATS] ${stats.totalChunks} chunks, ${stats.avgBytesPerChunk} avg bytes/chunk`);
             
-            // Update conversation history
             conversationHistory.push(
               { role: "user", content: text },
               { role: "assistant", content: fullResponse }
             );
 
-            // Keep last 10 messages for context
             if (conversationHistory.length > 10) {
               conversationHistory = conversationHistory.slice(-10);
             }
@@ -615,11 +668,10 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Optimized initial greeting
     const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting");
-      const tts = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
-      await tts.synthesizeAndStream(DEFAULT_CONFIG.firstMessage);
+      console.log("👋 [GREETING] Sending initial greeting with ElevenLabs WebSocket");
+      const tts = new OptimizedElevenLabsTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
+      await tts.synthesizeAndStreamWithElevenLabs(DEFAULT_CONFIG.firstMessage);
     };
 
     // WebSocket message handling
@@ -629,12 +681,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [OPTIMIZED] Connected - Protocol: ${data.protocol}`);
+            console.log(`🔗 [ELEVENLABS-OPTIMIZED] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start":
             streamSid = data.streamSid || data.start?.streamSid;
-            console.log(`🎯 [OPTIMIZED] Stream started - StreamSid: ${streamSid}`);
+            console.log(`🎯 [ELEVENLABS-OPTIMIZED] Stream started - StreamSid: ${streamSid}`);
             
             await connectToDeepgram();
             await sendInitialGreeting();
@@ -653,29 +705,28 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case "stop":
-            console.log(`📞 [OPTIMIZED] Stream stopped`);
+            console.log(`📞 [ELEVENLABS-OPTIMIZED] Stream stopped`);
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
             break;
 
           default:
-            console.log(`❓ [OPTIMIZED] Unknown event: ${data.event}`);
+            console.log(`❓ [ELEVENLABS-OPTIMIZED] Unknown event: ${data.event}`);
         }
       } catch (error) {
-        console.error(`❌ [OPTIMIZED] Message error: ${error.message}`);
+        console.error(`❌ [ELEVENLABS-OPTIMIZED] Message error: ${error.message}`);
       }
     });
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log("🔗 [OPTIMIZED] Connection closed");
+      console.log("🔗 [ELEVENLABS-OPTIMIZED] Connection closed");
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
       }
 
-      // Reset state
       streamSid = null;
       conversationHistory = [];
       isProcessing = false;
@@ -687,7 +738,7 @@ const setupUnifiedVoiceServer = (wss) => {
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [OPTIMIZED] WebSocket error: ${error.message}`);
+      console.error(`❌ [ELEVENLABS-OPTIMIZED] WebSocket error: ${error.message}`);
     });
   });
 };
