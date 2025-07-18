@@ -66,57 +66,49 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
 
 // Basic configuration
 const DEFAULT_CONFIG = {
-  agentName: "Aitota",
+  agentName: "हिंदी सहायक",
   language: "hi",
   voiceSelection: "pavithra",
-  firstMessage: "नमस्ते! मैं Aitota हूँ। आज मैं आपकी कैसे सहायता कर सकता हूँ?",
+  firstMessage: "नमस्ते! मैं आपकी सहायता के लिए यहाँ हूँ।",
   personality: "friendly",
   category: "customer service",
-  contextMemory: "customer service conversation",
+  contextMemory: "customer service conversation in Hindi",
 };
 
-// Helper function to clean language detection tags from response
-const cleanLanguageTag = (text) => {
-  return text.replace(/\[LANG:\w+\]\s*/g, '').trim();
+// Enhanced phrase detection with better chunking
+const shouldSendPhrase = (buffer) => {
+  const trimmed = buffer.trim();
+  
+  // Don't send empty phrases
+  if (!trimmed) return false;
+  
+  // Complete sentences - handles missing spaces after punctuation
+  if (/[.!?।]/.test(trimmed)) return true;
+  
+  // Meaningful phrases with natural breaks
+  if (trimmed.length >= 8 && /[,;।]\s*/.test(trimmed)) return true;
+  
+  // Longer phrases (prevent too much buffering) - reduced threshold
+  if (trimmed.length >= 15 && /\s/.test(trimmed)) return true;
+  
+  // Force send if buffer gets too long (prevent hanging)
+  if (trimmed.length >= 30) return true;
+  
+  return false;
 };
 
-// Enhanced OpenAI streaming with integrated language detection and Aitota persona
+// Optimized OpenAI streaming with enhanced phrase-based chunking
 const processWithOpenAIStreaming = async (userMessage, conversationHistory, onPhrase, onComplete) => {
   const timer = createTimer("OPENAI_STREAMING");
   
   try {
-    // Enhanced system prompt with Aitota persona and language detection
-    const systemPrompt = `You are Aitota, a polite, emotionally intelligent AI customer care executive. You speak fluently in English and Hindi. Use natural, conversational language with warmth and empathy. Keep responses short—just 1–2 lines. End each message with a friendly follow-up question to keep the conversation going. When speaking Hindi, use Devanagari script (e.g., नमस्ते, कैसे मदद कर सकता हूँ?). Your goal is to make customers feel heard, supported, and valued.
-
-CRITICAL: First, detect the language of the user's message. Then respond in the SAME language the user used. Handle numbers, technical terms, and mixed content appropriately in the detected language.
-
-Examples:
-- If user says "I forgot my password" → Respond in English
-- If user says "मेरा रिचार्ज नहीं हुआ है" → Respond in Hindi
-- If user mixes languages, use the dominant language
-
-Always start your response with [LANG:XX] where XX is the detected language code (EN for English, HI for Hindi, etc.), then provide your response in that language.
-
-Example Conversations:
-English Example 1
-User: I forgot my password.
-Aitota: [LANG:EN] No worries, I can help reset it. Should I send the reset link to your email now?
-
-English Example 2
-User: How can I track my order?
-Aitota: [LANG:EN] I'll check it for you—could you share your order ID please?
-
-Hindi Example 1
-User: मेरा रिचार्ज नहीं हुआ है।
-Aitota: [LANG:HI] क्षमा कीजिए, मैं तुरंत जाँच करता हूँ। क्या आप अपना मोबाइल नंबर बता सकते हैं?
-
-Hindi Example 2
-User: मुझे नया पता जोड़ना है।
-Aitota: [LANG:HI] बिल्कुल, कृपया नया पता बताइए। क्या आप इसे डिलीवरी एड्रेस भी बनाना चाहेंगे?`;
+    const systemPrompt = `You are ${DEFAULT_CONFIG.agentName}, a helpful voice assistant.
+Language: ${DEFAULT_CONFIG.language}
+Rules: Respond in Hindi, be conversational, keep responses under 150 chars.`;
 
     const messages = [
       { role: "system", content: systemPrompt },
-      ...conversationHistory.slice(-6), // Keep context for better responses
+      ...conversationHistory.slice(-6), // Keep more context for better responses
       { role: "user", content: userMessage }
     ];
 
@@ -129,7 +121,7 @@ Aitota: [LANG:HI] बिल्कुल, कृपया नया पता ब
       body: JSON.stringify({
         model: "gpt-4o-mini",
         messages,
-        max_tokens: 100, // Increased for language detection
+        max_tokens: 50,
         temperature: 0.3,
         stream: true,
       }),
@@ -143,7 +135,6 @@ Aitota: [LANG:HI] बिल्कुल, कृपया नया पता ब
     let fullResponse = "";
     let phraseBuffer = "";
     let isFirstPhrase = true;
-    let detectedLanguage = null;
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -161,11 +152,9 @@ Aitota: [LANG:HI] बिल्कुल, कृपया नया पता ब
           
           if (data === '[DONE]') {
             if (phraseBuffer.trim()) {
-              const cleanPhrase = cleanLanguageTag(phraseBuffer.trim());
-              if (cleanPhrase) {
-                onPhrase(cleanPhrase);
-                fullResponse += cleanPhrase;
-              }
+              console.log(`📤 [OPENAI-FINAL] Final phrase: "${phraseBuffer.trim()}"`);
+              onPhrase(phraseBuffer.trim());
+              fullResponse += phraseBuffer;
             }
             break;
           }
@@ -176,29 +165,19 @@ Aitota: [LANG:HI] बिल्कुल, कृपया नया पता ब
             
             if (content) {
               phraseBuffer += content;
-              
-              // Extract language detection if present
-              if (!detectedLanguage && phraseBuffer.includes('[LANG:')) {
-                const langMatch = phraseBuffer.match(/\[LANG:(\w+)\]/);
-                if (langMatch) {
-                  detectedLanguage = langMatch[1].toLowerCase();
-                  console.log(`🗣️ [LANGUAGE] Detected: ${detectedLanguage}`);
-                  
-                  // Remove language tag from phrase buffer
-                  phraseBuffer = phraseBuffer.replace(/\[LANG:\w+\]\s*/, '');
-                }
-              }
+              console.log(`📝 [OPENAI-CHUNK] Content: "${content}", Buffer: "${phraseBuffer}"`);
               
               // Phrase-based chunking: send when we have meaningful phrases
               if (shouldSendPhrase(phraseBuffer)) {
-                const cleanPhrase = cleanLanguageTag(phraseBuffer.trim());
-                if (cleanPhrase.length > 0) {
+                const phrase = phraseBuffer.trim();
+                if (phrase.length > 0) {
                   if (isFirstPhrase) {
                     console.log(`⚡ [OPENAI] First phrase (${timer.checkpoint('first_phrase')}ms)`);
                     isFirstPhrase = false;
                   }
-                  onPhrase(cleanPhrase);
-                  fullResponse += cleanPhrase;
+                  console.log(`✅ [OPENAI-PHRASE] Sending: "${phrase}"`);
+                  onPhrase(phrase);
+                  fullResponse += phrase;
                   phraseBuffer = "";
                 }
               }
@@ -210,12 +189,9 @@ Aitota: [LANG:HI] बिल्कुल, कृपया नया पता ब
       }
     }
 
-    const cleanFullResponse = cleanLanguageTag(fullResponse);
-    console.log(`🤖 [OPENAI] Complete: "${cleanFullResponse}" (${timer.end()}ms)`);
-    
-    // Pass detected language to completion callback
-    onComplete(cleanFullResponse, detectedLanguage);
-    return { response: cleanFullResponse, language: detectedLanguage };
+    console.log(`🤖 [OPENAI] Complete: "${fullResponse}" (${timer.end()}ms)`);
+    onComplete(fullResponse);
+    return fullResponse;
 
   } catch (error) {
     console.error(`❌ [OPENAI] Error: ${error.message}`);
@@ -223,94 +199,56 @@ Aitota: [LANG:HI] बिल्कुल, कृपया नया पता ब
   }
 };
 
-// Smart phrase detection for better chunking
-const shouldSendPhrase = (buffer) => {
-  // Send phrase if we have:
-  // 1. Complete sentence (ends with punctuation)
-  // 2. Meaningful phrase (8+ chars with space)
-  // 3. Natural break points
-  
-  const trimmed = buffer.trim();
-  
-  // Complete sentences
-  if (/[.!?।]$/.test(trimmed)) return true;
-  
-  // Meaningful phrases with natural breaks
-  if (trimmed.length >= 8 && /[,;।]\s*$/.test(trimmed)) return true;
-  
-  // Longer phrases (prevent too much buffering)
-  if (trimmed.length >= 25 && /\s/.test(trimmed)) return true;
-  
-  return false;
-};
-
-// Enhanced TTS processor with dynamic language detection
+// Enhanced TTS processor with better sentence detection and debugging
 class OptimizedSarvamTTSProcessor {
-  constructor(detectedLanguage, ws, streamSid) {
-    this.detectedLanguage = detectedLanguage || DEFAULT_CONFIG.language;
+  constructor(language, ws, streamSid) {
+    this.language = language;
     this.ws = ws;
     this.streamSid = streamSid;
     this.queue = [];
     this.isProcessing = false;
-    
-    // Use detected language for Sarvam
-    this.sarvamLanguage = this.getSarvamLanguageFromDetected(this.detectedLanguage);
+    this.sarvamLanguage = getSarvamLanguage(language);
     this.voice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
     
     // Sentence-based processing settings
     this.sentenceBuffer = "";
-    this.processingTimeout = 100; // Faster processing for real-time
+    this.processingTimeout = 50; // Faster processing for real-time
     this.sentenceTimer = null;
     
     // Audio streaming stats
     this.totalChunks = 0;
     this.totalAudioBytes = 0;
     
-    console.log(`🎵 [TTS-INIT] Language: ${this.detectedLanguage} → Sarvam: ${this.sarvamLanguage}`);
-  }
-
-  getSarvamLanguageFromDetected(detectedLang) {
-    const langMap = {
-      'en': 'en-IN',
-      'hi': 'hi-IN',
-      'bn': 'bn-IN',
-      'te': 'te-IN',
-      'ta': 'ta-IN',
-      'mr': 'mr-IN',
-      'gu': 'gu-IN',
-      'kn': 'kn-IN',
-      'ml': 'ml-IN',
-      'pa': 'pa-IN',
-      'or': 'or-IN',
-      'as': 'as-IN',
-      'ur': 'ur-IN'
-    };
-    
-    return langMap[detectedLang?.toLowerCase()] || 'hi-IN';
+    console.log(`🎵 [TTS-INIT] Language: ${language} → Sarvam: ${this.sarvamLanguage}, Voice: ${this.voice}`);
   }
 
   addPhrase(phrase) {
     if (!phrase.trim()) return;
     
-    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + phrase.trim();
+    const cleanPhrase = phrase.trim();
+    console.log(`📝 [TTS-PHRASE] Adding: "${cleanPhrase}"`);
+    
+    this.sentenceBuffer += (this.sentenceBuffer ? " " : "") + cleanPhrase;
     
     // Process immediately if we have complete sentences
     if (this.hasCompleteSentence(this.sentenceBuffer)) {
+      console.log(`✅ [TTS-SENTENCE] Complete sentence detected`);
       this.processCompleteSentences();
     } else {
       // Schedule processing for incomplete sentences
+      console.log(`⏳ [TTS-BUFFER] Buffering: "${this.sentenceBuffer}"`);
       this.scheduleProcessing();
     }
   }
 
   hasCompleteSentence(text) {
-    // Check for sentence endings in Hindi and English
+    // More flexible sentence detection - handles missing spaces after punctuation
     return /[.!?।॥]/.test(text);
   }
 
   extractCompleteSentences(text) {
-    // Split by sentence endings, keeping the punctuation
-    const sentences = text.split(/([.!?।॥])/).filter(s => s.trim());
+    // Enhanced sentence extraction with better regex
+    const sentences = text.split(/([.!?।॥])/);
     
     let completeSentences = "";
     let remainingText = "";
@@ -319,12 +257,12 @@ class OptimizedSarvamTTSProcessor {
       const sentence = sentences[i];
       const punctuation = sentences[i + 1];
       
-      if (punctuation) {
+      if (punctuation && sentence.trim()) {
         // Complete sentence
-        completeSentences += sentence + punctuation + " ";
-      } else {
+        completeSentences += sentence.trim() + punctuation + " ";
+      } else if (sentence.trim()) {
         // Incomplete sentence
-        remainingText = sentence;
+        remainingText = sentence.trim();
       }
     }
     
@@ -343,6 +281,7 @@ class OptimizedSarvamTTSProcessor {
     const { complete, remaining } = this.extractCompleteSentences(this.sentenceBuffer);
     
     if (complete) {
+      console.log(`🎯 [TTS-QUEUE] Adding complete: "${complete}"`);
       this.queue.push(complete);
       this.sentenceBuffer = remaining;
       this.processQueue();
@@ -354,6 +293,7 @@ class OptimizedSarvamTTSProcessor {
     
     this.sentenceTimer = setTimeout(() => {
       if (this.sentenceBuffer.trim()) {
+        console.log(`⏰ [TTS-TIMEOUT] Processing buffered: "${this.sentenceBuffer}"`);
         this.queue.push(this.sentenceBuffer.trim());
         this.sentenceBuffer = "";
         this.processQueue();
@@ -366,6 +306,8 @@ class OptimizedSarvamTTSProcessor {
 
     this.isProcessing = true;
     const textToProcess = this.queue.shift();
+
+    console.log(`🎵 [TTS-START] Processing: "${textToProcess}"`);
 
     try {
       await this.synthesizeAndStream(textToProcess);
@@ -444,7 +386,7 @@ class OptimizedSarvamTTSProcessor {
     // Chunk size constraints for SIP (20ms - 100ms)
     const MIN_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS);   // 320 bytes (20ms)
     const MAX_CHUNK_SIZE = Math.floor(100 * BYTES_PER_MS);  // 1600 bytes (100ms)
-    const OPTIMAL_CHUNK_SIZE = Math.floor(20 * BYTES_PER_MS); // 640 bytes (40ms)
+    const OPTIMAL_CHUNK_SIZE = Math.floor(40 * BYTES_PER_MS); // 640 bytes (40ms)
     
     // Ensure chunk sizes are aligned to sample boundaries (even numbers)
     const alignToSample = (size) => Math.floor(size / 2) * 2;
@@ -519,8 +461,11 @@ class OptimizedSarvamTTSProcessor {
   }
 
   complete() {
+    console.log(`🏁 [TTS-COMPLETE] Buffer: "${this.sentenceBuffer}", Queue: ${this.queue.length}`);
+    
     // Process any remaining buffered text
     if (this.sentenceBuffer.trim()) {
+      console.log(`🎯 [TTS-FINAL] Processing remaining: "${this.sentenceBuffer}"`);
       this.queue.push(this.sentenceBuffer.trim());
       this.sentenceBuffer = "";
     }
@@ -546,10 +491,10 @@ class OptimizedSarvamTTSProcessor {
 
 // Main WebSocket server setup
 const setupUnifiedVoiceServer = (wss) => {
-  console.log("🚀 [AITOTA] Voice Server started with dynamic language detection");
+  console.log("🚀 [OPTIMIZED] Voice Server started");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New Aitota WebSocket connection");
+    console.log("🔗 [CONNECTION] New optimized WebSocket connection");
 
     // Session state
     let streamSid = null;
@@ -634,7 +579,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Updated utterance processing function to use detected language
+    // Optimized utterance processing with enhanced TTS
     const processUserUtterance = async (text) => {
       if (!text.trim() || isProcessing || text === lastProcessedText) return;
 
@@ -645,33 +590,26 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        let optimizedTTS = null;
-        let detectedLanguage = null;
+        // Use the enhanced TTS processor
+        optimizedTTS = new OptimizedSarvamTTSProcessor(DEFAULT_CONFIG.language, ws, streamSid);
 
         // Process with OpenAI streaming
-        const result = await processWithOpenAIStreaming(
+        const response = await processWithOpenAIStreaming(
           text,
           conversationHistory,
           (phrase) => {
-            // Initialize TTS with detected language on first phrase
-            if (!optimizedTTS && detectedLanguage) {
-              optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid);
-            }
-            
             // Handle phrase chunks with sentence-based optimization
             console.log(`📤 [PHRASE] "${phrase}"`);
-            if (optimizedTTS) {
-              optimizedTTS.addPhrase(phrase);
-            }
+            optimizedTTS.addPhrase(phrase);
           },
-          (fullResponse, detectedLang) => {
-            // Handle completion
-            detectedLanguage = detectedLang;
-            console.log(`✅ [COMPLETE] "${fullResponse}" (Language: ${detectedLanguage})`);
+          (fullResponse) => {
+            // Handle completion - Force process any remaining text
+            console.log(`✅ [COMPLETE] "${fullResponse}"`);
             
-            // Initialize TTS if not already done
-            if (!optimizedTTS) {
-              optimizedTTS = new OptimizedSarvamTTSProcessor(detectedLanguage, ws, streamSid);
+            // Force immediate processing of the complete response if not already processed
+            if (fullResponse.trim() && optimizedTTS.totalChunks === 0) {
+              console.log(`🔄 [FORCE-PROCESS] Processing complete response`);
+              optimizedTTS.addPhrase(fullResponse);
             }
             
             optimizedTTS.complete();
@@ -716,12 +654,12 @@ const setupUnifiedVoiceServer = (wss) => {
 
         switch (data.event) {
           case "connected":
-            console.log(`🔗 [AITOTA] Connected - Protocol: ${data.protocol}`);
+            console.log(`🔗 [OPTIMIZED] Connected - Protocol: ${data.protocol}`);
             break;
 
           case "start":
             streamSid = data.streamSid || data.start?.streamSid;
-            console.log(`🎯 [AITOTA] Stream started - StreamSid: ${streamSid}`);
+            console.log(`🎯 [OPTIMIZED] Stream started - StreamSid: ${streamSid}`);
             
             await connectToDeepgram();
             await sendInitialGreeting();
@@ -740,23 +678,23 @@ const setupUnifiedVoiceServer = (wss) => {
             break;
 
           case "stop":
-            console.log(`📞 [AITOTA] Stream stopped`);
+            console.log(`📞 [OPTIMIZED] Stream stopped`);
             if (deepgramWs?.readyState === WebSocket.OPEN) {
               deepgramWs.close();
             }
             break;
 
           default:
-            console.log(`❓ [AITOTA] Unknown event: ${data.event}`);
+            console.log(`❓ [OPTIMIZED] Unknown event: ${data.event}`);
         }
       } catch (error) {
-        console.error(`❌ [AITOTA] Message error: ${error.message}`);
+        console.error(`❌ [OPTIMIZED] Message error: ${error.message}`);
       }
     });
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log("🔗 [AITOTA] Connection closed");
+      console.log("🔗 [OPTIMIZED] Connection closed");
       
       if (deepgramWs?.readyState === WebSocket.OPEN) {
         deepgramWs.close();
@@ -774,7 +712,7 @@ const setupUnifiedVoiceServer = (wss) => {
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [AITOTA] WebSocket error: ${error.message}`);
+      console.error(`❌ [OPTIMIZED] WebSocket error: ${error.message}`);
     });
   });
 };
