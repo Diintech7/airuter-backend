@@ -144,127 +144,6 @@ const detectLanguage = async (text) => {
   }
 };
 
-// OpenAI LLM processing with streaming
-const processWithOpenAIStreaming = async (userMessage, conversationHistory, currentLanguage, onChunk, onComplete) => {
-  const timer = createTimer("OPENAI_STREAMING");
-  
-  try {
-    if (!API_KEYS.openai || !userMessage.trim()) {
-      timer.end();
-      return null;
-    }
-
-    const systemPrompt = `You are ${DEFAULT_CONFIG.agentName}, a helpful Hindi voice assistant.
-
-LANGUAGE: ${currentLanguage || "hi"}
-RULES:
-- Respond in user's language
-- Keep responses very short (max 100 chars)
-- Be conversational and helpful
-- Context: ${DEFAULT_CONFIG.contextMemory}`;
-
-    const messages = [
-      { role: "system", content: systemPrompt },
-      ...conversationHistory.slice(-4), // Reduced context for faster processing
-      { role: "user", content: userMessage }
-    ];
-
-    const requestBody = {
-      model: "gpt-4o-mini",
-      messages: messages,
-      max_tokens: 80, // Reduced for faster response
-      temperature: 0.7,
-      stream: true, // Enable streaming
-    };
-
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEYS.openai}`,
-      },
-      body: JSON.stringify(requestBody),
-    });
-
-    if (!response.ok) {
-      console.error(`❌ [OPENAI] API error: ${response.status}`);
-      timer.end();
-      return null;
-    }
-
-    let fullResponse = "";
-    let wordBuffer = "";
-    let isFirstChunk = true;
-
-    // Process the streaming response
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-
-    while (true) {
-      const { done, value } = await reader.read();
-      
-      if (done) break;
-
-      const chunk = decoder.decode(value, { stream: true });
-      const lines = chunk.split('\n').filter(line => line.trim());
-
-      for (const line of lines) {
-        if (line.startsWith('data: ')) {
-          const data = line.slice(6);
-          
-          if (data === '[DONE]') {
-            // Send any remaining words in buffer
-            if (wordBuffer.trim()) {
-              onChunk(wordBuffer.trim());
-              fullResponse += wordBuffer;
-            }
-            break;
-          }
-
-          try {
-            const parsed = JSON.parse(data);
-            const content = parsed.choices?.[0]?.delta?.content;
-            
-            if (content) {
-              wordBuffer += content;
-              
-              // Check if we have complete words (space or punctuation)
-              if (content.includes(' ') || content.includes('.') || content.includes(',') || content.includes('!') || content.includes('?')) {
-                const words = wordBuffer.split(/(\s+|[,.!?])/);
-                
-                // Send complete words, keep the last incomplete word in buffer
-                if (words.length > 1) {
-                  const completeText = words.slice(0, -1).join('');
-                  if (completeText.trim()) {
-                    if (isFirstChunk) {
-                      console.log(`⚡ [OPENAI] First chunk received (${timer.checkpoint('first_chunk')}ms)`);
-                      isFirstChunk = false;
-                    }
-                    onChunk(completeText);
-                    fullResponse += completeText;
-                  }
-                  wordBuffer = words[words.length - 1] || '';
-                }
-              }
-            }
-          } catch (e) {
-            // Skip malformed JSON
-          }
-        }
-      }
-    }
-
-    console.log(`🤖 [OPENAI] Streaming completed: "${fullResponse}" (${timer.end()}ms)`);
-    onComplete(fullResponse);
-    return fullResponse;
-
-  } catch (error) {
-    console.error(`❌ [OPENAI] Error: ${error.message}`);
-    timer.end();
-    return null;
-  }
-};
-
 // Optimized Sarvam TTS with faster processing
 const synthesizeWithSarvamOptimized = async (text, language, ws, streamSid) => {
   const timer = createTimer("SARVAM_TTS_OPTIMIZED");
@@ -359,11 +238,69 @@ const synthesizeWithSarvamOptimized = async (text, language, ws, streamSid) => {
   }
 };
 
-// Chunk-based TTS for streaming responses
+// Updated streaming TTS processor with sentence buffering
 const streamingTTSProcessor = (language, ws, streamSid) => {
   let textBuffer = "";
   let isProcessing = false;
   let processingQueue = [];
+  let sentenceBuffer = "";
+
+  // Enhanced sentence detection patterns
+  const SENTENCE_ENDINGS = /[.!?।॥।।]/;
+  const SENTENCE_ENDINGS_WITH_SPACE = /[.!?।॥।।]\s+/;
+  const PAUSE_INDICATORS = /[,;:—-]\s+/;
+  
+  // Minimum length for a sentence to be considered complete
+  const MIN_SENTENCE_LENGTH = 15;
+
+  const isSentenceComplete = (text) => {
+    // Check for sentence endings
+    if (SENTENCE_ENDINGS.test(text)) {
+      return true;
+    }
+    
+    // For longer text without clear endings, check for pause indicators
+    if (text.length > 50 && PAUSE_INDICATORS.test(text)) {
+      return true;
+    }
+    
+    // If text is very long (likely a complete thought), treat as sentence
+    if (text.length > 100) {
+      return true;
+    }
+    
+    return false;
+  };
+
+  const extractCompleteSentences = (text) => {
+    const sentences = [];
+    let remaining = text;
+    
+    // Split by sentence endings with space
+    const parts = text.split(SENTENCE_ENDINGS_WITH_SPACE);
+    
+    if (parts.length > 1) {
+      // We have complete sentences
+      for (let i = 0; i < parts.length - 1; i++) {
+        const sentence = parts[i].trim();
+        if (sentence.length >= MIN_SENTENCE_LENGTH) {
+          sentences.push(sentence);
+        }
+      }
+      
+      // The last part is the remaining incomplete sentence
+      remaining = parts[parts.length - 1].trim();
+    } else {
+      // No complete sentences found, check for other patterns
+      const pauseParts = text.split(PAUSE_INDICATORS);
+      if (pauseParts.length > 1 && pauseParts[0].length > 40) {
+        sentences.push(pauseParts[0].trim());
+        remaining = pauseParts.slice(1).join(' ').trim();
+      }
+    }
+    
+    return { sentences, remaining };
+  };
 
   const processChunk = async (chunk) => {
     if (isProcessing) {
@@ -389,14 +326,145 @@ const streamingTTSProcessor = (language, ws, streamSid) => {
     }
   };
 
-  return {
-    addChunk: (chunk) => {
-      processChunk(chunk);
-    },
-    complete: () => {
-      // Final processing if needed
+  const processSentence = (sentence) => {
+    if (sentence.trim().length > 0) {
+      console.log(`📝 [SENTENCE_TTS] Processing: "${sentence}"`);
+      processChunk(sentence.trim());
     }
   };
+
+  return {
+    addChunk: (chunk) => {
+      // Add the chunk to our sentence buffer
+      sentenceBuffer += chunk;
+      
+      // Try to extract complete sentences
+      const { sentences, remaining } = extractCompleteSentences(sentenceBuffer);
+      
+      // Process any complete sentences found
+      sentences.forEach(sentence => {
+        processSentence(sentence);
+      });
+      
+      // Keep the remaining incomplete text in buffer
+      sentenceBuffer = remaining;
+      
+      console.log(`📤 [BUFFER] Added chunk: "${chunk}", Buffer: "${sentenceBuffer}"`);
+    },
+    
+    complete: () => {
+      // Process any remaining text in buffer when response is complete
+      if (sentenceBuffer.trim().length > 0) {
+        console.log(`📝 [FINAL_SENTENCE] Processing remaining: "${sentenceBuffer}"`);
+        processSentence(sentenceBuffer);
+        sentenceBuffer = "";
+      }
+    }
+  };
+};
+
+// Updated OpenAI streaming function with better sentence handling
+const processWithOpenAIStreaming = async (userMessage, conversationHistory, currentLanguage, onChunk, onComplete) => {
+  const timer = createTimer("OPENAI_STREAMING");
+  
+  try {
+    if (!API_KEYS.openai || !userMessage.trim()) {
+      timer.end();
+      return null;
+    }
+
+    const systemPrompt = `You are ${DEFAULT_CONFIG.agentName}, a helpful Hindi voice assistant.
+
+LANGUAGE: ${currentLanguage || "hi"}
+RULES:
+- Respond in user's language
+- Keep responses concise but complete (max 150 chars)
+- Use proper sentence structure with clear endings
+- Be conversational and helpful
+- End sentences with proper punctuation
+- Context: ${DEFAULT_CONFIG.contextMemory}`;
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...conversationHistory.slice(-4),
+      { role: "user", content: userMessage }
+    ];
+
+    const requestBody = {
+      model: "gpt-4o-mini",
+      messages: messages,
+      max_tokens: 100,
+      temperature: 0.7,
+      stream: true,
+    };
+
+    const response = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEYS.openai}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      console.error(`❌ [OPENAI] API error: ${response.status}`);
+      timer.end();
+      return null;
+    }
+
+    let fullResponse = "";
+    let isFirstChunk = true;
+
+    // Process the streaming response
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+
+    while (true) {
+      const { done, value } = await reader.read();
+      
+      if (done) break;
+
+      const chunk = decoder.decode(value, { stream: true });
+      const lines = chunk.split('\n').filter(line => line.trim());
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = line.slice(6);
+          
+          if (data === '[DONE]') {
+            break;
+          }
+
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content;
+            
+            if (content) {
+              if (isFirstChunk) {
+                console.log(`⚡ [OPENAI] First chunk received (${timer.checkpoint('first_chunk')}ms)`);
+                isFirstChunk = false;
+              }
+              
+              fullResponse += content;
+              onChunk(content);
+            }
+          } catch (e) {
+            // Skip malformed JSON
+          }
+        }
+      }
+    }
+
+    console.log(`🤖 [OPENAI] Streaming completed: "${fullResponse}" (${timer.end()}ms)`);
+    onComplete(fullResponse);
+    return fullResponse;
+
+  } catch (error) {
+    console.error(`❌ [OPENAI] Error: ${error.message}`);
+    timer.end();
+    return null;
+  }
 };
 
 // Main WebSocket server setup
@@ -509,7 +577,7 @@ const setupUnifiedVoiceServer = (wss) => {
       }
     };
 
-    // Process user utterance with streaming
+    // Updated processUserUtterance function with sentence-based streaming
     const processUserUtterance = async (text) => {
       if (!text.trim() || isProcessing || text === lastProcessedText) {
         return;
@@ -522,7 +590,7 @@ const setupUnifiedVoiceServer = (wss) => {
       try {
         console.log(`🎤 [USER] Processing: "${text}"`);
 
-        // Initialize streaming TTS processor
+        // Initialize streaming TTS processor with sentence buffering
         streamingTTS = streamingTTSProcessor(detectedLanguage, ws, streamSid);
 
         // Detect language (parallel processing)
@@ -534,12 +602,11 @@ const setupUnifiedVoiceServer = (wss) => {
           conversationHistory, 
           detectedLanguage,
           (chunk) => {
-            // Handle streaming chunks
-            console.log(`📤 [STREAMING] Chunk: "${chunk}"`);
+            // Handle streaming chunks - these will be buffered until complete sentences
             streamingTTS.addChunk(chunk);
           },
           (fullResponse) => {
-            // Handle completion
+            // Handle completion - process any remaining text
             console.log(`✅ [STREAMING] Complete: "${fullResponse}"`);
             streamingTTS.complete();
             
