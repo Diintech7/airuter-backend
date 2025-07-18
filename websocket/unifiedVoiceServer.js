@@ -236,18 +236,14 @@ RESPONSE GUIDELINES:
 // Sarvam TTS with chunked audio streaming (20ms-100ms chunks)
 const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
   const timer = createTimer("SARVAM_TTS_TOTAL");
-  
   try {
     if (!API_KEYS.sarvam || !text.trim()) {
       timer.end();
       return;
     }
-
     const validVoice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
     const sarvamLanguage = getSarvamLanguage(language);
-
     console.log(`🎵 [SARVAM] Starting TTS: "${text}" (${sarvamLanguage}, ${validVoice})`);
-
     const requestBody = {
       inputs: [text],
       target_language_code: sarvamLanguage,
@@ -259,7 +255,6 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
       enable_preprocessing: false,
       model: "bulbul:v1",
     };
-
     const apiTimer = createTimer("SARVAM_API_CALL");
     const response = await fetch("https://api.sarvam.ai/text-to-speech", {
       method: "POST",
@@ -269,72 +264,55 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
       },
       body: JSON.stringify(requestBody),
     });
-
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`❌ [SARVAM] API error: ${response.status}`, errorText);
       timer.end();
       return;
     }
-
     const responseData = await response.json();
     apiTimer.end();
-
     if (!responseData.audios || responseData.audios.length === 0) {
       console.error("❌ [SARVAM] No audio data received");
       timer.end();
       return;
     }
-
     const audioBase64 = responseData.audios[0];
     const audioBuffer = Buffer.from(audioBase64, "base64");
-    
     // Split audio into chunks between 160 bytes (20ms) and 8000 bytes (100ms)
     const chunkSize = 1600; // ~20ms worth of audio data for 22050 Hz
     const totalChunks = Math.ceil(audioBuffer.length / chunkSize);
-    
     console.log(`📦 [SARVAM] Splitting ${audioBuffer.length} bytes into ${totalChunks} chunks`);
-
-    // Send audio in chunks
+    // Use outboundStreamSid for streamSid
+    let streamSid = outboundStreamSid || sessionId || "outbound";
+    // Send audio in chunks as 'media' events
     for (let i = 0; i < totalChunks; i++) {
       const start = i * chunkSize;
       const end = Math.min(start + chunkSize, audioBuffer.length);
       const chunk = audioBuffer.slice(start, end);
-      
-      // Ensure chunk is within the required size range
       if (chunk.length >= 160 && chunk.length <= 8000) {
-        const pythonBytesString = bufferToPythonBytesString(chunk);
-        
-        const audioResponse = {
-          data: {
-            session_id: sessionId,
-            count: i + 1,
-            audio_bytes_to_play: pythonBytesString,
-            sample_rate: 22050,
-            channels: 1,
-            sample_width: 2,
-            is_streaming: true,
-            format: "mp3",
-            chunk_info: {
-              chunk_number: i + 1,
-              total_chunks: totalChunks,
-              chunk_size: chunk.length,
-            },
+        const base64Payload = chunk.toString("base64");
+        const now = Date.now();
+        const outboundMediaMsg = {
+          event: "media",
+          sequenceNumber: outboundSequenceNumber++,
+          media: {
+            track: "outbound",
+            chunk: outboundChunkNumber++,
+            timestamp: now,
+            payload: base64Payload,
           },
-          type: "ai_response",
+          streamSid: streamSid,
         };
-
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(audioResponse));
-          console.log(`📤 [SARVAM] Sent chunk ${i + 1}/${totalChunks} (${chunk.length} bytes)`);
-          
-          // Small delay between chunks to simulate streaming
-          await new Promise(resolve => setTimeout(resolve, 50));
+          ws.send(JSON.stringify(outboundMediaMsg));
+          console.log(`📤 [SARVAM->CLIENT] Sent outbound chunk ${outboundMediaMsg.media.chunk}/${totalChunks} (bytes: ${chunk.length}, seq: ${outboundMediaMsg.sequenceNumber}, streamSid: ${streamSid})`);
         }
+        // Small delay between chunks to simulate streaming
+        await new Promise(resolve => setTimeout(resolve, 50));
       }
     }
-
-    // Send completion signal
+    // Send completion signal (optional, can keep ai_response_complete for legacy clients)
     if (ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({
         type: "ai_response_complete",
@@ -343,7 +321,6 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
         total_audio_bytes: audioBuffer.length,
       }));
     }
-
     console.log(`✅ [SARVAM] TTS completed: ${totalChunks} chunks, ${audioBuffer.length} bytes (${timer.end()}ms)`);
   } catch (error) {
     console.error(`❌ [SARVAM] Error: ${error.message}`);
@@ -371,10 +348,14 @@ const setupUnifiedVoiceServer  = (wss) => {
     let deepgramWs = null;
     let deepgramReady = false;
 
+    // Outbound audio streaming state
+    let outboundSequenceNumber = 1;
+    let outboundChunkNumber = 1;
+    let outboundStreamSid = null;
+
     // Send initial greeting
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
-      
       // Send greeting text first
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({
@@ -384,9 +365,10 @@ const setupUnifiedVoiceServer  = (wss) => {
           timestamp: new Date().toISOString(),
         }));
       }
-
       // Generate and send greeting audio
+      console.log("🔊 [GREETING] Calling Sarvam TTS for greeting...");
       await synthesizeWithSarvam(DEFAULT_CONFIG.firstMessage, currentLanguage, ws, sessionId);
+      console.log("🔊 [GREETING] Sarvam TTS for greeting completed.");
     };
 
     // Connect to Deepgram
@@ -497,11 +479,11 @@ const setupUnifiedVoiceServer  = (wss) => {
           const transcript = channel.alternatives[0].transcript;
           const confidence = channel.alternatives[0].confidence;
           const is_final = data.is_final;
-
           if (transcript && transcript.trim()) {
+            // Log transcript from Deepgram
+            console.log(`📝 [DEEPGRAM->TEXT] Transcript: "${transcript}" (final: ${is_final}, confidence: ${confidence})`);
             if (is_final) {
               console.log(`🎤 [TRANSCRIPT] Final: "${transcript}" (confidence: ${confidence})`);
-              
               // Add to buffer and process
               userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
               await processUserUtterance(userUtteranceBuffer);
@@ -583,13 +565,43 @@ const setupUnifiedVoiceServer  = (wss) => {
         }
 
         if (isTextMessage && data) {
+          // Handle 'media' event: decode and forward audio to Deepgram
+          if (data.event === "media" && data.media && data.media.payload) {
+            const audioBuffer = Buffer.from(data.media.payload, "base64");
+            console.log(`🎧 [MEDIA] Received media event: chunk=${data.media.chunk}, bytes=${audioBuffer.length}`);
+            if (audioBuffer.length >= 320) {
+              const sent = sendAudioToDeepgram(audioBuffer);
+              if (sent) {
+                console.log("✅ [MEDIA] Sent audio buffer to Deepgram");
+              } else {
+                console.warn("⚠️ [MEDIA] Failed to send audio buffer to Deepgram");
+              }
+            } else {
+              console.warn(`⚠️ [MEDIA] Audio buffer too small for Deepgram: ${audioBuffer.length} bytes`);
+            }
+            // Set outboundStreamSid if not already set
+            if (!outboundStreamSid && data.streamSid) {
+              outboundStreamSid = data.streamSid;
+              outboundSequenceNumber = 1;
+              outboundChunkNumber = 1;
+              console.log(`🔗 [SESSION] Set outboundStreamSid: ${outboundStreamSid}`);
+            }
+            messageTimer.end();
+            return;
+          }
           console.log(`📨 [MESSAGE] Received:`, data);
 
           // Handle different message types
           if (data.event === "start" && data.session_id) {
             sessionId = data.session_id;
             console.log(`🎯 [SESSION] Started: ${sessionId}`);
-
+            // Set outboundStreamSid if present
+            if (data.streamSid) {
+              outboundStreamSid = data.streamSid;
+              outboundSequenceNumber = 1;
+              outboundChunkNumber = 1;
+              console.log(`🔗 [SESSION] Set outboundStreamSid: ${outboundStreamSid}`);
+            }
             // Send session confirmation
             if (ws.readyState === WebSocket.OPEN) {
               ws.send(JSON.stringify({
@@ -600,7 +612,6 @@ const setupUnifiedVoiceServer  = (wss) => {
                 timestamp: new Date().toISOString(),
               }));
             }
-
             // Connect to Deepgram and send greeting
             await connectToDeepgram();
             await sendInitialGreeting();
@@ -650,6 +661,9 @@ const setupUnifiedVoiceServer  = (wss) => {
       userUtteranceBuffer = "";
       lastProcessedText = "";
       deepgramReady = false;
+      outboundStreamSid = null;
+      outboundSequenceNumber = 1;
+      outboundChunkNumber = 1;
     });
 
     ws.on("error", (error) => {
