@@ -76,26 +76,6 @@ const getValidSarvamVoice = (voiceSelection = "pavithra") => {
   return voiceMapping[voiceSelection] || "pavithra";
 };
 
-// Split text into sentences
-const splitIntoSentences = (text) => {
-  return text.match(/[^.!?]+[.!?]+|[^.!?]+$/g) || [text];
-};
-
-// Utility function to convert Buffer to Python bytes string for SIP
-const bufferToPythonBytesString = (buffer) => {
-  let result = "b'";
-  for (let i = 0; i < buffer.length; i++) {
-    const byte = buffer[i];
-    if (byte >= 32 && byte <= 126 && byte !== 92 && byte !== 39) {
-      result += String.fromCharCode(byte);
-    } else {
-      result += "\\x" + byte.toString(16).padStart(2, "0");
-    }
-  }
-  result += "'";
-  return result;
-};
-
 // Basic configuration
 const DEFAULT_CONFIG = {
   agentName: "हिंदी सहायक",
@@ -233,17 +213,26 @@ RESPONSE GUIDELINES:
   }
 };
 
-// Sarvam TTS with chunked audio streaming (20ms-100ms chunks)
-const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
+// Convert audio between formats
+const convertAudioFormat = (audioBuffer, fromFormat, toFormat) => {
+  // For now, we'll assume the audio is compatible
+  // In production, you might need actual audio conversion
+  return audioBuffer;
+};
+
+// Sarvam TTS with C-Zentrix compatible streaming
+const synthesizeWithSarvam = async (text, language, ws, streamSid) => {
   const timer = createTimer("SARVAM_TTS_TOTAL");
   try {
     if (!API_KEYS.sarvam || !text.trim()) {
       timer.end();
       return;
     }
+
     const validVoice = getValidSarvamVoice(DEFAULT_CONFIG.voiceSelection);
     const sarvamLanguage = getSarvamLanguage(language);
     console.log(`🎵 [SARVAM] Starting TTS: "${text}" (${sarvamLanguage}, ${validVoice})`);
+
     const requestBody = {
       inputs: [text],
       target_language_code: sarvamLanguage,
@@ -251,11 +240,11 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
       pitch: 0,
       pace: 1.0,
       loudness: 1.0,
-      speech_sample_rate: 22050,
+      speech_sample_rate: 8000, // Match C-Zentrix requirement
       enable_preprocessing: false,
       model: "bulbul:v1",
     };
-    const apiTimer = createTimer("SARVAM_API_CALL");
+
     const response = await fetch("https://api.sarvam.ai/text-to-speech", {
       method: "POST",
       headers: {
@@ -264,64 +253,59 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
       },
       body: JSON.stringify(requestBody),
     });
+
     if (!response.ok) {
       const errorText = await response.text();
       console.error(`❌ [SARVAM] API error: ${response.status}`, errorText);
       timer.end();
       throw new Error(`Sarvam API error: ${response.status} - ${errorText}`);
     }
+
     const responseData = await response.json();
-    apiTimer.end();
-    console.log("🟢 [SARVAM] API response:", JSON.stringify(responseData));
+    console.log("🟢 [SARVAM] API response received");
+
     if (!responseData.audios || responseData.audios.length === 0) {
       console.error("❌ [SARVAM] No audio data received");
       timer.end();
       throw new Error("Sarvam TTS: No audio data received");
     }
+
     const audioBase64 = responseData.audios[0];
     const audioBuffer = Buffer.from(audioBase64, "base64");
-    // Split audio into chunks between 160 bytes (20ms) and 8000 bytes (100ms)
-    const chunkSize = 1600; // ~20ms worth of audio data for 22050 Hz
+
+    // Split into chunks as per C-Zentrix requirements (160-8000 bytes)
+    const chunkSize = 1600; // Optimal chunk size for 8kHz audio
     const totalChunks = Math.ceil(audioBuffer.length / chunkSize);
+    
     console.log(`📦 [SARVAM] Splitting ${audioBuffer.length} bytes into ${totalChunks} chunks`);
-    // Use outboundStreamSid for streamSid
-    let streamSid = outboundStreamSid || sessionId || "outbound";
-    // Send audio in chunks as 'media' events
+
+    // Send audio chunks to C-Zentrix
     for (let i = 0; i < totalChunks; i++) {
       const start = i * chunkSize;
       const end = Math.min(start + chunkSize, audioBuffer.length);
       const chunk = audioBuffer.slice(start, end);
-      if (chunk.length >= 160 && chunk.length <= 8000) {
+      
+      if (chunk.length >= 160) { // C-Zentrix minimum chunk size
         const base64Payload = chunk.toString("base64");
-        const now = Date.now();
-        const outboundMediaMsg = {
+        
+        const mediaMessage = {
           event: "media",
-          sequenceNumber: outboundSequenceNumber++,
-          media: {
-            track: "outbound",
-            chunk: outboundChunkNumber++,
-            timestamp: now,
-            payload: base64Payload,
-          },
           streamSid: streamSid,
+          media: {
+            payload: base64Payload
+          }
         };
+
         if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(outboundMediaMsg));
-          console.log(`📤 [SARVAM->CLIENT] Sent outbound chunk ${outboundMediaMsg.media.chunk}/${totalChunks} (bytes: ${chunk.length}, seq: ${outboundMediaMsg.sequenceNumber}, streamSid: ${streamSid})`);
+          ws.send(JSON.stringify(mediaMessage));
+          console.log(`📤 [SARVAM->CZ] Sent chunk ${i + 1}/${totalChunks} (${chunk.length} bytes)`);
         }
-        // Small delay between chunks to simulate streaming
-        await new Promise(resolve => setTimeout(resolve, 50));
+        
+        // Small delay to prevent overwhelming the stream
+        await new Promise(resolve => setTimeout(resolve, 20));
       }
     }
-    // Send completion signal (optional, can keep ai_response_complete for legacy clients)
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
-        type: "ai_response_complete",
-        session_id: sessionId,
-        total_chunks: totalChunks,
-        total_audio_bytes: audioBuffer.length,
-      }));
-    }
+
     console.log(`✅ [SARVAM] TTS completed: ${totalChunks} chunks, ${audioBuffer.length} bytes (${timer.end()}ms)`);
   } catch (error) {
     console.error(`❌ [SARVAM] Error: ${error.message}`);
@@ -331,54 +315,28 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
 };
 
 // Main WebSocket server setup
-const setupUnifiedVoiceServer  = (wss) => {
-  console.log("🚀 [SERVER] Streamlined Voice Server started");
+const setupUnifiedVoiceServer = (wss) => {
+  console.log("🚀 [C-ZENTRIX] Voice Server started");
 
   wss.on("connection", (ws, req) => {
-    console.log("🔗 [CONNECTION] New WebSocket connection");
+    console.log("🔗 [CONNECTION] New C-Zentrix WebSocket connection");
 
     // Session state
-    let sessionId = null;
+    let streamSid = null;
+    let callSid = null;
+    let accountSid = null;
     let currentLanguage = "hi";
     let detectedLanguage = "hi";
     let conversationHistory = [];
     let isProcessing = false;
     let userUtteranceBuffer = "";
     let lastProcessedText = "";
+    let sequenceNumber = 0;
 
     // Deepgram WebSocket connection
     let deepgramWs = null;
     let deepgramReady = false;
-
-    // Outbound audio streaming state
-    let outboundSequenceNumber = 1;
-    let outboundChunkNumber = 1;
-    let outboundStreamSid = null;
-
-    // Buffer for audio chunks before Deepgram is ready
     let deepgramAudioBufferQueue = [];
-
-    // Send initial greeting
-    const sendInitialGreeting = async () => {
-      console.log("👋 [GREETING] Sending initial greeting");
-      // Send greeting text first
-      if (ws.readyState === WebSocket.OPEN) {
-        ws.send(JSON.stringify({
-          type: "greeting_text",
-          text: DEFAULT_CONFIG.firstMessage,
-          language: currentLanguage,
-          timestamp: new Date().toISOString(),
-        }));
-      }
-      // Generate and send greeting audio
-      console.log("🔊 [GREETING] Calling Sarvam TTS for greeting...");
-      try {
-        await synthesizeWithSarvam(DEFAULT_CONFIG.firstMessage, currentLanguage, ws, sessionId);
-        console.log("🔊 [GREETING] Sarvam TTS for greeting completed and sent.");
-      } catch (err) {
-        console.error("❌ [GREETING] Sarvam TTS failed:", err);
-      }
-    };
 
     // Connect to Deepgram
     const connectToDeepgram = async () => {
@@ -387,7 +345,8 @@ const setupUnifiedVoiceServer  = (wss) => {
         if (!API_KEYS.deepgram) {
           throw new Error("Deepgram API key not available");
         }
-        console.log("🔌 [DEEPGRAM] Attempting to connect to Deepgram WebSocket...");
+
+        console.log("🔌 [DEEPGRAM] Connecting to Deepgram...");
         const deepgramLanguage = getDeepgramLanguage(currentLanguage);
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen");
         deepgramUrl.searchParams.append("sample_rate", "8000");
@@ -398,26 +357,25 @@ const setupUnifiedVoiceServer  = (wss) => {
         deepgramUrl.searchParams.append("interim_results", "true");
         deepgramUrl.searchParams.append("smart_format", "true");
         deepgramUrl.searchParams.append("endpointing", "300");
+
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         });
+
         deepgramWs.onopen = () => {
           deepgramReady = true;
           console.log(`✅ [DEEPGRAM] Connected (${timer.end()}ms)`);
-          // Send all buffered audio
+          
+          // Send buffered audio
           if (deepgramAudioBufferQueue.length > 0) {
-            console.log(`⏩ [DEEPGRAM] Sending ${deepgramAudioBufferQueue.length} buffered audio chunks to Deepgram...`);
-            for (const buf of deepgramAudioBufferQueue) {
-              try {
-                deepgramWs.send(buf);
-                console.log("✅ [DEEPGRAM] Sent buffered audio chunk to Deepgram");
-              } catch (err) {
-                console.error("❌ [DEEPGRAM] Failed to send buffered audio chunk:", err);
-              }
+            console.log(`⏩ [DEEPGRAM] Sending ${deepgramAudioBufferQueue.length} buffered chunks`);
+            for (const buffer of deepgramAudioBufferQueue) {
+              deepgramWs.send(buffer);
             }
             deepgramAudioBufferQueue = [];
           }
         };
+
         deepgramWs.onmessage = async (event) => {
           try {
             const data = JSON.parse(event.data);
@@ -426,10 +384,12 @@ const setupUnifiedVoiceServer  = (wss) => {
             console.error("❌ [DEEPGRAM] Parse error:", error.message);
           }
         };
+
         deepgramWs.onerror = (error) => {
           console.error("❌ [DEEPGRAM] Connection error:", error);
           deepgramReady = false;
         };
+
         deepgramWs.onclose = () => {
           console.log("🔌 [DEEPGRAM] Connection closed");
           deepgramReady = false;
@@ -437,6 +397,34 @@ const setupUnifiedVoiceServer  = (wss) => {
       } catch (error) {
         console.error("❌ [DEEPGRAM] Setup error:", error.message);
         timer.end();
+      }
+    };
+
+    // Handle Deepgram responses
+    const handleDeepgramResponse = async (data) => {
+      if (data.type === "Results") {
+        const channel = data.channel;
+        if (channel && channel.alternatives && channel.alternatives.length > 0) {
+          const transcript = channel.alternatives[0].transcript;
+          const confidence = channel.alternatives[0].confidence;
+          const is_final = data.is_final;
+          
+          if (transcript && transcript.trim()) {
+            console.log(`📝 [DEEPGRAM] Transcript: "${transcript}" (final: ${is_final})`);
+            
+            if (is_final) {
+              userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
+              await processUserUtterance(userUtteranceBuffer);
+              userUtteranceBuffer = "";
+            }
+          }
+        }
+      } else if (data.type === "UtteranceEnd") {
+        console.log("🔚 [DEEPGRAM] Utterance ended");
+        if (userUtteranceBuffer.trim()) {
+          await processUserUtterance(userUtteranceBuffer);
+          userUtteranceBuffer = "";
+        }
       }
     };
 
@@ -451,6 +439,8 @@ const setupUnifiedVoiceServer  = (wss) => {
       const timer = createTimer("USER_UTTERANCE_PROCESSING");
 
       try {
+        console.log(`🎤 [USER] Processing: "${text}"`);
+
         // Step 1: Detect language
         const newDetectedLanguage = await detectLanguage(text);
         if (newDetectedLanguage !== detectedLanguage) {
@@ -462,6 +452,8 @@ const setupUnifiedVoiceServer  = (wss) => {
         const response = await processWithOpenAI(text, conversationHistory, detectedLanguage);
         
         if (response) {
+          console.log(`🤖 [RESPONSE] Generated: "${response}"`);
+          
           // Update conversation history
           conversationHistory.push(
             { role: "user", content: text },
@@ -474,7 +466,7 @@ const setupUnifiedVoiceServer  = (wss) => {
           }
 
           // Step 3: Synthesize with Sarvam
-          await synthesizeWithSarvam(response, detectedLanguage, ws, sessionId);
+          await synthesizeWithSarvam(response, detectedLanguage, ws, streamSid);
         }
 
         console.log(`✅ [PROCESSING] Completed in ${timer.end()}ms`);
@@ -486,191 +478,85 @@ const setupUnifiedVoiceServer  = (wss) => {
       }
     };
 
-    // Handle Deepgram responses
-    const handleDeepgramResponse = async (data) => {
-      if (data.type === "Results") {
-        const channel = data.channel;
-        if (channel && channel.alternatives && channel.alternatives.length > 0) {
-          const transcript = channel.alternatives[0].transcript;
-          const confidence = channel.alternatives[0].confidence;
-          const is_final = data.is_final;
-          if (transcript && transcript.trim()) {
-            // Log transcript from Deepgram
-            console.log(`📝 [DEEPGRAM->TEXT] Transcript: "${transcript}" (final: ${is_final}, confidence: ${confidence})`);
-            if (is_final) {
-              console.log(`🎤 [TRANSCRIPT] Final: "${transcript}" (confidence: ${confidence})`);
-              // Add to buffer and process
-              userUtteranceBuffer += (userUtteranceBuffer ? " " : "") + transcript.trim();
-              await processUserUtterance(userUtteranceBuffer);
-              userUtteranceBuffer = "";
-            } else {
-              // Send interim results to client
-              if (ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                  type: "transcript_interim",
-                  data: transcript,
-                  confidence: confidence,
-                  is_final: false,
-                  language: currentLanguage,
-                }));
-              }
-            }
-          }
-        }
-      } else if (data.type === "SpeechStarted") {
-        console.log("🎙️ [DEEPGRAM] Speech started");
-      } else if (data.type === "UtteranceEnd") {
-        console.log("🔚 [DEEPGRAM] Utterance ended");
-        if (userUtteranceBuffer.trim()) {
-          await processUserUtterance(userUtteranceBuffer);
-          userUtteranceBuffer = "";
-        }
-      }
-    };
-
-    // Send audio to Deepgram
-    const sendAudioToDeepgram = (audioData) => {
-      if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
-        // Buffer audio until Deepgram is ready
-        deepgramAudioBufferQueue.push(audioData);
-        console.warn("⚠️ [MEDIA] Deepgram not ready, buffering audio chunk (queue length:", deepgramAudioBufferQueue.length, ")");
-        return false;
-      }
-      try {
-        const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData);
-        if (buffer.length >= 320) {
-          deepgramWs.send(buffer);
-          return true;
-        }
-        return false;
-      } catch (error) {
-        console.error("❌ [DEEPGRAM] Send error:", error.message);
-        return false;
-      }
+    // Send initial greeting
+    const sendInitialGreeting = async () => {
+      console.log("👋 [GREETING] Sending initial greeting");
+      await synthesizeWithSarvam(DEFAULT_CONFIG.firstMessage, currentLanguage, ws, streamSid);
     };
 
     // WebSocket message handling
     ws.on("message", async (message) => {
-      const messageTimer = createTimer("MESSAGE_PROCESSING");
-
       try {
-        let isTextMessage = false;
-        let data = null;
+        const data = JSON.parse(message.toString());
+        console.log(`📨 [C-ZENTRIX] Received:`, data.event || data.type);
 
-        // Check if message is text/JSON
-        if (typeof message === "string") {
-          isTextMessage = true;
-          try {
-            data = JSON.parse(message);
-          } catch (parseError) {
-            console.error("❌ Failed to parse JSON:", parseError.message);
-            messageTimer.end();
-            return;
-          }
-        } else if (message instanceof Buffer) {
-          try {
-            const messageStr = message.toString("utf8");
-            if (messageStr.trim().startsWith("{") && messageStr.trim().endsWith("}")) {
-              data = JSON.parse(messageStr);
-              isTextMessage = true;
-            } else {
-              isTextMessage = false;
-            }
-          } catch (parseError) {
-            isTextMessage = false;
-          }
-        }
+        switch (data.event) {
+          case "connected":
+            console.log(`🔗 [C-ZENTRIX] Connected - Protocol: ${data.protocol} v${data.version}`);
+            break;
 
-        if (isTextMessage && data) {
-          // Handle 'media' event: decode and forward audio to Deepgram
-          if (data.event === "media" && data.media && data.media.payload) {
-            const audioBuffer = Buffer.from(data.media.payload, "base64");
-            console.log(`🎧 [MEDIA] Received media event: chunk=${data.media.chunk}, bytes=${audioBuffer.length}`);
-            if (audioBuffer.length >= 320) {
-              const sent = sendAudioToDeepgram(audioBuffer);
-              if (sent) {
-                console.log("✅ [MEDIA] Sent audio buffer to Deepgram");
-              } else {
-                console.warn("⚠️ [MEDIA] Failed to send audio buffer to Deepgram");
-              }
-            } else {
-              console.warn(`⚠️ [MEDIA] Audio buffer too small for Deepgram: ${audioBuffer.length} bytes`);
-            }
-            // Set outboundStreamSid if not already set
-            if (!outboundStreamSid && data.streamSid) {
-              outboundStreamSid = data.streamSid;
-              outboundSequenceNumber = 1;
-              outboundChunkNumber = 1;
-              console.log(`🔗 [SESSION] Set outboundStreamSid: ${outboundStreamSid}`);
-            }
-            messageTimer.end();
-            return;
-          }
-          console.log(`📨 [MESSAGE] Received:`, data);
-
-          // Handle different message types
-          if (data.event === "start" && data.session_id) {
-            sessionId = data.session_id;
-            console.log(`🎯 [SESSION] Started: ${sessionId}`);
-            // Set outboundStreamSid if present
-            if (data.streamSid) {
-              outboundStreamSid = data.streamSid;
-              outboundSequenceNumber = 1;
-              outboundChunkNumber = 1;
-              console.log(`🔗 [SESSION] Set outboundStreamSid: ${outboundStreamSid}`);
-            }
-            // Send session confirmation
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: "session_started",
-                session_id: sessionId,
-                agent_name: DEFAULT_CONFIG.agentName,
-                language: currentLanguage,
-                timestamp: new Date().toISOString(),
-              }));
-            }
+          case "start":
+            streamSid = data.streamSid || data.start?.streamSid;
+            callSid = data.start?.callSid;
+            accountSid = data.start?.accountSid;
+            sequenceNumber = parseInt(data.sequenceNumber) || 0;
+            
+            console.log(`🎯 [C-ZENTRIX] Stream started - StreamSid: ${streamSid}, CallSid: ${callSid}`);
+            
             // Connect to Deepgram and send greeting
             await connectToDeepgram();
             await sendInitialGreeting();
+            break;
 
-          } else if (data.type === "synthesize") {
-            // Direct synthesis request
-            if (data.session_id) {
-              sessionId = data.session_id;
+          case "media":
+            if (data.media && data.media.payload) {
+              const audioBuffer = Buffer.from(data.media.payload, "base64");
+              console.log(`🎧 [C-ZENTRIX] Media chunk ${data.media.chunk}: ${audioBuffer.length} bytes`);
+              
+              // Send to Deepgram
+              if (deepgramWs && deepgramReady && deepgramWs.readyState === WebSocket.OPEN) {
+                deepgramWs.send(audioBuffer);
+              } else {
+                deepgramAudioBufferQueue.push(audioBuffer);
+              }
             }
-            await synthesizeWithSarvam(data.text, data.language || currentLanguage, ws, sessionId);
+            break;
 
-          } else if (data.data && data.data.hangup === "true") {
-            console.log(`📞 [SESSION] Hangup for session ${sessionId}`);
-            
+          case "stop":
+            console.log(`📞 [C-ZENTRIX] Stream stopped - CallSid: ${data.stop?.callSid}`);
             if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-              deepgramWs.close(1000, "Call ended");
+              deepgramWs.close();
             }
-            
-            ws.close(1000, "Hangup requested");
-          }
-        } else {
-          // This is audio data - send to Deepgram
-          sendAudioToDeepgram(message);
-        }
+            break;
 
-        messageTimer.end();
+          case "dtmf":
+            console.log(`📞 [C-ZENTRIX] DTMF: ${data.dtmf?.digit}`);
+            break;
+
+          case "vad":
+            console.log(`🎙️ [C-ZENTRIX] VAD: ${data.vad?.value}`);
+            break;
+
+          default:
+            console.log(`❓ [C-ZENTRIX] Unknown event: ${data.event}`);
+        }
       } catch (error) {
-        console.error(`❌ [MESSAGE] Processing error: ${error.message}`);
-        messageTimer.end();
+        console.error(`❌ [C-ZENTRIX] Message processing error: ${error.message}`);
       }
     });
 
     // Connection cleanup
     ws.on("close", () => {
-      console.log(`🔗 [SESSION] Connection closed for session ${sessionId}`);
+      console.log(`🔗 [C-ZENTRIX] Connection closed - StreamSid: ${streamSid}`);
       
       if (deepgramWs && deepgramWs.readyState === WebSocket.OPEN) {
-        deepgramWs.close(1000, "Session ended");
+        deepgramWs.close();
       }
 
-      // Reset all state
-      sessionId = null;
+      // Reset state
+      streamSid = null;
+      callSid = null;
+      accountSid = null;
       currentLanguage = "hi";
       detectedLanguage = "hi";
       conversationHistory = [];
@@ -678,22 +564,13 @@ const setupUnifiedVoiceServer  = (wss) => {
       userUtteranceBuffer = "";
       lastProcessedText = "";
       deepgramReady = false;
-      outboundStreamSid = null;
-      outboundSequenceNumber = 1;
-      outboundChunkNumber = 1;
       deepgramAudioBufferQueue = [];
     });
 
     ws.on("error", (error) => {
-      console.error(`❌ [SESSION] WebSocket error: ${error.message}`);
+      console.error(`❌ [C-ZENTRIX] WebSocket error: ${error.message}`);
     });
   });
 };
 
-module.exports = { setupUnifiedVoiceServer  };
-
-// Example usage:
-// const WebSocket = require('ws');
-// const wss = new WebSocket.Server({ port: 8080 });
-// setupUnifiedVoiceServer (wss);
-// console.log('🚀 Server running on ws://localhost:8080');
+module.exports = { setupUnifiedVoiceServer };
