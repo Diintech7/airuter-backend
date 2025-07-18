@@ -268,14 +268,15 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
       const errorText = await response.text();
       console.error(`❌ [SARVAM] API error: ${response.status}`, errorText);
       timer.end();
-      return;
+      throw new Error(`Sarvam API error: ${response.status} - ${errorText}`);
     }
     const responseData = await response.json();
     apiTimer.end();
+    console.log("🟢 [SARVAM] API response:", JSON.stringify(responseData));
     if (!responseData.audios || responseData.audios.length === 0) {
       console.error("❌ [SARVAM] No audio data received");
       timer.end();
-      return;
+      throw new Error("Sarvam TTS: No audio data received");
     }
     const audioBase64 = responseData.audios[0];
     const audioBuffer = Buffer.from(audioBase64, "base64");
@@ -325,6 +326,7 @@ const synthesizeWithSarvam = async (text, language, ws, sessionId) => {
   } catch (error) {
     console.error(`❌ [SARVAM] Error: ${error.message}`);
     timer.end();
+    throw error;
   }
 };
 
@@ -353,6 +355,9 @@ const setupUnifiedVoiceServer  = (wss) => {
     let outboundChunkNumber = 1;
     let outboundStreamSid = null;
 
+    // Buffer for audio chunks before Deepgram is ready
+    let deepgramAudioBufferQueue = [];
+
     // Send initial greeting
     const sendInitialGreeting = async () => {
       console.log("👋 [GREETING] Sending initial greeting");
@@ -367,19 +372,22 @@ const setupUnifiedVoiceServer  = (wss) => {
       }
       // Generate and send greeting audio
       console.log("🔊 [GREETING] Calling Sarvam TTS for greeting...");
-      await synthesizeWithSarvam(DEFAULT_CONFIG.firstMessage, currentLanguage, ws, sessionId);
-      console.log("🔊 [GREETING] Sarvam TTS for greeting completed.");
+      try {
+        await synthesizeWithSarvam(DEFAULT_CONFIG.firstMessage, currentLanguage, ws, sessionId);
+        console.log("🔊 [GREETING] Sarvam TTS for greeting completed and sent.");
+      } catch (err) {
+        console.error("❌ [GREETING] Sarvam TTS failed:", err);
+      }
     };
 
     // Connect to Deepgram
     const connectToDeepgram = async () => {
       const timer = createTimer("DEEPGRAM_CONNECTION");
-      
       try {
         if (!API_KEYS.deepgram) {
           throw new Error("Deepgram API key not available");
         }
-
+        console.log("🔌 [DEEPGRAM] Attempting to connect to Deepgram WebSocket...");
         const deepgramLanguage = getDeepgramLanguage(currentLanguage);
         const deepgramUrl = new URL("wss://api.deepgram.com/v1/listen");
         deepgramUrl.searchParams.append("sample_rate", "8000");
@@ -390,16 +398,26 @@ const setupUnifiedVoiceServer  = (wss) => {
         deepgramUrl.searchParams.append("interim_results", "true");
         deepgramUrl.searchParams.append("smart_format", "true");
         deepgramUrl.searchParams.append("endpointing", "300");
-
         deepgramWs = new WebSocket(deepgramUrl.toString(), {
           headers: { Authorization: `Token ${API_KEYS.deepgram}` },
         });
-
         deepgramWs.onopen = () => {
           deepgramReady = true;
           console.log(`✅ [DEEPGRAM] Connected (${timer.end()}ms)`);
+          // Send all buffered audio
+          if (deepgramAudioBufferQueue.length > 0) {
+            console.log(`⏩ [DEEPGRAM] Sending ${deepgramAudioBufferQueue.length} buffered audio chunks to Deepgram...`);
+            for (const buf of deepgramAudioBufferQueue) {
+              try {
+                deepgramWs.send(buf);
+                console.log("✅ [DEEPGRAM] Sent buffered audio chunk to Deepgram");
+              } catch (err) {
+                console.error("❌ [DEEPGRAM] Failed to send buffered audio chunk:", err);
+              }
+            }
+            deepgramAudioBufferQueue = [];
+          }
         };
-
         deepgramWs.onmessage = async (event) => {
           try {
             const data = JSON.parse(event.data);
@@ -408,17 +426,14 @@ const setupUnifiedVoiceServer  = (wss) => {
             console.error("❌ [DEEPGRAM] Parse error:", error.message);
           }
         };
-
         deepgramWs.onerror = (error) => {
           console.error("❌ [DEEPGRAM] Connection error:", error);
           deepgramReady = false;
         };
-
         deepgramWs.onclose = () => {
           console.log("🔌 [DEEPGRAM] Connection closed");
           deepgramReady = false;
         };
-
       } catch (error) {
         console.error("❌ [DEEPGRAM] Setup error:", error.message);
         timer.end();
@@ -516,9 +531,11 @@ const setupUnifiedVoiceServer  = (wss) => {
     // Send audio to Deepgram
     const sendAudioToDeepgram = (audioData) => {
       if (!deepgramWs || deepgramWs.readyState !== WebSocket.OPEN || !deepgramReady) {
+        // Buffer audio until Deepgram is ready
+        deepgramAudioBufferQueue.push(audioData);
+        console.warn("⚠️ [MEDIA] Deepgram not ready, buffering audio chunk (queue length:", deepgramAudioBufferQueue.length, ")");
         return false;
       }
-
       try {
         const buffer = audioData instanceof Buffer ? audioData : Buffer.from(audioData);
         if (buffer.length >= 320) {
@@ -664,6 +681,7 @@ const setupUnifiedVoiceServer  = (wss) => {
       outboundStreamSid = null;
       outboundSequenceNumber = 1;
       outboundChunkNumber = 1;
+      deepgramAudioBufferQueue = [];
     });
 
     ws.on("error", (error) => {
