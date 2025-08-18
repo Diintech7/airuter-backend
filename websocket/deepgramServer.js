@@ -10,7 +10,7 @@ const setupDeepgramServer = (wss) => {
     ws.on('message', async (message) => {
       try {
         if (!deepgramClient) {
-          deepgramClient = new DeepgramClient('b40137a84624ef9677285b9c9feb3d1f3e576417');
+          deepgramClient = new DeepgramClient('01f47e676cb12c10160c4c215ee658643b5a028b');
           
           deepgramClient.onTranscript = (transcript, detectedLanguage, confidence) => {
             if (ws.readyState === WebSocket.OPEN) {
@@ -138,4 +138,5 @@ const connectWebSockets = async () => {
   } catch (error) {
     setError('Failed to connect WebSockets');
   }
+
 };
