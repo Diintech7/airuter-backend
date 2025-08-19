@@ -326,6 +326,53 @@ exports.scheduleInterview = async (req, res) => {
   }
 }
 
+// New: Reschedule an existing interview keeping the same roomId
+exports.rescheduleInterview = async (req, res) => {
+  console.log("[Reschedule Interview] Request received:", req.body)
+  try {
+    const { applicationId, document, date, time } = req.body
+
+    const application = await JobApplication.findById(applicationId).populate("applicant").populate("job")
+    if (!application) {
+      return res.status(404).json({ message: "Application not found" })
+    }
+
+    if (!application.interviewRoomId) {
+      return res.status(400).json({ message: "No existing interview to reschedule" })
+    }
+
+    const interview = await Interview.findOne({ roomId: application.interviewRoomId })
+    if (!interview) {
+      return res.status(404).json({ message: "Interview details not found" })
+    }
+
+    // Update interview details
+    if (date) interview.date = date
+    if (time) interview.time = time
+    if (typeof document === 'string') interview.document = document
+    await interview.save()
+
+    const interviewLink = `https://www.airuter.com/interview/${interview.roomId}`
+
+    // Notify the applicant
+    await sendEmail({
+      to: application.applicant.email,
+      subject: "Mock Interview Rescheduled",
+      text: `Your mock interview for ${application.job.title} has been rescheduled to ${date} at ${time}.\n\nJoin link: ${interviewLink}`,
+      interviewLink,
+    })
+
+    res.json({
+      success: true,
+      message: "Interview rescheduled successfully!",
+      interviewLink,
+    })
+  } catch (error) {
+    console.error("[Reschedule Interview] Error:", error)
+    res.status(500).json({ message: error.message })
+  }
+}
+
 exports.getInterviewDetails = async (req, res) => {
   console.log("[Get Interview Details] Request received for room ID:", req.params.roomId)
   try {

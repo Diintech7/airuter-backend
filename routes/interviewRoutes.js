@@ -12,10 +12,12 @@ const {
   getInterviewByApplicationId,
   getInterviewRecordingsByRoomId,
   generateAdaptiveQuestion, // Add the new function
+  rescheduleInterview,
 } = require("../controllers/interviewController")
 
 // Existing routes...
 router.post("/schedule", scheduleInterview)
+router.post("/reschedule", rescheduleInterview)
 router.get("/details/:roomId", getInterviewDetails)
 router.get("/questions/:roomId", getInterviewQuestions)
 router.post("/response/:roomId", submitResponse)

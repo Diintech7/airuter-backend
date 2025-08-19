@@ -51,6 +51,7 @@ exports.getMyApplications = async (req, res) => {
         console.log('Warning: Application missing job reference:', app._id);
         return {
           _id: app._id,
+          jobId: null,
           job: {
             title: 'Job No Longer Available',
             company: 'Unknown Company',
@@ -72,7 +73,10 @@ exports.getMyApplications = async (req, res) => {
       // Normal case where job exists
       return {
         _id: app._id,
+        jobId: app.job._id,
         job: {
+          _id: app.job._id,
+          id: app.job._id,
           title: app.job.title || 'No Title',
           company: app.job.company || 'No Company',
           location: app.job.location || 'Remote',
