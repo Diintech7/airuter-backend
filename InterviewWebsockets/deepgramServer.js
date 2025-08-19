@@ -11,7 +11,7 @@ const setupDeepgramServer = (wss) => {
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ 
           type: 'transcript', 
-          transcript 
+          data: transcript  // Changed from 'transcript' to 'data' to match frontend expectation
         }));
       }
     };

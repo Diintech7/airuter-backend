@@ -42,8 +42,20 @@ class DeepgramClient {
 
             if (data && data.channel?.alternatives?.[0]?.transcript) {
               const transcript = data.channel.alternatives[0].transcript.trim();
-              if (transcript && this.onTranscript) {
-                this.onTranscript(transcript);
+              
+              // Filter out very short or low-quality transcriptions
+              if (transcript.length < 3) {
+                return;
+              }
+              
+              // Check if this is a final result or interim
+              const isFinal = data.is_final || false;
+              
+              // Only send final results or meaningful interim results
+              if (isFinal || transcript.length > 10) {
+                if (transcript && this.onTranscript) {
+                  this.onTranscript(transcript);
+                }
               }
             }
           } catch (parseError) {
